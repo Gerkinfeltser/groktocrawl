@@ -110,6 +110,40 @@ class MapResponse(BaseModel):
     links: list[str] = Field(default_factory=list)
 
 
+class BrowserCreateRequest(BaseModel):
+    ttl: int = Field(default=300, ge=30, le=3600, description="Session TTL in seconds")
+
+
+class BrowserExecuteRequest(BaseModel):
+    action: str = Field(..., description="Action: navigate, click, type, screenshot, scroll, wait, getContent, executeScript")
+    url: str | None = None
+    selector: str | None = None
+    text: str | None = None
+    script: str | None = None
+    timeout: int = 10000
+
+
+class BrowserCreateResponse(BaseModel):
+    success: bool = True
+    id: str
+
+
+class BrowserExecuteResponse(BaseModel):
+    success: bool = True
+    result: Any = None
+    error: str | None = None
+
+
+class BrowserListResponse(BaseModel):
+    success: bool = True
+    sessions: list[dict] = Field(default_factory=list)
+
+
+class BrowserDeleteResponse(BaseModel):
+    success: bool = True
+    id: str
+
+
 class ExtractRequest(BaseModel):
     urls: list[str] = Field(..., min_length=1, description="URLs to extract data from")
     prompt: str | None = Field(None, max_length=10000, description="Optional instruction for extraction")
