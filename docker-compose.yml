@@ -94,5 +94,14 @@ services:
       - HOST=0.0.0.0
       - PORT=8080
 
+  ofelia:
+    image: mcuadros/ofelia:latest
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /Users/magnus/.hermes/ofelia-config.ini:/etc/ofelia/config.ini:ro
+    depends_on:
+      - agent-svc
+
 volumes:
   valkey_data:

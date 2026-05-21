@@ -2,7 +2,7 @@
 
 **Self-hosted, API-compatible Firecrawl alternative with Agent endpoint. MIT licensed. One `docker compose up` and you're running.**
 
-GroktoCrawl implements the Firecrawl v2 API surface — scrape, search, map, crawl, and the **Agent** endpoint (autonomous web research) — without the closed-source dependencies. Runs entirely in Docker on your own hardware. Bring your own LLM or use the built-in fixtures.
+GroktoCrawl implements the Firecrawl v2 API surface — scrape, search, map, crawl, extract, browser sessions, monitors, and the **Agent** endpoint (autonomous web research) — without the closed-source dependencies. Runs entirely in Docker on your own hardware. Bring your own LLM or use the built-in fixtures.
 
 ## Quick Start
 
@@ -11,7 +11,7 @@ cp .env.sample .env
 docker compose up --build -d
 ```
 
-Six containers start. The default stack uses fixture services so everything works without API keys.
+Eight containers start. The stack includes SearXNG for real web search, a smart scraper, and an Ofelia-scheduled monitor system.
 
 ```bash
 # CLI
@@ -45,20 +45,23 @@ LLM_BASE_URL=http://host.docker.internal:11434/v1
 LLM_MODEL=llama3.2
 ```
 
-The stack includes **SearXNG** for real web search (enabled by default). Fixture services (`search-svc`, `llm-svc`, `test-site`) run only with `--profile fixture`.
-
 ## Architecture
 
 ```mermaid
 flowchart TD
     subgraph compose["docker-compose.yml"]
-        valkey[("valkey<br/>(queue)")]
+        valkey[("valkey<br/>(queue + storage)")]
         searxng["searxng<br/>(web search)"]
-        scraper("scraper-svc<br/>(smart fetch:<br/>llms.txt → markdown → playwright)")
-        agent("agent-svc<br/>(FastAPI + research worker)")
+        scraper("scraper-svc<br/>(smart fetch)")
+        browser["browser-svc<br/>(Playwright sessions)"]
+        agent("agent-svc<br/>(FastAPI + workers)")
+        ofelia["ofelia<br/>(cron scheduler)"]
+
         valkey --- agent
         searxng --- agent
         scraper --- agent
+        browser --- agent
+        ofelia -.->|docker exec| agent
     end
     llm_provider("LLM Provider<br/>(DeepSeek / OpenAI / Ollama)")
     llm_provider -.->|LLM_BASE_URL| agent
@@ -66,7 +69,9 @@ flowchart TD
     style valkey fill:#ffe0b0
     style searxng fill:#b0d4ff
     style scraper fill:#b0ffb0
+    style browser fill:#d4b0ff
     style agent fill:#ffb0b0
+    style ofelia fill:#b0b0b0
 ```
 
 The scraper uses a **three-tier strategy**: check `/llms.txt` first, try `Accept: text/markdown` second, render with Playwright third.
@@ -92,26 +97,41 @@ The scraper uses a **three-tier strategy**: check `/llms.txt` first, try `Accept
 | POST | `/v2/agent` | Start an autonomous research agent |
 | GET | `/v2/agent/:jobId` | Get agent job status and results |
 | DELETE | `/v2/agent/:jobId` | Cancel an agent job |
+| POST | `/v2/extract` | Extract structured data from URLs (with schema) |
+| GET | `/v2/extract/:jobId` | Get extract status and results |
 | POST | `/v2/crawl` | Crawl a website |
 | GET | `/v2/crawl/:jobId` | Get crawl status |
 | DELETE | `/v2/crawl/:jobId` | Cancel a crawl |
 | POST | `/v2/batch/scrape` | Scrape multiple URLs |
 | POST | `/v2/search` | Search the web with content |
 | POST | `/v2/map` | Discover URLs on a site |
+| POST | `/v2/browser` | Create a headless browser session |
+| GET | `/v2/browser` | List active browser sessions |
+| POST | `/v2/browser/:id/execute` | Execute action (navigate, click, screenshot, etc.) |
+| DELETE | `/v2/browser/:id` | Destroy a browser session |
+| POST | `/v2/monitor` | Create a scheduled change monitor |
+| GET | `/v2/monitor` | List all monitors |
+| GET | `/v2/monitor/:id` | Get monitor status and history |
+| PATCH | `/v2/monitor/:id` | Update monitor config |
+| DELETE | `/v2/monitor/:id` | Delete a monitor |
 
-All Firecrawl v2 API-compatible.
+All Firecrawl v2 API-compatible in request/response shape.
 
 ## Comparison to Firecrawl
 
 | Feature | Firecrawl Cloud | Firecrawl Self-Hosted | GroktoCrawl |
 |---------|----------------|----------------------|-------------|
-| Scrape / Crawl / Map | ✅ | ✅ | ✅ |
+| Scrape / Crawl / Map / Search | ✅ | ✅ | ✅ |
 | Agent endpoint | ✅ | ❌ (closed-source) | ✅ |
-| Browser sessions | ✅ | ❌ (closed-source) | Post-MVP |
+| Extract (schema-based) | ✅ | ❌ (closed-source) | ✅ |
+| Browser sessions | ✅ | ❌ (closed-source) | ✅ |
+| Scheduled monitors | ✅ | ❌ (closed-source) | ✅ |
+| Parse (PDF, DOCX) | ✅ | ✅ | [#4](https://github.com/groktopus/groktocrawl/issues/4) |
+| Webhook delivery | ✅ | ✅ | [#5](https://github.com/groktopus/groktocrawl/issues/5) |
 | License | Proprietary | AGPL-3.0 | **MIT** |
 | Self-contained Docker | ✅ | ⚠️ requires Supabase, Stripe | **✅ one file** |
 | LLM integration | Built-in | Requires API key | **BYO or fixture** |
 
 ## Project Status
 
-MVP. All core endpoints implemented and integration-tested. Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+Active development. All core Firecrawl v2 API endpoints implemented and integration-tested. See [issues](https://github.com/groktopus/groktocrawl/issues) for upcoming features. Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
