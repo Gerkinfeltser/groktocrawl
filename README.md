@@ -105,6 +105,7 @@ The scraper uses a **three-tier strategy**: check `/llms.txt` first, try `Accept
 | POST | `/v2/batch/scrape` | Scrape multiple URLs |
 | POST | `/v2/search` | Search the web with content |
 | POST | `/v2/map` | Discover URLs on a site |
+| POST | `/v2/parse` | Upload a file (PDF, DOCX, PPTX, XLSX) and get markdown back |
 | POST | `/v2/browser` | Create a headless browser session |
 | GET | `/v2/browser` | List active browser sessions |
 | POST | `/v2/browser/:id/execute` | Execute action (navigate, click, screenshot, etc.) |
@@ -126,7 +127,7 @@ All Firecrawl v2 API-compatible in request/response shape.
 | Extract (schema-based) | ✅ | ❌ (closed-source) | ✅ |
 | Browser sessions | ✅ | ❌ (closed-source) | ✅ |
 | Scheduled monitors | ✅ | ❌ (closed-source) | ✅ |
-| Parse (PDF, DOCX) | ✅ | ✅ | [#4](https://github.com/groktopus/groktocrawl/issues/4) |
+| Parse (PDF, DOCX) | ✅ | ✅ | ✅ |
 | Webhook delivery | ✅ | ✅ | [#5](https://github.com/groktopus/groktocrawl/issues/5) |
 | License | Proprietary | AGPL-3.0 | **MIT** |
 | Self-contained Docker | ✅ | ⚠️ requires Supabase, Stripe | **✅ one file** |

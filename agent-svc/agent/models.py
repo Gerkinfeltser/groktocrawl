@@ -197,3 +197,9 @@ class MonitorListResponse(BaseModel):
 
 class MonitorDeleteResponse(BaseModel):
     success: bool = True
+
+
+class ParseResponse(BaseModel):
+    success: bool
+    data: dict[str, Any] | None = None
+    error: str | None = None
