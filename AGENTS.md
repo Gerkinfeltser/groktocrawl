@@ -76,8 +76,9 @@ The integration tests in `tests/test_stack.py` verify all endpoints against a li
 
 1. Add the route handler in `agent-svc/agent/api.py`
 2. Add request/response models in `agent-svc/agent/models.py`
-3. Rebuild the agent-svc image
-4. Add a test case in `tests/test_stack.py`
+3. If the endpoint is async (returns a job ID), **it must accept a `webhook` field** and fire it on completion/failure via `deliver_webhook()` in `agent/webhook.py`
+4. Rebuild the agent-svc image
+5. Add a test case in `tests/test_stack.py`
 
 ## Environment Variables
 

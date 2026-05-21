@@ -64,6 +64,7 @@ curl http://localhost:8080/health
 - **Async/await** throughout (except RQ worker functions which are sync wrappers)
 - **MIT license** — all contributions are under this license
 - Keep dependencies minimal. Each service's `pyproject.toml` should list only what it needs.
+- **Webhook support required for all async endpoints** — any new endpoint that returns a job ID must accept a `webhook` field in its request and fire it on completion/failure via `deliver_webhook()` in `agent/webhook.py`. This ensures all async jobs are observable.
 
 ## Project Layout
 
