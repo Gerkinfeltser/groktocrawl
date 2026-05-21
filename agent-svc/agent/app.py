@@ -14,7 +14,22 @@ from .store import JobStore
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="GroktoCrawl", version="0.1.0")
+    app = FastAPI(
+        title="GroktoCrawl",
+        version="0.1.0",
+        description="Self-hosted, Firecrawl-compatible web scraping and AI research API. MIT licensed.",
+        servers=[
+            {"url": "http://localhost:8080", "description": "Local development"},
+        ],
+        contact={
+            "name": "GroktoCrawl",
+            "url": "https://github.com/groktopus/groktocrawl",
+        },
+        license_info={
+            "name": "MIT",
+            "url": "https://github.com/groktopus/groktocrawl/blob/main/LICENSE",
+        },
+    )
 
     redis_url = os.getenv("VALKEY_URL", "redis://valkey:6379/0")
     searxng_url = os.getenv("SEARXNG_URL", "http://searxng:8080")
