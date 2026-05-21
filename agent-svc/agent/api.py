@@ -24,8 +24,11 @@ from .models import (
     BrowserCreateRequest, BrowserCreateResponse,
     BrowserExecuteRequest, BrowserExecuteResponse,
     BrowserListResponse, BrowserDeleteResponse,
+    MonitorCreateRequest, MonitorUpdateRequest, MonitorResponse,
+    MonitorListResponse, MonitorDeleteResponse,
 )
 from .store import JobStore
+from .monitor import get_all_monitors, get_monitor, save_monitor, delete_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -270,3 +273,77 @@ async def destroy_browser(session_id: str):
     if not result.get("success"):
         raise HTTPException(status_code=404, detail="Session not found")
     return BrowserDeleteResponse(id=session_id)
+
+
+# ----- Monitor -----
+
+@router.post("/v2/monitor", response_model=MonitorResponse)
+async def create_monitor(body: MonitorCreateRequest):
+    import uuid
+    from datetime import datetime, timezone
+    monitor_id = str(uuid.uuid4())
+    config = {
+        "url": body.url,
+        "schedule": body.schedule,
+        "webhook": body.webhook,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "last_content": "",
+    }
+    save_monitor(monitor_id, config)
+    return MonitorResponse(
+        id=monitor_id, url=body.url, schedule=body.schedule,
+        webhook=body.webhook, created_at=config["created_at"],
+    )
+
+
+@router.get("/v2/monitor", response_model=MonitorListResponse)
+async def list_monitors():
+    monitors = get_all_monitors()
+    items = []
+    for mid, cfg in monitors.items():
+        items.append(MonitorResponse(
+            id=mid, url=cfg.get("url", ""), schedule=cfg.get("schedule", ""),
+            webhook=cfg.get("webhook"), last_checked=cfg.get("last_checked"),
+            last_result=cfg.get("last_result"), created_at=cfg.get("created_at", ""),
+        ))
+    return MonitorListResponse(monitors=items)
+
+
+@router.get("/v2/monitor/{monitor_id}", response_model=MonitorResponse)
+async def get_monitor_status(monitor_id: str):
+    cfg = get_monitor(monitor_id)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="Monitor not found")
+    return MonitorResponse(
+        id=monitor_id, url=cfg.get("url", ""), schedule=cfg.get("schedule", ""),
+        webhook=cfg.get("webhook"), last_checked=cfg.get("last_checked"),
+        last_result=cfg.get("last_result"), created_at=cfg.get("created_at", ""),
+    )
+
+
+@router.patch("/v2/monitor/{monitor_id}", response_model=MonitorResponse)
+async def update_monitor(monitor_id: str, body: MonitorUpdateRequest):
+    cfg = get_monitor(monitor_id)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="Monitor not found")
+    if body.url is not None:
+        cfg["url"] = body.url
+    if body.schedule is not None:
+        cfg["schedule"] = body.schedule
+    if body.webhook is not None:
+        cfg["webhook"] = body.webhook
+    save_monitor(monitor_id, cfg)
+    return MonitorResponse(
+        id=monitor_id, url=cfg.get("url", ""), schedule=cfg.get("schedule", ""),
+        webhook=cfg.get("webhook"), last_checked=cfg.get("last_checked"),
+        last_result=cfg.get("last_result"), created_at=cfg.get("created_at", ""),
+    )
+
+
+@router.delete("/v2/monitor/{monitor_id}", response_model=MonitorDeleteResponse)
+async def delete_monitor_route(monitor_id: str):
+    cfg = get_monitor(monitor_id)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="Monitor not found")
+    delete_monitor(monitor_id)
+    return MonitorDeleteResponse(success=True)

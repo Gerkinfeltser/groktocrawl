@@ -165,3 +165,35 @@ class ExtractStatusResponse(BaseModel):
     data: dict[str, Any] | None = None
     error: str | None = None
     expires_at: str | None = None
+
+
+class MonitorCreateRequest(BaseModel):
+    url: str = Field(..., description="URL to monitor for changes")
+    schedule: str = Field(default="0 */6 * * *", description="Cron expression for check frequency")
+    webhook: str | None = Field(None, description="Webhook URL called on change")
+
+
+class MonitorUpdateRequest(BaseModel):
+    url: str | None = None
+    schedule: str | None = None
+    webhook: str | None = None
+
+
+class MonitorResponse(BaseModel):
+    success: bool = True
+    id: str
+    url: str
+    schedule: str
+    webhook: str | None = None
+    last_checked: str | None = None
+    last_result: str | None = None
+    created_at: str
+
+
+class MonitorListResponse(BaseModel):
+    success: bool = True
+    monitors: list[MonitorResponse] = Field(default_factory=list)
+
+
+class MonitorDeleteResponse(BaseModel):
+    success: bool = True
