@@ -1,0 +1,602 @@
+#!/usr/bin/env python3
+"""groktocrawl — CLI for GroktoCrawl self-hosted web scraping API.
+
+Usage: groktocrawl <command> [OPTIONS]
+
+Commands:
+  scrape   Scrape a single URL
+  search   Search the web
+  map      Discover URLs on a site
+  crawl    Crawl a website
+  agent    Start an autonomous research agent
+
+Global flags:
+  --server <url>   API URL (default: GROKTOCRAWL_API_URL env or http://localhost:8080)
+  --json           Machine-readable JSON output
+  --dry-run        Preview without executing
+  --quiet          Suppress non-essential output
+  --verbose        Diagnostic output to stderr
+
+Examples:
+  groktocrawl scrape https://example.com
+  groktocrawl search "raspberry pi 5" --limit 5 --json
+  groktocrawl map https://docs.example.com --limit 50
+  groktocrawl crawl https://docs.example.com --max-depth 2 --limit 20
+  groktocrawl agent "What are the key announcements from Google I/O 2025?"
+"""
+
+import argparse
+import json
+import os
+import sys
+import textwrap
+import time
+import warnings
+from typing import Any, Dict, List, Optional, Tuple
+
+warnings.simplefilter("ignore")
+
+
+def _get_default_server() -> str:
+    """Get server URL from env, ~/.hermes/.env, or default."""
+    # Check GROKTOCRAWL_API_URL first (new name)
+    env_val = os.getenv("GROKTOCRAWL_API_URL")
+    if env_val:
+        return env_val.rstrip("/")
+
+    # Fallback to FIRECRAWL_API_URL (backward compat)
+    env_val = os.getenv("FIRECRAWL_API_URL")
+    if env_val:
+        return env_val.rstrip("/")
+
+    # Read from ~/.hermes/.env
+    env_path = os.path.expanduser("~/.hermes/.env")
+    if os.path.isfile(env_path):
+        try:
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("export "):
+                        line = line[len("export "):]
+                    if line.startswith("GROKTOCRAWL_API_URL=") or line.startswith("FIRECRAWL_API_URL="):
+                        val = line.split("=", 1)[1].strip("\"'")
+                        if val:
+                            return val.rstrip("/")
+        except OSError:
+            pass
+    return "http://localhost:8080"
+
+
+DEFAULT_SERVER = _get_default_server()
+API_VERSION = "v2"
+POLL_INTERVAL = 2
+
+QUIET = False
+JSON_OUTPUT = False
+VERBOSE = False
+
+
+def log(msg: str) -> None:
+    if not QUIET and not JSON_OUTPUT:
+        print(msg)
+
+
+def warn(msg: str) -> None:
+    print(f"Warning: {msg}", file=sys.stderr)
+
+
+def die(msg: str, exit_code: int = 1) -> None:
+    print(f"Error: {msg}", file=sys.stderr)
+    sys.exit(exit_code)
+
+
+def info(msg: str) -> None:
+    if VERBOSE:
+        print(f"[info] {msg}", file=sys.stderr)
+
+
+def emit(human: str, machine: Any) -> None:
+    if JSON_OUTPUT:
+        print(json.dumps(machine))
+    else:
+        print(human)
+
+
+class ApiError(Exception):
+    pass
+
+
+class Client:
+    """GroktoCrawl API client."""
+
+    def __init__(self, server: str = "", dry_run: bool = False):
+        self.server = (server or DEFAULT_SERVER).rstrip("/")
+        self.dry_run = dry_run
+        self.api_version = API_VERSION
+
+    def _url(self, path: str) -> str:
+        return f"{self.server}/{self.api_version}{path}"
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        json_data: Optional[Dict] = None,
+        params: Optional[Dict] = None,
+    ) -> Dict[str, Any]:
+        import requests
+
+        url = self._url(path)
+
+        if self.dry_run:
+            return {
+                "dry_run": True,
+                "method": method.upper(),
+                "url": url,
+                "params": params,
+                "json": json_data,
+            }
+
+        try:
+            resp = requests.request(
+                method=method,
+                url=url,
+                params=params,
+                json=json_data,
+                timeout=120,
+            )
+        except requests.ConnectionError as e:
+            raise ApiError(
+                f"Cannot connect to {self.server}: {e}\n"
+                f"  Is the server running? Set --server or GROKTOCRAWL_API_URL"
+            )
+
+        if resp.status_code == 204:
+            return {}
+
+        try:
+            body = resp.json()
+        except (json.JSONDecodeError, ValueError):
+            body = {"raw": resp.text[:500]}
+
+        if resp.status_code >= 400:
+            detail = body.get("detail", body.get("error", body.get("message", str(body))))
+            raise ApiError(f"API error ({resp.status_code}): {detail}")
+
+        return body
+
+    def scrape(
+        self,
+        url: str,
+        formats: Optional[List[str]] = None,
+        only_main_content: bool = True,
+        timeout: int = 60000,
+        **extra: Any,
+    ) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "url": url,
+            "formats": formats or ["markdown"],
+            "onlyMainContent": only_main_content,
+            "timeout": timeout,
+        }
+        data.update(extra)
+        return self._request("POST", "/scrape", json_data=data)
+
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        scrape: bool = False,
+    ) -> Dict[str, Any]:
+        data: Dict[str, Any] = {"query": query, "limit": limit}
+        if scrape:
+            data["scrapeOptions"] = {"formats": ["markdown"]}
+        return self._request("POST", "/search", json_data=data)
+
+    def map_urls(
+        self,
+        url: str,
+        limit: int = 200,
+        search: Optional[str] = None,
+        **extra: Any,
+    ) -> Dict[str, Any]:
+        data: Dict[str, Any] = {"url": url, "limit": limit}
+        if search:
+            data["search"] = search
+        data.update(extra)
+        return self._request("POST", "/map", json_data=data)
+
+    def crawl(
+        self,
+        url: str,
+        limit: int = 50,
+        max_depth: int = 2,
+        include_paths: Optional[List[str]] = None,
+        exclude_paths: Optional[List[str]] = None,
+        **extra: Any,
+    ) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "url": url,
+            "limit": limit,
+            "maxDepth": max_depth,
+        }
+        if include_paths:
+            data["includePaths"] = include_paths
+        if exclude_paths:
+            data["excludePaths"] = exclude_paths
+        data.update(extra)
+        return self._request("POST", "/crawl", json_data=data)
+
+    def crawl_status(self, job_id: str) -> Dict[str, Any]:
+        return self._request("GET", f"/crawl/{job_id}")
+
+    def get_active_crawls(self) -> Dict[str, Any]:
+        return self._request("GET", "/crawl/active")
+
+    def create_agent(
+        self,
+        prompt: str,
+        urls: Optional[List[str]] = None,
+        schema: Optional[Dict] = None,
+    ) -> Dict[str, Any]:
+        data: Dict[str, Any] = {"prompt": prompt}
+        if urls:
+            data["urls"] = urls
+        if schema:
+            data["schema"] = schema
+        return self._request("POST", "/agent", json_data=data)
+
+    def agent_status(self, job_id: str) -> Dict[str, Any]:
+        return self._request("GET", f"/agent/{job_id}")
+
+    def cancel_agent(self, job_id: str) -> Dict[str, Any]:
+        return self._request("DELETE", f"/agent/{job_id}")
+
+
+# === CLI Handlers ===
+
+
+def cmd_scrape(client: Client, args: argparse.Namespace) -> None:
+    if client.dry_run:
+        emit(f"[dry-run] Would scrape: {args.url}", {"dry_run": True, "command": "scrape", "url": args.url})
+        return
+
+    try:
+        result = client.scrape(url=args.url, formats=args.format, only_main_content=args.only_main_content, timeout=args.timeout)
+    except ApiError as e:
+        die(str(e))
+
+    if not result.get("success"):
+        die(f"Scrape failed: {result.get('error', 'unknown error')}")
+
+    data = result.get("data", {})
+    if JSON_OUTPUT:
+        emit("", data)
+        return
+
+    markdown = data.get("markdown", "")
+    text = data.get("text", "")
+    content = markdown or text or "(no content)"
+
+    if args.output:
+        with open(args.output, "w") as f:
+            f.write(content)
+    else:
+        print(content.rstrip())
+
+
+def cmd_search(client: Client, args: argparse.Namespace) -> None:
+    if client.dry_run:
+        emit(f"[dry-run] Would search: {args.query}", {"dry_run": True, "command": "search", "query": args.query})
+        return
+
+    try:
+        result = client.search(query=args.query, limit=args.limit, scrape=args.scrape_results)
+    except ApiError as e:
+        die(str(e))
+
+    data = result.get("data", [])
+    if not isinstance(data, list):
+        data = []
+
+    if JSON_OUTPUT:
+        emit("", {"results": data, "query": args.query})
+        return
+
+    if not data:
+        log(f"No results for '{args.query}'")
+        return
+
+    print(f"Search results for: {args.query}\n")
+    for i, item in enumerate(data[:args.limit], 1):
+        if isinstance(item, dict):
+            title = item.get("title", "(no title)")
+            url = item.get("url", "")
+            desc = item.get("description", "")
+            print(f"{i}. {title}")
+            if url:
+                print(f"   {url}")
+            if desc:
+                print(f"   {desc[:150]}")
+            print()
+
+
+def cmd_map(client: Client, args: argparse.Namespace) -> None:
+    if client.dry_run:
+        emit(f"[dry-run] Would map: {args.url}", {"dry_run": True, "command": "map", "url": args.url})
+        return
+
+    try:
+        result = client.map_urls(url=args.url, limit=args.limit, search=args.search)
+    except ApiError as e:
+        die(str(e))
+
+    if not result.get("success"):
+        die(f"Map failed: {result.get('error', 'unknown error')}")
+
+    links = result.get("links", [])
+    if not isinstance(links, list):
+        data = result.get("data", {})
+        links = data.get("links", [])
+
+    if JSON_OUTPUT:
+        emit("", {"urls": links, "count": len(links), "source_url": args.url})
+        return
+
+    if not links:
+        log(f"No URLs found for {args.url}")
+        return
+
+    print(f"Found {len(links)} URLs on {args.url}:\n")
+    for link in links:
+        print(f"  {link}")
+    print()
+
+
+def cmd_crawl(client: Client, args: argparse.Namespace) -> None:
+    if client.dry_run:
+        emit(f"[dry-run] Would crawl: {args.url}", {"dry_run": True, "command": "crawl"})
+        return
+
+    try:
+        result = client.crawl(url=args.url, limit=args.limit, max_depth=args.max_depth, include_paths=args.include_paths, exclude_paths=args.exclude_paths)
+    except ApiError as e:
+        die(str(e))
+
+    job_id = result.get("id", "")
+    if not job_id:
+        die("No job ID returned")
+
+    info(f"Crawl started: {job_id}")
+
+    if args.no_poll:
+        if JSON_OUTPUT:
+            emit(f"Crawl job ID: {job_id}", {"job_id": job_id, "status": "started"})
+        else:
+            log(f"Crawl job ID: {job_id}")
+        return
+
+    log(f"Crawl job {job_id} — polling...")
+    while True:
+        time.sleep(POLL_INTERVAL)
+        try:
+            status = client.crawl_status(job_id)
+        except ApiError as e:
+            warn(f"Status check failed: {e}")
+            continue
+
+        s = status.get("status", "unknown")
+        if s in ("completed", "finished"):
+            pages = status.get("data", status.get("pages", []))
+            if JSON_OUTPUT:
+                emit("", {"job_id": job_id, "status": "completed", "pages": pages})
+            else:
+                print(f"\nCrawl completed — {len(pages)} pages:\n")
+                for page in pages:
+                    u = page.get("url", page.get("metadata", {}).get("sourceURL", "?"))
+                    print(f"  {u}")
+            return
+        elif s in ("failed", "error"):
+            die(f"Crawl failed: {status.get('error', 'unknown')}")
+        else:
+            info(f"  Status: {s}")
+
+
+def cmd_agent(client: Client, args: argparse.Namespace) -> None:
+    if client.dry_run:
+        emit(f"[dry-run] Would start agent: {args.prompt}", {"dry_run": True, "command": "agent"})
+        return
+
+    try:
+        result = client.create_agent(prompt=args.prompt, urls=args.urls, schema=None)
+    except ApiError as e:
+        die(str(e))
+
+    job_id = result.get("id", "")
+    if not job_id:
+        die("No job ID returned")
+
+    if args.no_poll:
+        if JSON_OUTPUT:
+            emit(f"Agent job: {job_id}", {"job_id": job_id, "status": "started"})
+        else:
+            log(f"Agent job ID: {job_id}")
+        return
+
+    log(f"Agent job {job_id} — researching...")
+    while True:
+        time.sleep(POLL_INTERVAL)
+        try:
+            status = client.agent_status(job_id)
+        except ApiError as e:
+            warn(f"Status check failed: {e}")
+            continue
+
+        s = status.get("status", "unknown")
+        if s == "completed":
+            data = status.get("data", {})
+            if JSON_OUTPUT:
+                emit("", {"job_id": job_id, "status": "completed", "result": data})
+            else:
+                result_text = data.get("result", "(no result)")
+                sources = data.get("sources", [])
+                print(f"\n{result_text}\n")
+                if sources:
+                    print("Sources:")
+                    for src in sources:
+                        print(f"  {src}")
+            return
+        elif s == "failed":
+            die(f"Agent failed: {status.get('error', 'unknown')}")
+        else:
+            info(f"  Status: {s}")
+
+
+def cmd_active(client: Client, args: argparse.Namespace) -> None:
+    if client.dry_run:
+        emit("[dry-run] Would list active crawls", {"dry_run": True, "command": "active"})
+        return
+
+    try:
+        result = client.get_active_crawls()
+    except ApiError as e:
+        die(str(e))
+
+    active = result.get("data", [])
+    if not isinstance(active, list):
+        active = []
+
+    if JSON_OUTPUT:
+        emit("", {"active_crawls": active})
+        return
+
+    if not active:
+        log("No active crawl jobs")
+        return
+
+    print(f"Active crawl jobs ({len(active)}):\n")
+    for job in active:
+        print(f"  {job.get('id','?')}  [{job.get('status','?')}]")
+
+
+def make_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="groktocrawl",
+        description="CLI for GroktoCrawl — self-hosted web scraping and AI research API",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+            Examples:
+              groktocrawl scrape https://example.com
+              groktocrawl search "raspberry pi 5" --limit 5 --json
+              groktocrawl map https://docs.example.com --limit 50
+              groktocrawl crawl https://docs.example.com --max-depth 2 --limit 20
+              groktocrawl agent "What is new in Google I/O 2025?"
+        """),
+    )
+
+    parser.add_argument("--server", default="", help="API URL (default: GROKTOCRAWL_API_URL env or http://localhost:8080)")
+    parser.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    parser.add_argument("--dry-run", action="store_true", help="Preview without executing")
+    parser.add_argument("--quiet", action="store_true", help="Suppress non-essential output")
+    parser.add_argument("--verbose", action="store_true", help="Diagnostic output to stderr")
+
+    subparsers = parser.add_subparsers(dest="command", help="Command to execute")
+
+    p_scrape = subparsers.add_parser("scrape", help="Scrape a single URL")
+    p_scrape.add_argument("url", help="URL to scrape")
+    p_scrape.add_argument("--format", "-f", nargs="+", default=["markdown"], choices=["markdown", "html", "rawHtml", "links", "screenshot", "json", "text"], help="Output formats (default: markdown)")
+    p_scrape.add_argument("--only-main-content", action="store_true", default=True, help="Return only main content")
+    p_scrape.add_argument("--include-all-content", dest="only_main_content", action="store_false", help="Include navigation, sidebars, etc.")
+    p_scrape.add_argument("--timeout", type=int, default=60000, help="Request timeout in ms")
+    p_scrape.add_argument("-o", "--output", help="Write output to file instead of stdout")
+
+    p_search = subparsers.add_parser("search", help="Search the web")
+    p_search.add_argument("query", help="Search query")
+    p_search.add_argument("--limit", "-l", type=int, default=5, help="Max results (default: 5)")
+    p_search.add_argument("--scrape-results", action="store_true", help="Also scrape each result for full content")
+
+    p_map = subparsers.add_parser("map", help="Discover URLs on a site")
+    p_map.add_argument("url", help="Site URL to map")
+    p_map.add_argument("--limit", "-l", type=int, default=200, help="Max URLs to return (default: 200)")
+    p_map.add_argument("--search", "-s", help="Filter mapped URLs by search term")
+
+    p_crawl = subparsers.add_parser("crawl", help="Crawl a website")
+    p_crawl.add_argument("url", help="Site URL to crawl")
+    p_crawl.add_argument("--limit", "-l", type=int, default=50, help="Max pages to crawl (default: 50)")
+    p_crawl.add_argument("--max-depth", "-d", type=int, default=2, help="Max crawl depth (default: 2)")
+    p_crawl.add_argument("--include-paths", nargs="+", help="URL path patterns to include")
+    p_crawl.add_argument("--exclude-paths", nargs="+", help="URL path patterns to exclude")
+    p_crawl.add_argument("--no-poll", action="store_true", help="Don't poll for completion")
+
+    p_agent = subparsers.add_parser("agent", help="Start an autonomous research agent")
+    p_agent.add_argument("prompt", help="Research prompt/question")
+    p_agent.add_argument("--urls", nargs="+", help="Seed URLs to focus research")
+    p_agent.add_argument("--no-poll", action="store_true", help="Don't poll for results")
+
+    p_active = subparsers.add_parser("active", help="List active crawl jobs")
+    return parser
+
+
+def global_pre_parse(argv: List[str]) -> Tuple[Dict[str, Any], List[str]]:
+    GLOBAL_BOOLS = {"--json", "--dry-run", "--quiet", "--verbose"}
+    GLOBAL_VALUES = {"--server"}
+    globals_map: Dict[str, Any] = {}
+    filtered: List[str] = []
+    skip = 0
+    for i, arg in enumerate(argv):
+        if skip > 0:
+            skip -= 1
+            continue
+        if arg in GLOBAL_BOOLS:
+            globals_map[arg.lstrip("-").replace("-", "_")] = True
+        elif arg in GLOBAL_VALUES:
+            if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                globals_map[arg.lstrip("-").replace("-", "_")] = argv[i + 1]
+                skip = 1
+            else:
+                globals_map[arg.lstrip("-").replace("-", "_")] = ""
+        else:
+            filtered.append(arg)
+    return globals_map, filtered
+
+
+def main() -> None:
+    global QUIET, JSON_OUTPUT, VERBOSE
+
+    global_flags, filtered_argv = global_pre_parse(sys.argv)
+    parser = make_parser()
+    args = parser.parse_args(filtered_argv[1:])
+
+    QUIET = args.quiet or global_flags.get("quiet", False)
+    JSON_OUTPUT = args.json or global_flags.get("json", False)
+    VERBOSE = args.verbose or global_flags.get("verbose", False)
+    server = args.server or global_flags.get("server", "")
+
+    if JSON_OUTPUT:
+        warnings.simplefilter("ignore")
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    dry_run = args.dry_run or global_flags.get("dry_run", False)
+    client = Client(server=server, dry_run=dry_run)
+
+    dispatch = {
+        "scrape": cmd_scrape,
+        "search": cmd_search,
+        "map": cmd_map,
+        "crawl": cmd_crawl,
+        "agent": cmd_agent,
+        "active": cmd_active,
+    }
+
+    handler = dispatch.get(args.command)
+    if handler:
+        handler(client, args)
+    else:
+        die(f"Unknown command: {args.command}")
+
+
+if __name__ == "__main__":
+    main()
