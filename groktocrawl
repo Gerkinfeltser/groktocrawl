@@ -252,6 +252,31 @@ class Client:
     def cancel_agent(self, job_id: str) -> Dict[str, Any]:
         return self._request("DELETE", f"/agent/{job_id}")
 
+    def create_extract(self, urls, prompt=None, schema=None):
+        data = {"urls": urls}
+        if prompt:
+            data["prompt"] = prompt
+        if schema:
+            data["schema"] = schema
+        return self._request("POST", "/extract", json_data=data)
+
+    def extract_status(self, job_id):
+        return self._request("GET", f"/extract/{job_id}")
+
+    def create_browser(self, ttl=300):
+        return self._request("POST", "/browser", json_data={"ttl": ttl})
+
+    def browser_execute(self, session_id, action, **kwargs):
+        data = {"action": action}
+        data.update(kwargs)
+        return self._request("POST", f"/browser/{session_id}/execute", json_data=data)
+
+    def list_browsers(self):
+        return self._request("GET", "/browser")
+
+    def destroy_browser(self, session_id):
+        return self._request("DELETE", f"/browser/{session_id}")
+
 
 # === CLI Handlers ===
 
@@ -452,6 +477,113 @@ def cmd_agent(client: Client, args: argparse.Namespace) -> None:
             info(f"  Status: {s}")
 
 
+
+def cmd_extract(client: Client, args: argparse.Namespace) -> None:
+    if client.dry_run:
+        emit(f"[dry-run] Would extract from {args.urls}", {"dry_run": True, "command": "extract"})
+        return
+
+    try:
+        result = client.create_extract(urls=args.urls, prompt=args.prompt, schema=None)
+    except ApiError as e:
+        die(str(e))
+
+    job_id = result.get("id", "")
+    if not job_id:
+        die("No job ID returned")
+
+    if args.no_poll:
+        if JSON_OUTPUT:
+            emit(f"Extract job: {job_id}", {"job_id": job_id, "status": "started"})
+        else:
+            log(f"Extract job ID: {job_id}")
+        return
+
+    log(f"Extract job {job_id} — extracting...")
+    while True:
+        time.sleep(POLL_INTERVAL)
+        try:
+            status = client.extract_status(job_id)
+        except ApiError as e:
+            warn(f"Status check failed: {e}")
+            continue
+
+        s = status.get("status", "unknown")
+        if s == "completed":
+            data = status.get("data", {})
+            if JSON_OUTPUT:
+                emit("", {"job_id": job_id, "status": "completed", "result": data})
+            else:
+                result_text = data.get("result", "(no result)")
+                sources = data.get("sources", [])
+                print(f"\n{result_text}\n")
+                if sources:
+                    print("Sources:")
+                    for src in sources:
+                        print(f"  {src}")
+            return
+        elif s == "failed":
+            die(f"Extract failed: {status.get('error', 'unknown')}")
+        else:
+            info(f"  Status: {s}")
+
+
+def cmd_browser(client: Client, args: argparse.Namespace) -> None:
+    if args.command_action == "create":
+        if client.dry_run:
+            emit("[dry-run] Would create browser session", {"dry_run": True, "command": "browser", "action": "create"})
+            return
+        result = client.create_browser(ttl=args.ttl)
+        if JSON_OUTPUT:
+            emit("", {"session_id": result.get("id", ""), "status": "created"})
+        else:
+            log(f"Browser session: {result.get('id', '')}")
+    elif args.command_action == "exec":
+        if client.dry_run:
+            emit(f"[dry-run] Would execute {args.action} in session {args.session_id}", {"dry_run": True, "command": "browser", "action": "execute"})
+            return
+        kwargs = {}
+        if args.url:
+            kwargs["url"] = args.url
+        if args.selector:
+            kwargs["selector"] = args.selector
+        if args.text:
+            kwargs["text"] = args.text
+        if args.script:
+            kwargs["script"] = args.script
+        result = client.browser_execute(args.session_id, args.action, **kwargs)
+        if JSON_OUTPUT:
+            emit("", result)
+        else:
+            if result.get("result"):
+                print(json.dumps(result["result"], indent=2))
+            if result.get("error"):
+                print(f"Error: {result['error']}")
+    elif args.command_action == "list":
+        if client.dry_run:
+            emit("[dry-run] Would list browser sessions", {"dry_run": True, "command": "browser", "action": "list"})
+            return
+        result = client.list_browsers()
+        sessions = result.get("sessions", [])
+        if JSON_OUTPUT:
+            emit("", {"sessions": sessions})
+        else:
+            if not sessions:
+                log("No active browser sessions")
+            else:
+                for s in sessions:
+                    print(f"  {s['id']}  [{s['age_seconds']}s / TTL: {s['ttl']}s]")
+    elif args.command_action == "destroy":
+        if client.dry_run:
+            emit(f"[dry-run] Would destroy session {args.session_id}", {"dry_run": True, "command": "browser", "action": "destroy"})
+            return
+        result = client.destroy_browser(args.session_id)
+        if JSON_OUTPUT:
+            emit("", result)
+        else:
+            log(f"Session {args.session_id} destroyed")
+
+
 def cmd_active(client: Client, args: argparse.Namespace) -> None:
     if client.dry_run:
         emit("[dry-run] Would list active crawls", {"dry_run": True, "command": "active"})
@@ -533,6 +665,30 @@ def make_parser() -> argparse.ArgumentParser:
     p_agent.add_argument("--urls", nargs="+", help="Seed URLs to focus research")
     p_agent.add_argument("--no-poll", action="store_true", help="Don't poll for results")
 
+    p_extract = subparsers.add_parser("extract", help="Extract structured data from URLs")
+    p_extract.add_argument("urls", nargs="+", help="URLs to extract data from")
+    p_extract.add_argument("--prompt", help="Extraction prompt")
+    p_extract.add_argument("--no-poll", action="store_true", help="Don't poll for results")
+
+    p_browser = subparsers.add_parser("browser", help="Manage browser sessions")
+    p_browser_sub = p_browser.add_subparsers(dest="command_action")
+
+    p_browser_create = p_browser_sub.add_parser("create", help="Create a browser session")
+    p_browser_create.add_argument("--ttl", type=int, default=300, help="Session TTL in seconds")
+
+    p_browser_exec = p_browser_sub.add_parser("exec", help="Execute an action in a session")
+    p_browser_exec.add_argument("session_id", help="Session ID")
+    p_browser_exec.add_argument("action", help="Action: navigate, click, type, screenshot, scroll, wait, getContent, executeScript")
+    p_browser_exec.add_argument("--url", help="URL for navigate action")
+    p_browser_exec.add_argument("--selector", help="CSS selector for click/type/wait")
+    p_browser_exec.add_argument("--text", help="Text for type action")
+    p_browser_exec.add_argument("--script", help="JavaScript for executeScript action")
+
+    p_browser_list = p_browser_sub.add_parser("list", help="List active sessions")
+
+    p_browser_destroy = p_browser_sub.add_parser("destroy", help="Destroy a session")
+    p_browser_destroy.add_argument("session_id", help="Session ID")
+
     p_active = subparsers.add_parser("active", help="List active crawl jobs")
     return parser
 
@@ -588,6 +744,8 @@ def main() -> None:
         "map": cmd_map,
         "crawl": cmd_crawl,
         "agent": cmd_agent,
+        "extract": cmd_extract,
+        "browser": cmd_browser,
         "active": cmd_active,
     }
 
