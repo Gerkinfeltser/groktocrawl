@@ -205,3 +205,22 @@ class ParseResponse(BaseModel):
     success: bool
     data: dict[str, Any] | None = None
     error: str | None = None
+
+
+class LLMsTextRequest(BaseModel):
+    url: str = Field(..., description="Site URL to generate llms.txt for")
+    max_pages: int = Field(default=50, ge=1, le=500, description="Max pages to scan")
+    webhook: dict[str, Any] | None = None
+
+
+class LLMsTextCreateResponse(BaseModel):
+    success: bool = True
+    id: str
+
+
+class LLMsTextStatusResponse(BaseModel):
+    success: bool = True
+    status: str = "processing"
+    data: dict[str, Any] | None = None
+    error: str | None = None
+    expires_at: str | None = None
