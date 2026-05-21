@@ -103,5 +103,12 @@ services:
     depends_on:
       - agent-svc
 
+  parse-svc:
+    build:
+      context: ./parse-svc
+    restart: unless-stopped
+    ports:
+      - "8013:8013"
+
 volumes:
   valkey_data:

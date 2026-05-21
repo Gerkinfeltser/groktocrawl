@@ -26,6 +26,7 @@ from .models import (
     BrowserListResponse, BrowserDeleteResponse,
     MonitorCreateRequest, MonitorUpdateRequest, MonitorResponse,
     MonitorListResponse, MonitorDeleteResponse,
+    ParseResponse,
 )
 from .store import JobStore
 from .monitor import get_all_monitors, get_monitor, save_monitor, delete_monitor
@@ -347,3 +348,31 @@ async def delete_monitor_route(monitor_id: str):
         raise HTTPException(status_code=404, detail="Monitor not found")
     delete_monitor(monitor_id)
     return MonitorDeleteResponse(success=True)
+
+
+# ----- Parse -----
+
+PARSE_SVC_URL = "http://parse-svc:8013"
+
+
+@router.post("/v2/parse", response_model=ParseResponse)
+async def parse_file(request: Request):
+    """Upload a file and get its content as markdown."""
+    import httpx
+
+    form = await request.form()
+    if "file" not in form:
+        raise HTTPException(status_code=400, detail="No file provided. Use multipart form with 'file' field.")
+
+    upload = form["file"]
+    content = await upload.read()
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(
+            f"{PARSE_SVC_URL}/parse",
+            files={"file": (upload.filename or "file", content, upload.content_type or "application/octet-stream")},
+        )
+        try:
+            return resp.json()
+        except Exception:
+            return ParseResponse(success=False, error=f"Parse service error: {resp.text[:200]}")
