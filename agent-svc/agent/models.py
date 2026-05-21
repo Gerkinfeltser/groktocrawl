@@ -60,6 +60,7 @@ class CrawlRequest(BaseModel):
     ignore_sitemap: bool = False
     include_paths: list[str] | None = None
     exclude_paths: list[str] | None = None
+    webhook: dict[str, Any] | None = None
 
 
 class CrawlCreateResponse(BaseModel):
@@ -80,6 +81,7 @@ class CrawlStatusResponse(BaseModel):
 class BatchScrapeRequest(BaseModel):
     urls: list[str]
     max_concurrency: int = 3
+    webhook: dict[str, Any] | None = None
 
 
 class SearchRequest(BaseModel):
