@@ -42,9 +42,6 @@ services:
     restart: unless-stopped
     ports:
       - "8001:8001"
-    environment:
-      - HOST=0.0.0.0
-      - PORT=8001
 
   agent-svc:
     build:
@@ -52,6 +49,8 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+    env_file:
+      - .env
     depends_on:
       valkey:
         condition: service_healthy
@@ -62,13 +61,10 @@ services:
       scraper-svc:
         condition: service_started
     environment:
-      - VALKEY_URL=redis://valkey:6379/0
-      - SEARXNG_URL=http://search-svc:8010
-      - SCRAPER_URL=http://scraper-svc:8001
-      - LLM_API_KEY=test-key
-      - LLM_BASE_URL=http://llm-svc:8011/v1
-      - LLM_MODEL=fixture-model
-      - API_KEY=
+      # Internal wiring — override via .env only if running services externally
+      - VALKEY_URL=${VALKEY_URL:-redis://valkey:6379/0}
+      - SEARXNG_URL=${SEARXNG_URL:-http://search-svc:8010}
+      - SCRAPER_URL=${SCRAPER_URL:-http://scraper-svc:8001}
       - HOST=0.0.0.0
       - PORT=8080
 

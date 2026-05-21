@@ -64,44 +64,53 @@ Implement the following Firecrawl v2 endpoints with matching request/response sc
 
 ### 2. Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     docker-compose.yml                       │
-│                                                             │
-│  ┌──────────┐   ┌──────────┐   ┌───────────────────────┐   │
-│  │ valkey   │   │ searxng  │   │ scraper-svc           │   │
-│  │ (queue)  │   │ (search) │   │ (playwright +         │   │
-│  │          │   │          │   │  crawl4ai)            │   │
-│  └────┬─────┘   └────┬─────┘   └──────────┬────────────┘   │
-│       │              │                     │                │
-│       └──────────────┼─────────────────────┘                │
-│                      │                                      │
-│  ┌───────────────────▼──────────────────────────────────┐   │
-│  │  agent-svc                                           │   │
-│  │                                                      │   │
-│  │  ┌──────────┐   ┌──────────┐                        │   │
-│  │  │  API     │──▶│ Worker   │  (research loop)        │   │
-│  │  │ (FastAPI)│   │          │                        │   │
-│  │  │ 3 routes │   │ search   │                        │   │
-│  │  │          │   │ → scrape │                        │   │
-│  │  │          │   │ → llm    │                        │   │
-│  │  │          │   │ → loop   │                        │   │
-│  │  └──────────┘   └──────────┘                        │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                                                             │
-│  LLM: via env vars (OPENAI_BASE_URL + OPENAI_API_KEY)      │
-│  → works with OpenAI, Anthropic, OpenRouter, Ollama, etc.   │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph docker_compose["docker-compose.yml"]
+        subgraph infra["Infrastructure"]
+            valkey[("valkey<br/>(queue)")]
+        end
+
+        subgraph fixtures["Fixture Services"]
+            search[("search-svc<br/>(local search index)")]
+            llm[("llm-svc<br/>(LLM mock)")]
+            test_site[("test-site<br/>(test website)")]
+        end
+
+        subgraph core["Core Services"]
+            scraper("scraper-svc<br/>(smart fetch:<br/>llms.txt → markdown → playwright)")
+            agent("agent-svc<br/>(FastAPI API + research worker)")
+        end
+
+        valkey --- agent
+        search --- agent
+        scraper --- agent
+        llm --- agent
+        test_site --- scraper
+    end
+
+    llm_provider("LLM Provider<br/>(OpenAI / Anthropic /<br/>OpenRouter / Ollama)")
+    llm -.->|LLM_BASE_URL + LLM_API_KEY| agent
+
+    style valkey fill:#ffe0b0,stroke:#d4a050,color:#333
+    style search fill:#b0d4ff,stroke:#5090d4,color:#333
+    style llm fill:#b0d4ff,stroke:#5090d4,color:#333
+    style test_site fill:#b0d4ff,stroke:#5090d4,color:#333
+    style scraper fill:#b0ffb0,stroke:#50d050,color:#333
+    style agent fill:#ffb0b0,stroke:#d05050,color:#333
+    style llm_provider fill:#e0e0e0,stroke:#888,color:#333
 ```
 
 #### Containers
 
 | Container | Base Image | Purpose |
 |-----------|-----------|---------|
-| `agent-svc` | python:3.13-slim | FastAPI server + RQ worker. Core application logic. |
-| `scraper-svc` | python:3.13 + playwright | URL → markdown. Three-tier fetch strategy. |
-| `searxng` | searxng/searxng | Web search. Self-contained, aggregates major engines. |
-| `valkey` | valkey/valkey:8-alpine | Job queue backend for RQ. |
+| `agent-svc` | python:3.13-slim | FastAPI server + async research worker. Core application logic. |
+| `scraper-svc` | python:3.13-slim + playwright | URL → markdown. Three-tier fetch strategy (llms.txt → Accept: markdown → Playwright). |
+| `search-svc` | python:3.13-slim | Local search fixture. Replaceable with SearXNG. |
+| `llm-svc` | python:3.13-slim | Deterministic OpenAI-compatible LLM fixture. Replaceable with any LLM endpoint. |
+| `valkey` | valkey/valkey:8-alpine | Job queue backend (future: persistent queue). |
+| `test-site` | python:3.13-slim | Fixture website for integration tests. |
 
 #### File Structure
 
@@ -116,13 +125,13 @@ groktocrawl/
 │   ├── pyproject.toml
 │   └── agent/
 │       ├── __init__.py
-│       ├── app.py            # FastAPI application
+│       ├── app.py            # FastAPI application entrypoint
 │       ├── api.py            # Route handlers
 │       ├── models.py         # Pydantic request/response schemas
-│       ├── worker.py         # RQ worker entrypoint
+│       ├── worker.py         # Job processing functions
 │       ├── research.py       # The agent research loop
 │       ├── scraper_client.py # HTTP client to scraper-svc
-│       ├── searxng_client.py # SearXNG JSON API client
+│       ├── searxng_client.py # Search API client
 │       ├── llm.py            # OpenAI-compatible LLM client
 │       └── store.py          # Job CRUD (valkey-backed)
 ├── scraper-svc/
@@ -130,13 +139,19 @@ groktocrawl/
 │   ├── pyproject.toml
 │   └── scraper/
 │       ├── __init__.py
-│       ├── app.py            # FastAPI, single endpoint
+│       ├── app.py            # FastAPI, single /scrape endpoint
 │       ├── fetch.py          # Three-tier fetch strategy
 │       └── extract.py        # HTML → markdown conversion
-└── sdk-examples/
-    ├── python.py
-    ├── curl.md
-    └── javascript.js
+├── search-svc/               # Local search fixture
+├── llm-svc/                  # OpenAI-compatible LLM fixture
+├── test-site/                # Fixture website for integration tests
+├── tests/
+│   └── test_stack.py         # Integration tests against Docker stack
+├── docker-compose.yml
+├── .env.sample
+├── LICENSE
+├── README.md
+└── VISION.md
 ```
 
 ### 3. The Smart Scraper (Three-Tier Strategy)
