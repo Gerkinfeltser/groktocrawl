@@ -1,0 +1,1 @@
+"""SearXNG JSON API client."""

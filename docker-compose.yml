@@ -1,0 +1,61 @@
+services:
+  valkey:
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    volumes:
+      - searxng_data:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+      - SEARXNG_SECRET=${SEARXNG_SECRET:-changeit}
+    cap_add:
+      - CAP_NET_BIND_SERVICE
+    cap_drop:
+      - ALL
+
+  scraper-svc:
+    build:
+      context: ./scraper-svc
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8001
+
+  agent-svc:
+    build:
+      context: ./agent-svc
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      valkey:
+        condition: service_healthy
+      searxng:
+        condition: service_started
+      scraper-svc:
+        condition: service_started
+    environment:
+      - VALKEY_URL=redis://valkey:6379/0
+      - SEARXNG_URL=http://searxng:8080
+      - SCRAPER_URL=http://scraper-svc:8001
+      - LLM_API_KEY=${LLM_API_KEY:?error}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.openai.com/v1}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
+      - API_KEY=${API_KEY:-}
+      - HOST=0.0.0.0
+      - PORT=8080
+
+volumes:
+  valkey_data:
+  searxng_data:

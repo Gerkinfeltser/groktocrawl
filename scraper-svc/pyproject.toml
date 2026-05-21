@@ -1,0 +1,15 @@
+[project]
+name = "scraper-svc"
+version = "0.1.0"
+description = "GroktoCrawl URL-to-markdown scraper service"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "playwright>=1.51.0",
+    "crawl4ai>=0.4.0",
+    "readability-lxml>=0.8.1",
+    "markdownify>=0.14.0",
+    "httpx>=0.28.0",
+    "beautifulsoup4>=4.13.0",
+]
