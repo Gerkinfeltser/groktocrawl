@@ -159,6 +159,61 @@ skills/groktocrawl/
 
 The skill bundles the CLI directly — no additional setup required beyond having the repo on disk.
 
+## Hermes Agent Considerations
+
+If you use Hermes Agent, GroktoCrawl replaces the built-in `web_search` and `web_extract` tools with more capable alternatives. To avoid competition between tools:
+
+### Disable the `web` toolset
+
+Remove `web` from `default_toolsets` and `platform_toolsets.cli` in `~/.hermes/config.yaml`:
+
+```yaml
+# Before
+default_toolsets:
+  - terminal
+  - file
+  - web              # ← remove
+
+# After
+default_toolsets:
+  - terminal
+  - file
+```
+
+This removes `web_search` and `web_extract` from your agent's toolset. All web tasks will route through `groktocrawl` instead.
+
+### Install the CLI
+
+The CLI is at `groktocrawl` in the repo root. Copy it to your PATH:
+
+```bash
+cp groktocrawl ~/.local/bin/
+```
+
+### Install the AgentSkills skill
+
+The bundled skill at `skills/groktocrawl/` follows the [AgentSkills](https://agentskills.io) spec. Symlink it into your Hermes skills directory:
+
+```bash
+ln -sf "$PWD/skills/groktocrawl" ~/.hermes/skills/
+```
+
+Then load it in-session with `/skill groktocrawl` or preload it via `hermes -s groktocrawl`.
+
+### Environment variables
+
+The CLI discovers the server in this order:
+1. `--server <url>` flag
+2. `GROKTOCRAWL_API_URL` env var
+3. `FIRECRAWL_API_URL` env var (backward compat)
+4. `~/.hermes/.env` file
+5. Default: `http://localhost:8080`
+
+Add to `~/.hermes/.env` if your instance runs elsewhere:
+```env
+GROKTOCRAWL_API_URL=http://localhost:8080
+```
+
 ## Project Status
 
 Active development. All core Firecrawl v2 API endpoints implemented and integration-tested. See [issues](https://github.com/groktopus/groktocrawl/issues) for upcoming features. Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
