@@ -10,12 +10,30 @@ services:
       timeout: 3s
       retries: 20
 
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    volumes:
+      - /Users/magnus/.hermes/searxng-settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8081/
+    cap_add:
+      - CAP_NET_BIND_SERVICE
+    cap_drop:
+      - ALL
+
   search-svc:
     build:
       context: ./search-svc
     restart: unless-stopped
     ports:
       - "8010:8010"
+    profiles:
+      - fixture
+    # Fixture service — only starts when explicitly needed.
+    # Production uses searxng instead.
 
   llm-svc:
     build:
@@ -23,6 +41,8 @@ services:
     restart: unless-stopped
     ports:
       - "8011:8011"
+    profiles:
+      - fixture
 
   test-site:
     build:
@@ -30,6 +50,8 @@ services:
     restart: unless-stopped
     ports:
       - "8005:8000"
+    profiles:
+      - fixture
     environment:
       - ENABLE_LLMS_TXT=1
       - ENABLE_MARKDOWN=1
@@ -54,16 +76,13 @@ services:
     depends_on:
       valkey:
         condition: service_healthy
-      search-svc:
-        condition: service_started
-      llm-svc:
+      searxng:
         condition: service_started
       scraper-svc:
         condition: service_started
     environment:
-      # Internal wiring — override via .env only if running services externally
       - VALKEY_URL=${VALKEY_URL:-redis://valkey:6379/0}
-      - SEARXNG_URL=${SEARXNG_URL:-http://search-svc:8010}
+      - SEARXNG_URL=${SEARXNG_URL:-http://searxng:8080}
       - SCRAPER_URL=${SCRAPER_URL:-http://scraper-svc:8001}
       - HOST=0.0.0.0
       - PORT=8080

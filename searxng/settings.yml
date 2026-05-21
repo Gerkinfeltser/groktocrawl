@@ -1,0 +1,30 @@
+# Minimal SearXNG configuration for GroktoCrawl
+# See https://docs.searxng.org/admin/settings/ for full reference
+
+use_default_settings: true
+
+server:
+  secret_key: "groktocrawl-secret-change-me"
+  bind_address: "0.0.0.0"
+  port: 8080
+  limiter: false
+  image_proxy: false
+  method: "GET"
+  allowed_origins:
+    - "*"
+
+search:
+  safe_search: 0
+  autocomplete: ""
+
+engines:
+  - name: duckduckgo
+    disabled: false
+  - name: google
+    disabled: false
+  - name: wikipedia
+    disabled: false
+  - name: duckduckgo definitions
+    disabled: true
+  - name: bing
+    disabled: true
