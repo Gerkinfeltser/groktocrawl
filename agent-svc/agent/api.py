@@ -80,6 +80,7 @@ async def create_agent(request: Request, body: AgentRequest):
             llm_model=request.app.state.llm_model,
             searxng_url=request.app.state.searxng_url,
             scraper_url=request.app.state.scraper_url,
+            webhook_config=body.webhook,
         )
     )
     return AgentCreateResponse(id=job_id)
@@ -114,7 +115,7 @@ async def create_crawl(request: Request, body: CrawlRequest):
     job_id = store.create_job(kind="crawl", payload=body.model_dump())
     import asyncio
     from .worker import _process_crawl_async
-    asyncio.create_task(_process_crawl_async(job_id=job_id, url=body.url, max_pages=body.max_pages, max_depth=body.max_depth, scraper_url=request.app.state.scraper_url))
+    asyncio.create_task(_process_crawl_async(job_id=job_id, url=body.url, max_pages=body.max_pages, max_depth=body.max_depth, scraper_url=request.app.state.scraper_url, webhook_config=body.webhook))
     return CrawlCreateResponse(id=job_id)
 
 
@@ -142,7 +143,7 @@ async def create_batch_scrape(request: Request, body: BatchScrapeRequest):
     job_id = store.create_job(kind="batch_scrape", payload=body.model_dump())
     import asyncio
     from .worker import _process_batch_scrape_async
-    asyncio.create_task(_process_batch_scrape_async(job_id=job_id, urls=body.urls, scraper_url=request.app.state.scraper_url))
+    asyncio.create_task(_process_batch_scrape_async(job_id=job_id, urls=body.urls, scraper_url=request.app.state.scraper_url, webhook_config=body.webhook))
     return CrawlCreateResponse(id=job_id)
 
 
@@ -178,6 +179,7 @@ async def create_extract(request: Request, body: ExtractRequest):
             job_id=job_id, urls=body.urls, prompt=body.prompt, schema_=body.schema_,
             llm_base_url=request.app.state.llm_base_url, llm_api_key=request.app.state.llm_api_key,
             llm_model=request.app.state.llm_model, scraper_url=request.app.state.scraper_url,
+            webhook_config=body.webhook,
         )
     )
     return ExtractCreateResponse(id=job_id)
