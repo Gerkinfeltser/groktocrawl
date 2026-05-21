@@ -126,6 +126,8 @@ All Firecrawl v2 API-compatible in request/response shape.
 | Extract (schema-based) | ✅ | ❌ (closed-source) | ✅ |
 | Browser sessions | ✅ | ❌ (closed-source) | ✅ |
 | Scheduled monitors | ✅ | ❌ (closed-source) | ✅ |
+| Parse (PDF, DOCX) | ✅ | ✅ | [#4](https://github.com/groktopus/groktocrawl/issues/4) |
+| Webhook delivery | ✅ | ✅ | [#5](https://github.com/groktopus/groktocrawl/issues/5) |
 | License | Proprietary | AGPL-3.0 | **MIT** |
 | Self-contained Docker | ✅ | ⚠️ requires Supabase, Stripe | **✅ one file** |
 | LLM integration | Built-in | Requires API key | **BYO or fixture** |
