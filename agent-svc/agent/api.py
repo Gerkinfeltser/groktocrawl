@@ -20,6 +20,7 @@ from .models import (
     BatchScrapeRequest,
     SearchRequest, SearchResponse, SearchResult,
     MapRequest, MapResponse,
+    ExtractRequest, ExtractCreateResponse, ExtractStatusResponse,
 )
 from .store import JobStore
 
@@ -157,6 +158,41 @@ async def search(request: Request, body: SearchRequest):
     finally:
         await searxng.close()
 
+
+@router.post("/v2/extract", response_model=ExtractCreateResponse)
+async def create_extract(request: Request, body: ExtractRequest):
+    """Extract structured data from provided URLs."""
+    store: JobStore = request.app.state.job_store
+    job_id = store.create_job(kind="extract", payload=body.model_dump(exclude_none=True, by_alias=True))
+    import asyncio
+    from .worker import _process_extract_async
+    asyncio.create_task(
+        _process_extract_async(
+            job_id=job_id, urls=body.urls, prompt=body.prompt, schema_=body.schema_,
+            llm_base_url=request.app.state.llm_base_url, llm_api_key=request.app.state.llm_api_key,
+            llm_model=request.app.state.llm_model, scraper_url=request.app.state.scraper_url,
+        )
+    )
+    return ExtractCreateResponse(id=job_id)
+
+
+@router.get("/v2/extract/{job_id}", response_model=ExtractStatusResponse)
+async def get_extract_status(request: Request, job_id: str):
+    """Get extract job status and results."""
+    store: JobStore = request.app.state.job_store
+    job = store.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return ExtractStatusResponse(
+        success=True,
+        status=job.get("status", "processing"),
+        data=job.get("data"),
+        error=job.get("error"),
+        expires_at=job.get("completed_at") or job.get("created_at"),
+    )
+
+
+# ----- Map -----
 
 @router.post("/v2/map", response_model=MapResponse)
 async def map_site(request: Request, body: MapRequest):

@@ -108,3 +108,26 @@ class MapRequest(BaseModel):
 class MapResponse(BaseModel):
     success: bool = True
     links: list[str] = Field(default_factory=list)
+
+
+class ExtractRequest(BaseModel):
+    urls: list[str] = Field(..., min_length=1, description="URLs to extract data from")
+    prompt: str | None = Field(None, max_length=10000, description="Optional instruction for extraction")
+    schema_: dict[str, Any] | None = Field(None, alias="schema", description="JSON Schema for structured output")
+    model: str = Field(default="default", description="Model hint")
+    webhook: dict[str, Any] | None = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ExtractCreateResponse(BaseModel):
+    success: bool = True
+    id: str
+
+
+class ExtractStatusResponse(BaseModel):
+    success: bool = True
+    status: str = "processing"  # processing | completed | failed
+    data: dict[str, Any] | None = None
+    error: str | None = None
+    expires_at: str | None = None
