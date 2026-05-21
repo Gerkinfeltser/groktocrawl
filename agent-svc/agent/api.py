@@ -27,6 +27,7 @@ from .models import (
     MonitorCreateRequest, MonitorUpdateRequest, MonitorResponse,
     MonitorListResponse, MonitorDeleteResponse,
     ParseResponse,
+    LLMsTextRequest, LLMsTextCreateResponse, LLMsTextStatusResponse,
 )
 from .store import JobStore
 from .monitor import get_all_monitors, get_monitor, save_monitor, delete_monitor
@@ -378,3 +379,37 @@ async def parse_file(request: Request):
             return resp.json()
         except Exception:
             return ParseResponse(success=False, error=f"Parse service error: {resp.text[:200]}")
+
+
+# ----- LLMs.txt Generator -----
+
+@router.post("/v2/generate-llmstxt", response_model=LLMsTextCreateResponse)
+async def create_llmstxt(request: Request, body: LLMsTextRequest):
+    """Generate an llms.txt file for a website."""
+    store: JobStore = request.app.state.job_store
+    job_id = store.create_job(kind="llmstxt", payload=body.model_dump())
+    import asyncio
+    from .worker import _process_llmstxt_async
+    asyncio.create_task(
+        _process_llmstxt_async(
+            job_id=job_id, url=body.url, max_pages=body.max_pages,
+            scraper_url=request.app.state.scraper_url, webhook_config=body.webhook,
+        )
+    )
+    return LLMsTextCreateResponse(id=job_id)
+
+
+@router.get("/v2/generate-llmstxt/{job_id}", response_model=LLMsTextStatusResponse)
+async def get_llmstxt_status(request: Request, job_id: str):
+    """Get llms.txt generation job status and results."""
+    store: JobStore = request.app.state.job_store
+    job = store.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return LLMsTextStatusResponse(
+        success=True,
+        status=job.get("status", "processing"),
+        data=job.get("data"),
+        error=job.get("error"),
+        expires_at=job.get("completed_at") or job.get("created_at"),
+    )

@@ -9,6 +9,7 @@ from .research import run_research, run_extract
 from .scraper_client import ScraperClient
 from .store import JobStore
 from .webhook import deliver_webhook
+from .llmstxt import generate_llmstxt as run_llmstxt
 
 logger = logging.getLogger(__name__)
 
@@ -117,5 +118,24 @@ async def _process_extract_async(
         await deliver_webhook(webhook_config, "completed", job_id, result)
     except Exception as e:
         logger.exception("Extract job %s failed", job_id)
+        store.fail_job(job_id, str(e))
+        await deliver_webhook(webhook_config, "failed", job_id, {"error": str(e)})
+
+
+async def _process_llmstxt_async(
+    job_id: str,
+    url: str,
+    max_pages: int,
+    scraper_url: str,
+    webhook_config: dict[str, Any] | None = None,
+) -> None:
+    store = JobStore(get_env("VALKEY_URL", "redis://valkey:6379/0"))
+    try:
+        from .llmstxt import generate_llmstxt
+        result = await generate_llmstxt(url, max_pages, scraper_url)
+        store.complete_job(job_id, result)
+        await deliver_webhook(webhook_config, "completed", job_id, result)
+    except Exception as e:
+        logger.exception("LLMs.txt job %s failed", job_id)
         store.fail_job(job_id, str(e))
         await deliver_webhook(webhook_config, "failed", job_id, {"error": str(e)})
