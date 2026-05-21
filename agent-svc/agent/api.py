@@ -1,1 +1,185 @@
-"""Route handlers implementing the Firecrawl-compatible API."""
+"""Route handlers implementing the GroktoCrawl API surface.
+
+Targets Firecrawl v2 API compatibility where possible.
+"""
+
+import logging
+from typing import Any
+
+from fastapi import APIRouter, Request, HTTPException
+from redis import Redis
+from rq import Queue
+from urllib.parse import urlparse
+from bs4 import BeautifulSoup
+import httpx
+
+from .models import (
+    AgentRequest, AgentCreateResponse, AgentStatusResponse, AgentCancelResponse,
+    ScrapeRequest, ScrapeResponse, ScrapeData,
+    CrawlRequest, CrawlCreateResponse, CrawlStatusResponse,
+    BatchScrapeRequest,
+    SearchRequest, SearchResponse, SearchResult,
+    MapRequest, MapResponse,
+)
+from .store import JobStore
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+
+def _enqueue(queue: Queue, func: str, **kwargs: Any) -> None:
+    queue.enqueue(func, **kwargs)
+
+
+@router.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@router.post("/v2/scrape", response_model=ScrapeResponse)
+async def scrape(request: Request, body: ScrapeRequest):
+    scraper = request.app.state.scraper_client
+    result = await scraper.scrape(body.url)
+    if result.get("success"):
+        return ScrapeResponse(
+            success=True,
+            data=ScrapeData(
+                markdown=result["data"].get("markdown", ""),
+                metadata={"source": result["data"].get("source", "unknown")},
+            ),
+        )
+    return ScrapeResponse(success=False, error=result.get("error", "Scrape failed"))
+
+
+@router.post("/v2/agent", response_model=AgentCreateResponse)
+async def create_agent(request: Request, body: AgentRequest):
+    store: JobStore = request.app.state.job_store
+    job_id = store.create_job(kind="agent", payload=body.model_dump(exclude_none=True, by_alias=True))
+
+    # Process inline (synchronous) for MVP — no RQ worker needed.
+    # A separate worker container can be added later for proper async.
+    import asyncio
+    from .worker import _process_agent_async
+    asyncio.create_task(
+        _process_agent_async(
+            job_id=job_id,
+            prompt=body.prompt,
+            urls=body.urls,
+            schema_=body.schema_,
+            llm_base_url=request.app.state.llm_base_url,
+            llm_api_key=request.app.state.llm_api_key,
+            llm_model=request.app.state.llm_model,
+            searxng_url=request.app.state.searxng_url,
+            scraper_url=request.app.state.scraper_url,
+        )
+    )
+    return AgentCreateResponse(id=job_id)
+
+
+@router.get("/v2/agent/{job_id}", response_model=AgentStatusResponse)
+async def get_agent_status(request: Request, job_id: str):
+    store: JobStore = request.app.state.job_store
+    job = store.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return AgentStatusResponse(
+        success=True,
+        status=job.get("status", "processing"),
+        data=job.get("data"),
+        error=job.get("error"),
+        expires_at=job.get("completed_at") or job.get("created_at"),
+    )
+
+
+@router.delete("/v2/agent/{job_id}", response_model=AgentCancelResponse)
+async def cancel_agent(request: Request, job_id: str):
+    store: JobStore = request.app.state.job_store
+    if not store.cancel_job(job_id):
+        raise HTTPException(status_code=404, detail="Job not found or already completed")
+    return AgentCancelResponse(success=True)
+
+
+@router.post("/v2/crawl", response_model=CrawlCreateResponse)
+async def create_crawl(request: Request, body: CrawlRequest):
+    store: JobStore = request.app.state.job_store
+    job_id = store.create_job(kind="crawl", payload=body.model_dump())
+    import asyncio
+    from .worker import _process_crawl_async
+    asyncio.create_task(_process_crawl_async(job_id=job_id, url=body.url, max_pages=body.max_pages, max_depth=body.max_depth, scraper_url=request.app.state.scraper_url))
+    return CrawlCreateResponse(id=job_id)
+
+
+@router.get("/v2/crawl/{job_id}", response_model=CrawlStatusResponse)
+async def get_crawl_status(request: Request, job_id: str):
+    store: JobStore = request.app.state.job_store
+    job = store.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    data = job.get("data") or {}
+    return CrawlStatusResponse(status=job.get("status", "processing"), completed=data.get("completed", 0), total=data.get("total", 0), data=data.get("pages"), error=job.get("error"))
+
+
+@router.delete("/v2/crawl/{job_id}", response_model=AgentCancelResponse)
+async def cancel_crawl(request: Request, job_id: str):
+    store: JobStore = request.app.state.job_store
+    if not store.cancel_job(job_id):
+        raise HTTPException(status_code=404, detail="Job not found or already completed")
+    return AgentCancelResponse(success=True)
+
+
+@router.post("/v2/batch/scrape", response_model=CrawlCreateResponse)
+async def create_batch_scrape(request: Request, body: BatchScrapeRequest):
+    store: JobStore = request.app.state.job_store
+    job_id = store.create_job(kind="batch_scrape", payload=body.model_dump())
+    import asyncio
+    from .worker import _process_batch_scrape_async
+    asyncio.create_task(_process_batch_scrape_async(job_id=job_id, urls=body.urls, scraper_url=request.app.state.scraper_url))
+    return CrawlCreateResponse(id=job_id)
+
+
+@router.post("/v2/search", response_model=SearchResponse)
+async def search(request: Request, body: SearchRequest):
+    from .searxng_client import SearXNGClient
+
+    searxng = SearXNGClient(request.app.state.searxng_url)
+    scraper = request.app.state.scraper_client
+    try:
+        results = await searxng.search(body.query, limit=body.limit)
+        search_results = []
+        for r in results:
+            scrape_result = await scraper.scrape(r["url"])
+            markdown = ""
+            if scrape_result.get("success"):
+                markdown = scrape_result["data"].get("markdown", "")[:3000]
+            search_results.append(SearchResult(url=r["url"], title=r["title"], description=r.get("description", ""), markdown=markdown))
+        return SearchResponse(data=search_results)
+    finally:
+        await searxng.close()
+
+
+@router.post("/v2/map", response_model=MapResponse)
+async def map_site(request: Request, body: MapRequest):
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+            resp = await client.get(body.url)
+            if resp.status_code != 200:
+                return MapResponse(success=False, links=[])
+            soup = BeautifulSoup(resp.text, "html.parser")
+            links: list[str] = []
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if href.startswith("/"):
+                    parsed = urlparse(body.url)
+                    href = f"{parsed.scheme}://{parsed.netloc}{href}"
+                if href.startswith(body.url.rstrip("/")) or href.startswith(f"{urlparse(body.url).scheme}://{urlparse(body.url).netloc}"):
+                    if href not in links:
+                        links.append(href)
+                        if len(links) >= body.limit:
+                            break
+            if body.search:
+                links = [l for l in links if body.search.lower() in l.lower()]
+            return MapResponse(links=links)
+    except Exception as e:
+        logger.error("Map failed for %s: %s", body.url, e)
+        return MapResponse(success=False, links=[])

@@ -8,19 +8,33 @@ services:
       test: ["CMD", "valkey-cli", "ping"]
       interval: 5s
       timeout: 3s
+      retries: 20
 
-  searxng:
-    image: searxng/searxng:latest
+  search-svc:
+    build:
+      context: ./search-svc
     restart: unless-stopped
-    volumes:
-      - searxng_data:/etc/searxng:rw
+    ports:
+      - "8010:8010"
+
+  llm-svc:
+    build:
+      context: ./llm-svc
+    restart: unless-stopped
+    ports:
+      - "8011:8011"
+
+  test-site:
+    build:
+      context: ./test-site
+    restart: unless-stopped
+    ports:
+      - "8005:8000"
     environment:
-      - SEARXNG_BASE_URL=http://localhost:8080/
-      - SEARXNG_SECRET=${SEARXNG_SECRET:-changeit}
-    cap_add:
-      - CAP_NET_BIND_SERVICE
-    cap_drop:
-      - ALL
+      - ENABLE_LLMS_TXT=1
+      - ENABLE_MARKDOWN=1
+      - ENABLE_DYNAMIC=1
+      - SITE_NAME=Fixture Site
 
   scraper-svc:
     build:
@@ -41,21 +55,22 @@ services:
     depends_on:
       valkey:
         condition: service_healthy
-      searxng:
+      search-svc:
+        condition: service_started
+      llm-svc:
         condition: service_started
       scraper-svc:
         condition: service_started
     environment:
       - VALKEY_URL=redis://valkey:6379/0
-      - SEARXNG_URL=http://searxng:8080
+      - SEARXNG_URL=http://search-svc:8010
       - SCRAPER_URL=http://scraper-svc:8001
-      - LLM_API_KEY=${LLM_API_KEY:?error}
-      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.openai.com/v1}
-      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
-      - API_KEY=${API_KEY:-}
+      - LLM_API_KEY=test-key
+      - LLM_BASE_URL=http://llm-svc:8011/v1
+      - LLM_MODEL=fixture-model
+      - API_KEY=
       - HOST=0.0.0.0
       - PORT=8080
 
 volumes:
   valkey_data:
-  searxng_data:

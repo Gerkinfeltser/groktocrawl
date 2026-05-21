@@ -1,1 +1,110 @@
-"""Pydantic models for request/response schemas."""
+"""Pydantic models matching the Firecrawl v2 agent API contract."""
+
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ScrapeRequest(BaseModel):
+    url: str
+    formats: list[str] = ["markdown"]
+    only_main_content: bool = True
+    timeout: int = 30000
+
+
+class ScrapeData(BaseModel):
+    markdown: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ScrapeResponse(BaseModel):
+    success: bool
+    data: ScrapeData | None = None
+    error: str | None = None
+
+
+class AgentRequest(BaseModel):
+    prompt: str = Field(..., max_length=10000, description="What the agent should research")
+    urls: list[str] | None = Field(None, description="Optional seed URLs to constrain research")
+    schema_: dict[str, Any] | None = Field(None, alias="schema", description="JSON Schema for structured output")
+    model: str = Field(default="default", description="Model hint")
+    max_credits: int | None = None
+    webhook: dict[str, Any] | None = None
+    strict_constrain_to_urls: bool = False
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class AgentCreateResponse(BaseModel):
+    success: bool = True
+    id: str
+
+
+class AgentStatusResponse(BaseModel):
+    success: bool = True
+    status: str = "processing"  # processing | completed | failed | cancelled
+    data: dict[str, Any] | None = None
+    error: str | None = None
+    expires_at: str | None = None
+    credits_used: int | None = None
+
+
+class AgentCancelResponse(BaseModel):
+    success: bool = True
+
+
+class CrawlRequest(BaseModel):
+    url: str
+    max_pages: int = 10
+    max_depth: int = 2
+    ignore_sitemap: bool = False
+    include_paths: list[str] | None = None
+    exclude_paths: list[str] | None = None
+
+
+class CrawlCreateResponse(BaseModel):
+    success: bool = True
+    id: str
+
+
+class CrawlStatusResponse(BaseModel):
+    success: bool = True
+    status: str = "processing"
+    completed: int = 0
+    total: int = 0
+    credits_used: int | None = None
+    data: list[dict[str, Any]] | None = None
+    error: str | None = None
+
+
+class BatchScrapeRequest(BaseModel):
+    urls: list[str]
+    max_concurrency: int = 3
+
+
+class SearchRequest(BaseModel):
+    query: str
+    limit: int = 5
+
+
+class SearchResult(BaseModel):
+    url: str
+    title: str
+    description: str = ""
+    markdown: str = ""
+
+
+class SearchResponse(BaseModel):
+    success: bool = True
+    data: list[SearchResult] = Field(default_factory=list)
+
+
+class MapRequest(BaseModel):
+    url: str
+    limit: int = 100
+    search: str | None = None
+
+
+class MapResponse(BaseModel):
+    success: bool = True
+    links: list[str] = Field(default_factory=list)
