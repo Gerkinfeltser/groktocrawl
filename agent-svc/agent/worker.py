@@ -5,7 +5,7 @@ import logging
 import os
 from typing import Any
 
-from .research import run_research
+from .research import run_research, run_extract
 from .scraper_client import ScraperClient
 from .store import JobStore
 
@@ -82,6 +82,29 @@ async def _process_batch_scrape_async(job_id: str, urls: list[str], scraper_url:
         store.fail_job(job_id, str(e))
     finally:
         await scraper.close()
+
+
+async def _process_extract_async(
+    job_id: str,
+    urls: list[str],
+    prompt: str | None,
+    schema_: dict[str, Any] | None,
+    llm_base_url: str,
+    llm_api_key: str,
+    llm_model: str,
+    scraper_url: str,
+) -> None:
+    store = JobStore(get_env("VALKEY_URL", "redis://valkey:6379/0"))
+    try:
+        result = await run_extract(
+            urls=urls, prompt=prompt, schema=schema_,
+            scraper_url=scraper_url, llm_base_url=llm_base_url,
+            llm_api_key=llm_api_key, llm_model=llm_model,
+        )
+        store.complete_job(job_id, result)
+    except Exception as e:
+        logger.exception("Extract job %s failed", job_id)
+        store.fail_job(job_id, str(e))
 
 
 def process_agent_job(
