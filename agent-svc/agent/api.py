@@ -21,6 +21,9 @@ from .models import (
     SearchRequest, SearchResponse, SearchResult,
     MapRequest, MapResponse,
     ExtractRequest, ExtractCreateResponse, ExtractStatusResponse,
+    BrowserCreateRequest, BrowserCreateResponse,
+    BrowserExecuteRequest, BrowserExecuteResponse,
+    BrowserListResponse, BrowserDeleteResponse,
 )
 from .store import JobStore
 
@@ -219,3 +222,51 @@ async def map_site(request: Request, body: MapRequest):
     except Exception as e:
         logger.error("Map failed for %s: %s", body.url, e)
         return MapResponse(success=False, links=[])
+
+
+# ----- Browser Sessions -----
+
+BROWSER_SVC_URL = "http://browser-svc:8012"
+
+
+async def _browser_proxy(path: str, method: str = "POST", json_data: dict | None = None) -> dict:
+    """Proxy a request to the browser service."""
+    async with httpx.AsyncClient(timeout=120) as client:
+        if method == "GET":
+            resp = await client.get(f"{BROWSER_SVC_URL}{path}")
+        elif method == "DELETE":
+            resp = await client.delete(f"{BROWSER_SVC_URL}{path}")
+        else:
+            resp = await client.post(f"{BROWSER_SVC_URL}{path}", json=json_data or {})
+        try:
+            return resp.json()
+        except Exception:
+            return {"success": False, "error": resp.text[:200]}
+
+
+@router.post("/v2/browser", response_model=BrowserCreateResponse)
+async def create_browser(body: BrowserCreateRequest):
+    result = await _browser_proxy("/browsers", json_data=body.model_dump())
+    if not result.get("success"):
+        raise HTTPException(status_code=502, detail=result.get("detail", result.get("error", "Browser service error")))
+    return BrowserCreateResponse(id=result["id"])
+
+
+@router.post("/v2/browser/{session_id}/execute", response_model=BrowserExecuteResponse)
+async def execute_browser(session_id: str, body: BrowserExecuteRequest):
+    result = await _browser_proxy(f"/browsers/{session_id}/execute", json_data=body.model_dump())
+    return BrowserExecuteResponse(success=result.get("success", False), result=result.get("result"), error=result.get("error"))
+
+
+@router.get("/v2/browser", response_model=BrowserListResponse)
+async def list_browsers():
+    result = await _browser_proxy("/browsers", method="GET")
+    return BrowserListResponse(sessions=result.get("sessions", []))
+
+
+@router.delete("/v2/browser/{session_id}", response_model=BrowserDeleteResponse)
+async def destroy_browser(session_id: str):
+    result = await _browser_proxy(f"/browsers/{session_id}", method="DELETE")
+    if not result.get("success"):
+        raise HTTPException(status_code=404, detail="Session not found")
+    return BrowserDeleteResponse(id=session_id)
