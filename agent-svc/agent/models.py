@@ -224,3 +224,19 @@ class LLMsTextStatusResponse(BaseModel):
     data: dict[str, Any] | None = None
     error: str | None = None
     expires_at: str | None = None
+
+
+class ActivityItem(BaseModel):
+    """A single job entry in the activity feed."""
+    id: str
+    kind: str
+    status: str
+    url: str | None = None
+    created_at: str
+    completed_at: str | None = None
+
+
+class ActivityResponse(BaseModel):
+    """Response model for the unified activity endpoint."""
+    success: bool = True
+    data: list[ActivityItem] = Field(default_factory=list)

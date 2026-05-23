@@ -83,3 +83,69 @@ def test_crawl_batch_search_and_map_endpoints_exist():
     assert map_resp.status_code == 200
     assert map_resp.json()["success"] is True
     assert map_resp.json()["links"]
+
+
+def test_activity_endpoint_structure():
+    """GET /v2/activity returns a valid response with the expected schema."""
+    resp = httpx.get(AGENT + "/v2/activity", timeout=120)
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["success"] is True
+    assert isinstance(payload["data"], list)
+
+
+def test_activity_shows_active_crawl_job():
+    """Creating a crawl job makes it appear in the activity feed."""
+    # Create a crawl job
+    crawl = httpx.post(AGENT + "/v2/crawl", json={"url": TEST_SITE, "max_pages": 1}, timeout=120)
+    assert crawl.status_code == 200
+    crawl_id = crawl.json()["id"]
+
+    # Check activity feed for the new job
+    resp = httpx.get(AGENT + "/v2/activity", timeout=120)
+    assert resp.status_code == 200
+    jobs = resp.json()["data"]
+    matching = [j for j in jobs if j["id"] == crawl_id]
+    assert len(matching) >= 1, f"Crawl job {crawl_id} not found in activity: {jobs}"
+    assert matching[0]["kind"] == "crawl"
+    assert matching[0]["status"] in ("processing", "completed")
+
+
+def test_activity_excludes_completed_agent_job():
+    """A completed agent job should no longer appear in the activity feed."""
+    # Create an agent job and wait for completion
+    create = httpx.post(AGENT + "/v2/agent", json={"prompt": "What is the pricing on the fixture site?"}, timeout=120)
+    assert create.status_code == 200
+    job_id = create.json()["id"]
+
+    # Poll until completed
+    for _ in range(30):
+        status = httpx.get(AGENT + f"/v2/agent/{job_id}", timeout=120)
+        if status.json()["status"] == "completed":
+            break
+        time.sleep(1)
+
+    # Verify it's no longer in the active feed
+    resp = httpx.get(AGENT + "/v2/activity", timeout=120)
+    assert resp.status_code == 200
+    active_ids = [j["id"] for j in resp.json()["data"]]
+    assert job_id not in active_ids, f"Completed agent job {job_id} still in activity feed"
+
+
+def test_activity_multi_type():
+    """Multiple job types appear in the activity feed simultaneously."""
+    # Create jobs of different types
+    crawl = httpx.post(AGENT + "/v2/crawl", json={"url": TEST_SITE, "max_pages": 1}, timeout=120)
+    crawl_id = crawl.json()["id"]
+
+    agent = httpx.post(AGENT + "/v2/agent", json={"prompt": "Summarize the fixture site?"}, timeout=120)
+    agent_id = agent.json()["id"]
+
+    # Check both appear in activity
+    resp = httpx.get(AGENT + "/v2/activity", timeout=120)
+    assert resp.status_code == 200
+    jobs = resp.json()["data"]
+    crawl_ids = [j["id"] for j in jobs if j["kind"] == "crawl"]
+    agent_ids = [j["id"] for j in jobs if j["kind"] == "agent"]
+    assert crawl_id in crawl_ids, f"Crawl job {crawl_id} not found"
+    assert agent_id in agent_ids, f"Agent job {agent_id} not found"

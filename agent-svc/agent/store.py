@@ -91,3 +91,44 @@ class JobStore:
         meta["completed_at"] = _now_iso()
         self.redis.set(f"job:{job_id}:meta", json.dumps(meta), ex=_default_ttl())
         return True
+
+    def list_active_jobs(self, kind: str | None = None, status: str = "processing", limit: int = 50) -> list[dict]:
+        """List jobs by status, optionally filtered by kind.
+
+        Uses Valkey SCAN with pattern ``job:*:meta`` — no dedicated index.
+        For production at scale, replace with a sorted set or dedicated index.
+
+        Args:
+            kind: If set, only return jobs of this kind (``crawl``, ``agent``, etc.)
+            status: Status filter (default ``processing``)
+            limit: Maximum jobs to return (default 50)
+
+        Returns:
+            List of job metadata dicts (without attached data payloads).
+        """
+        active: list[dict] = []
+        cursor = 0
+        while len(active) < limit:
+            cursor, keys = self.redis.scan(cursor=cursor, match="job:*:meta", count=100)
+            if not keys:
+                if cursor == 0:
+                    break
+                continue
+            pipe = self.redis.pipeline()
+            for key in keys:
+                pipe.get(key)
+            results = pipe.execute()
+            for raw in results:
+                if raw is None:
+                    continue
+                meta = json.loads(raw)
+                if meta.get("status") != status:
+                    continue
+                if kind is not None and meta.get("kind") != kind:
+                    continue
+                active.append(meta)
+                if len(active) >= limit:
+                    return active
+            if cursor == 0:
+                break
+        return active
