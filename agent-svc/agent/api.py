@@ -28,6 +28,7 @@ from .models import (
     MonitorListResponse, MonitorDeleteResponse,
     ParseResponse,
     LLMsTextRequest, LLMsTextCreateResponse, LLMsTextStatusResponse,
+    ActivityResponse, ActivityItem,
 )
 from .store import JobStore
 from .monitor import get_all_monitors, get_monitor, save_monitor, delete_monitor
@@ -44,6 +45,30 @@ def _enqueue(queue: Queue, func: str, **kwargs: Any) -> None:
 @router.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@router.get("/v2/activity", response_model=ActivityResponse)
+async def list_activity(request: Request):
+    """List all active/processing jobs across all job types.
+
+    Returns jobs with status ``processing``, ordered by creation time.
+    Completed and failed jobs are excluded (they TTL out after 24h).
+    """
+    store: JobStore = request.app.state.job_store
+    jobs = store.list_active_jobs(limit=50)
+    items: list[ActivityItem] = []
+    for job in jobs:
+        payload = job.get("payload") or {}
+        url = payload.get("url") if isinstance(payload, dict) else None
+        items.append(ActivityItem(
+            id=job["id"],
+            kind=job.get("kind", "unknown"),
+            status=job.get("status", "processing"),
+            url=url,
+            created_at=job.get("created_at", ""),
+            completed_at=job.get("completed_at"),
+        ))
+    return ActivityResponse(data=items)
 
 
 @router.post("/v2/scrape", response_model=ScrapeResponse)
