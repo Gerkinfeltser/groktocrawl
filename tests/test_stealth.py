@@ -33,9 +33,9 @@ def test_stealth_module_imports():
     assert "locale" in STEALTH_CONTEXT_KWARGS
     assert STEALTH_CONTEXT_KWARGS["locale"] == "en-US"
     assert "webdriver" in STEALTH_INIT_SCRIPT  # Object.defineProperty(navigator, 'webdriver')
-    assert "plugins" in STEALTH_INIT_SCRIPT    # Object.defineProperty(navigator, 'plugins')
-    assert "chrome" in STEALTH_INIT_SCRIPT     # window.chrome
-    assert "getParameter" in STEALTH_INIT_SCRIPT  # WebGL spoofing
+    assert "plugins" not in STEALTH_INIT_SCRIPT  # Stripped for compatibility with browser-svc
+    assert "chrome" not in STEALTH_INIT_SCRIPT   # Stripped for compatibility with browser-svc
+    assert "getParameter" not in STEALTH_INIT_SCRIPT  # Stripped for compatibility
 
 
 def test_stealth_browser_args_comprehensive():
@@ -66,11 +66,8 @@ def test_stealth_init_script_syntax():
     from scraper.stealth import STEALTH_INIT_SCRIPT
     # Should be a string containing a function
     assert STEALTH_INIT_SCRIPT.startswith("() =>")
-    # Should contain key stealth patches
+    # Should contain the webdriver override
     assert "webdriver" in STEALTH_INIT_SCRIPT
-    assert "plugins" in STEALTH_INIT_SCRIPT
-    assert "languages" in STEALTH_INIT_SCRIPT
-    assert "chrome" in STEALTH_INIT_SCRIPT
     # Should have matching braces
     open_braces = STEALTH_INIT_SCRIPT.count("{")
     close_braces = STEALTH_INIT_SCRIPT.count("}")

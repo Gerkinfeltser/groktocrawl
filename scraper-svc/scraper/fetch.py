@@ -302,7 +302,32 @@ async def fetch_via_playwright(url: str) -> dict | None:
                     if _is_substack_redirect(current_url):
                         logger.warning("Substack redirect persisted for %s", url)
 
+                # SPA content retry: if the page loaded but content is short
+                # or suspicious, it may be a JS-rendered page that needs more
+                # time or a scroll to trigger lazy loading
                 html = await page.content()
+                markdown = html_to_markdown(html) if html else ""
+
+                if not markdown or len(markdown) < 500 or _looks_suspicious(markdown):
+                    for attempt in range(2):
+                        logger.info(
+                            "SPA retry %d for %s (markdown: %d chars)",
+                            attempt + 1, url, len(markdown),
+                        )
+                        # Scroll to trigger lazy-loaded content
+                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        await page.wait_for_timeout(3000)
+
+                        html = await page.content()
+                        markdown = html_to_markdown(html) if html else ""
+                        if markdown and len(markdown) >= 500 and not _looks_suspicious(markdown):
+                            logger.info(
+                                "SPA retry %d succeeded for %s (%d chars)",
+                                attempt + 1, url, len(markdown),
+                            )
+                            break
+
+                # html and markdown now hold the best result from the retry loop
             finally:
                 await browser.close()
 
