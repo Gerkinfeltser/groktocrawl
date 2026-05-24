@@ -20,6 +20,14 @@ class ScrapeRequest(BaseModel):
     url: str
 
 
+class DownloadData(BaseModel):
+    """Binary content metadata for non-HTML responses."""
+    filename: str
+    content_type: str
+    size: int
+    data_url: str | None = None
+
+
 class ScrapeResponse(BaseModel):
     success: bool
     data: dict | None = None
@@ -53,6 +61,7 @@ async def scrape(request: ScrapeRequest):
                 "markdown": result.get("markdown", ""),
                 "source": result.get("source", "unknown"),
                 "url": request.url,
+                **({"download": result["download"]} if result.get("download") else {}),
             },
         )
     except Exception as e:

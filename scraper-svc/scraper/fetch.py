@@ -6,12 +6,79 @@ Tier 3: Playwright render + readability extraction (heavyweight).
 """
 
 import logging
+import os
 import re
 from urllib.parse import urlparse
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# ── Binary content-type detection ──────────────────────────────
+BINARY_TYPE_PREFIXES = ("image/", "audio/", "video/")
+BINARY_TYPE_EXACT = {
+    "application/pdf",
+    "application/epub+zip",
+    "application/zip",
+    "application/gzip",
+    "application/x-tar",
+    "application/x-rar-compressed",
+    "application/x-7z-compressed",
+    "application/vnd.android.package-archive",
+    "application/vnd.openxmlformats-officedocument",
+}
+
+
+def _is_binary_content_type(content_type: str) -> bool:
+    """Check if a Content-Type indicates binary content that shouldn't be parsed as HTML."""
+    if not content_type:
+        return False
+    ct = content_type.lower().split(";")[0].strip()
+    if ct in BINARY_TYPE_EXACT:
+        return True
+    for prefix in BINARY_TYPE_PREFIXES:
+        if ct.startswith(prefix):
+            return True
+    return False
+
+
+def _derive_filename(url: str, content_type: str) -> str:
+    """Derive a sensible filename from URL path + Content-Type."""
+    parsed = urlparse(url)
+    path = parsed.path or parsed.query or "download"
+    basename = path.rstrip("/").split("/")[-1]
+    if basename and "." in basename:
+        return basename
+    ext_map = {
+        "application/pdf": ".pdf",
+        "application/epub+zip": ".epub",
+        "application/zip": ".zip",
+        "application/gzip": ".gz",
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+        "image/svg+xml": ".svg",
+        "text/csv": ".csv",
+        "application/json": ".json",
+    }
+    ext = ext_map.get(content_type.split(";")[0].strip(), "")
+    return f"{basename}{ext}" if basename else f"download{ext}"
+
+
+def _make_download_payload(url: str, content: bytes, content_type: str) -> dict:
+    """Build a download payload dict for binary content."""
+    return {
+        "markdown": "",
+        "source": "binary",
+        "url": url,
+        "download": {
+            "filename": _derive_filename(url, content_type),
+            "content_type": content_type,
+            "size": len(content),
+            "data_url": None,
+        },
+    }
 
 
 def _looks_like_markdown(text: str) -> bool:
@@ -54,7 +121,10 @@ async def fetch_via_llms_txt(url: str, client: httpx.AsyncClient) -> dict | None
 
 
 async def fetch_via_content_negotiation(url: str, client: httpx.AsyncClient) -> dict | None:
-    """Tier 2: Request with Accept: text/markdown header."""
+    """Tier 2: Request with Accept: text/markdown header.
+
+    Also checks for binary content types and short-circuits to a download payload.
+    """
     try:
         resp = await client.get(
             url,
@@ -62,9 +132,16 @@ async def fetch_via_content_negotiation(url: str, client: httpx.AsyncClient) -> 
             follow_redirects=True,
             timeout=15,
         )
-        if resp.status_code == 200 and _looks_like_markdown(resp.text):
-            logger.info("Tier 2 hit: content negotiation for %s", url)
-            return {"markdown": resp.text, "source": "content-negotiation", "url": url}
+        if resp.status_code == 200:
+            # Check for binary content first
+            ct = resp.headers.get("content-type", "")
+            if _is_binary_content_type(ct):
+                logger.info("Tier 2 binary hit: %s (%s)", url, ct)
+                return _make_download_payload(url, resp.content, ct)
+            # Standard markdown detection
+            if _looks_like_markdown(resp.text):
+                logger.info("Tier 2 hit: content negotiation for %s", url)
+                return {"markdown": resp.text, "source": "content-negotiation", "url": url}
     except Exception as e:
         logger.debug("Tier 2 miss for %s: %s", url, e)
     return None
