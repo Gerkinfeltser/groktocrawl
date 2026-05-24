@@ -146,9 +146,33 @@ async def discover_pages(url: str, max_pages: int = 50) -> list[str]:
 
 
 async def extract_title_and_description(page_url: str, scraper_url: str) -> tuple[str, str]:
-    """Extract the title and a short description from a page."""
+    """Extract the title and a short description from a page.
+
+    Tries meta tag extraction first (cheap, one GET). Falls back to
+    full scrape with sentence-boundary extraction if meta tags are
+    missing or too short.
+    """
     title = ""
     description = ""
+
+    # Tier 1+2: Try lightweight meta tag extraction first
+    meta_url = f"{scraper_url}/scrape/meta"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(meta_url, json={"url": page_url})
+            if resp.status_code == 200:
+                meta = resp.json()
+                if meta.get("success"):
+                    if meta.get("title"):
+                        title = meta["title"]
+                    # Prefer meta description, fall back to og:description
+                    meta_desc = meta.get("description") or meta.get("og_description")
+                    if meta_desc and len(meta_desc.strip()) >= 40:
+                        return title or page_url.rstrip("/").split("/")[-1].replace("-", " ").title(), meta_desc.strip()
+    except Exception as e:
+        logger.debug("Meta fetch failed for %s: %s", page_url, e)
+
+    # Tier 3+4: Full scrape with sentence-boundary extraction
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(f"{scraper_url}/scrape", json={"url": page_url})

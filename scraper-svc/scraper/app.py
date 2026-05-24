@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, HttpUrl
 
 from .fetch import smart_scrape
+from .meta import fetch_meta_tags
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,15 @@ class ScrapeRequest(BaseModel):
 class ScrapeResponse(BaseModel):
     success: bool
     data: dict | None = None
+    error: str | None = None
+
+
+class MetaResponse(BaseModel):
+    success: bool = True
+    title: str | None = None
+    description: str | None = None
+    og_description: str | None = None
+    url: str | None = None
     error: str | None = None
 
 
@@ -48,3 +58,24 @@ async def scrape(request: ScrapeRequest):
     except Exception as e:
         logger.exception("Scrape failed for %s", request.url)
         return ScrapeResponse(success=False, error=str(e))
+
+
+@app.post("/scrape/meta", response_model=MetaResponse)
+async def scrape_meta(request: ScrapeRequest):
+    """Extract meta tags from a URL using raw HTML (cheap, one GET).
+
+    Returns <title>, <meta name="description">, and
+    <meta property="og:description"> without full page rendering.
+    """
+    try:
+        result = await fetch_meta_tags(request.url)
+        return MetaResponse(
+            success=True,
+            title=result.get("title"),
+            description=result.get("description"),
+            og_description=result.get("og_description"),
+            url=request.url,
+        )
+    except Exception as e:
+        logger.exception("Meta fetch failed for %s", request.url)
+        return MetaResponse(success=False, error=str(e))
