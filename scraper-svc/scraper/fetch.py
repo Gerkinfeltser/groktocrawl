@@ -83,7 +83,7 @@ def _make_download_payload(url: str, content: bytes, content_type: str) -> dict:
     }
 
 
-# ── Suspicious content detection (for LLM recovery trigger) ────
+# ── Bot challenge detection (title/URL level) ──────────────────
 CLOUDFLARE_INDICATORS = [
     "Just a moment",
     "Checking your browser",
@@ -100,6 +100,45 @@ DDOS_GUARD_INDICATORS = [
     ".well-known/ddos-guard",
 ]
 
+# ── Substack session/channel frame redirect detection ──────────
+SUBSTACK_REDIRECT_PATTERNS = [
+    "substack.com/session-attribution-frame",
+    "substack.com/channel-frame",
+    "substack.com/iframe",
+    "googletagmanager.com/ns.html",
+]
+
+# ── Bot challenge and redirect detection (title/URL level) ─────
+
+
+def _is_bot_challenge(title: str, url: str) -> bool:
+    """Check if the page title or URL indicates a bot challenge page.
+
+    Mirrors browser-svc's _is_bot_challenge() logic.
+    """
+    for indicator in CLOUDFLARE_INDICATORS:
+        if indicator.lower() in title.lower():
+            return True
+    if "cf_chl" in url.lower() or "challenge-platform" in url.lower():
+        return True
+    for indicator in DDOS_GUARD_INDICATORS:
+        if indicator.lower() in title.lower():
+            return True
+    if "ddos-guard" in url.lower() or "/.well-known/ddos-guard" in url.lower():
+        return True
+    return False
+
+
+def _is_substack_redirect(url: str) -> bool:
+    """Check if the URL indicates a Substack session/channel frame redirect."""
+    for pattern in SUBSTACK_REDIRECT_PATTERNS:
+        if pattern in url.lower():
+            return True
+    return False
+
+
+# ── Suspicious content detection (for LLM recovery trigger) ────
+
 
 def _looks_suspicious(content: str) -> bool:
     """Heuristic: does the page content look like a challenge/error page?"""
@@ -107,7 +146,7 @@ def _looks_suspicious(content: str) -> bool:
         return True
     if len(content) < 100:
         return True
-    for indicator in CLOUDFLARE_INDICATORS + DDOS_GUARD_INDICATORS:
+    for indicator in CLOUDFLARE_INDICATORS + DDOS_GUARD_INDICATORS + SUBSTACK_REDIRECT_PATTERNS:
         if indicator.lower() in content.lower():
             return True
     return False
@@ -219,25 +258,52 @@ async def fetch_via_content_negotiation(url: str, client: httpx.AsyncClient) -> 
 
 
 async def fetch_via_playwright(url: str) -> dict | None:
-    """Tier 3: Render with Playwright, then extract main content.
+    """Tier 3: Render with stealth Playwright, then extract main content.
+
+    Uses the same stealth configuration as browser-svc to avoid headless
+    detection by Substack, Cloudflare JS challenges, and similar mechanisms.
 
     This requires playwright and chromium to be installed.
     Falls back gracefully if playwright is not available.
     """
     try:
-        from playwright.async_api import async_playwright
+        from playwright.async_api import async_playwright, TimeoutError
+        from .stealth import create_stealth_browser, create_stealth_context
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
+            browser = await create_stealth_browser(p)
+            context = await create_stealth_context(browser)
+            page = await context.new_page()
             try:
-                await page.goto(url, wait_until="networkidle", timeout=30000)
-                # Bot challenge detection (Cloudflare / DDoS-Guard)
+                # Navigate — try networkidle first, fall back to domcontentloaded
+                # on timeout (Substack has persistent analytics connections that
+                # prevent networkidle from ever firing)
+                try:
+                    await page.goto(url, wait_until="networkidle", timeout=30000)
+                except TimeoutError:
+                    logger.info("networkidle timed out for %s, falling back to domcontentloaded", url)
+                    await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+
+                # Check for bot challenges (Cloudflare / DDoS-Guard)
                 title = await page.title()
                 current_url = page.url
-                if _looks_suspicious(title + " " + current_url):
+                if _is_bot_challenge(title, current_url):
                     logger.info("Bot challenge detected on %s, waiting for resolution...", url)
                     await page.wait_for_timeout(8000)
+                    title = await page.title()
+                    current_url = page.url
+                    if _is_bot_challenge(title, current_url):
+                        logger.warning("Bot challenge persisted after wait for %s", url)
+
+                # Check for Substack session/channel frame redirect
+                if _is_substack_redirect(current_url):
+                    logger.info("Substack redirect detected on %s (-> %s), waiting for content...", url, current_url)
+                    # Substack sometimes resolves after a longer wait
+                    await page.wait_for_timeout(5000)
+                    current_url = page.url
+                    if _is_substack_redirect(current_url):
+                        logger.warning("Substack redirect persisted for %s", url)
+
                 html = await page.content()
             finally:
                 await browser.close()
@@ -371,6 +437,30 @@ async def smart_scrape(url: str) -> dict:
         recovery_result = await attempt_llm_recovery(url, page_content)
         if recovery_result:
             return recovery_result
+
+    # Check for specific failure modes to provide actionable error messages
+    if result:
+        raw_html = result.get("raw_html_start", "")
+        redirected_url = ""
+        # Extract redirected URL from raw HTML if available (Substack embeds it)
+        import re as _re
+        substack_match = _re.search(r'substack\.com/[^"\'\\s]+', raw_html)
+        if substack_match:
+            redirected_url = f" (redirected to {substack_match.group()})"
+
+        if _is_substack_redirect(raw_html):
+            return {
+                "error": (
+                    f"Could not extract content from {url}{redirected_url}. "
+                    f"Substack blocked the headless browser. "
+                    f"Try: groktocrawl browser exec <id> navigate --url <url> "
+                    f"then browser exec <id> executeScript "
+                    f"--script \"document.querySelector('article').innerText\""
+                ),
+                "markdown": "",
+                "source": "none",
+                "url": url,
+            }
 
     return {
         "error": f"Could not extract content from {url}",
