@@ -348,7 +348,9 @@ async def smart_scrape(url: str) -> dict:
     if result:
         logger.info("Tier 4: attempting LLM recovery for %s", url)
         from .recovery import attempt_llm_recovery
-        recovery_result = await attempt_llm_recovery(url, result.get("markdown", ""))
+        # Pass raw HTML (with iframe tags) instead of converted markdown
+        page_content = result.get("raw_html_start") or result.get("markdown", "")
+        recovery_result = await attempt_llm_recovery(url, page_content)
         if recovery_result:
             return recovery_result
 
