@@ -14,6 +14,8 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+FLARE_SOLVERR_URL = os.getenv("FLARE_SOLVERR_URL", "http://flare-solverr:8191/v1")
+
 # ── Binary content-type detection ──────────────────────────────
 BINARY_TYPE_PREFIXES = ("image/", "audio/", "video/")
 BINARY_TYPE_EXACT = {
@@ -179,6 +181,39 @@ async def fetch_via_playwright(url: str) -> dict | None:
     return None
 
 
+async def fetch_via_flaresolverr(url: str) -> dict | None:
+    """Tier 3.5: Route through FlareSolverr for hard Cloudflare challenges.
+
+    Requires the flare-solverr service to be running (profile-gated in
+    docker-compose.yml). Gracefully falls back if unavailable.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                f"{FLARE_SOLVERR_URL}/v1",
+                json={
+                    "cmd": "request.get",
+                    "url": url,
+                    "maxTimeout": 60000,
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                solution = data.get("solution", {})
+                if solution.get("status") == 200:
+                    html = solution.get("response", "")
+                    if html:
+                        markdown = html_to_markdown(html)
+                        if markdown and len(markdown) > 50:
+                            logger.info("Tier 3.5 hit: flare-solverr for %s", url)
+                            return {"markdown": markdown, "source": "flare-solverr", "url": url}
+    except (httpx.ConnectError, httpx.TimeoutException):
+        logger.debug("FlareSolverr not available for %s", url)
+    except Exception as e:
+        logger.warning("FlareSolverr failed for %s: %s", url, e)
+    return None
+
+
 def html_to_markdown(html: str) -> str:
     """Convert HTML to clean markdown using readability + markdownify."""
     try:
@@ -229,8 +264,22 @@ async def smart_scrape(url: str) -> dict:
 
     # Tier 3 (no shared client needed)
     result = await fetch_via_playwright(url)
-    if result:
+    if result and not _looks_suspicious(result.get("markdown", "")):
         return result
+
+    # Tier 3.5: FlareSolverr for hard Cloudflare challenges
+    if result:  # only try if we got something suspicious from Playwright
+        fs_result = await fetch_via_flaresolverr(url)
+        if fs_result:
+            return fs_result
+
+    # Tier 4: LLM-assisted recovery when content looks suspicious
+    if result:
+        logger.info("Tier 4: attempting LLM recovery for %s", url)
+        from .recovery import attempt_llm_recovery
+        recovery_result = await attempt_llm_recovery(url, result.get("markdown", ""))
+        if recovery_result:
+            return recovery_result
 
     return {
         "error": f"Could not extract content from {url}",
