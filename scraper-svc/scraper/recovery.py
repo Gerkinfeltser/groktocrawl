@@ -33,6 +33,10 @@ Analyze what happened. Choose ONE of these actions:
 (c) **bot_challenge** — the page is a Cloudflare or similar bot challenge.
 (d) **irrecoverable** — the fetch genuinely failed and there is no alternative path.
 
+Note: This page was flagged for potentially having embedded document content
+(iframes, embeds, or objects pointing to PDFs or documents). If you see an
+iframe with a document URL, choose action (a) and extract the iframe's src.
+
 Respond with valid JSON matching this schema:
 {
   "action": "iframe_url" | "extracted_content" | "bot_challenge" | "irrecoverable",

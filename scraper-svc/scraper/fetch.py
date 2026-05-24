@@ -105,6 +105,45 @@ def _looks_suspicious(content: str) -> bool:
     return False
 
 
+# ── Embedded content detection ─────────────────────────────────
+# Extensions and domain patterns that suggest an iframe/embed points
+# to downloadable document content rather than another web page.
+EMBEDDED_CONTENT_EXTENSIONS = {
+    ".pdf", ".epub", ".doc", ".docx", ".xls", ".xlsx",
+    ".ppt", ".pptx", ".zip", ".tar", ".gz",
+}
+EMBEDDED_CONTENT_DOMAINS = {
+    "sci-hub", "sci.bban", "docdrop", "academia",
+    "researchgate", "arxiv.org", "cdn.",
+}
+
+
+def _has_embedded_content(html: str) -> bool:
+    """Check if page HTML contains iframe/embed/object pointing to document content.
+
+    Uses lightweight string matching — no HTML parser needed.
+    Returns True if the page appears to be a portal to document content elsewhere.
+    """
+    if not html:
+        return False
+    html_lower = html.lower()
+    # Quick reject: no iframe, embed, or object tags at all
+    if not any(tag in html_lower for tag in ("<iframe", "<embed", "<object")):
+        return False
+    # Check for document extensions in src/data attributes
+    for ext in EMBEDDED_CONTENT_EXTENSIONS:
+        if ext in html_lower:
+            return True
+    # Check for known document-serving domains
+    for domain in EMBEDDED_CONTENT_DOMAINS:
+        if domain in html_lower:
+            return True
+    # Check for common document URL patterns
+    if "/pdf/" in html_lower or "/download/" in html_lower:
+        return True
+    return False
+
+
 def _looks_like_markdown(text: str) -> bool:
     """Heuristic: does the response look like markdown vs HTML?"""
     if not text:
@@ -195,7 +234,12 @@ async def fetch_via_playwright(url: str) -> dict | None:
             markdown = html_to_markdown(html)
             if markdown and len(markdown) > 50:
                 logger.info("Tier 3 hit: playwright render for %s", url)
-                return {"markdown": markdown, "source": "playwright", "url": url}
+                return {
+                    "markdown": markdown,
+                    "source": "playwright",
+                    "url": url,
+                    "raw_html_start": html[:2000],
+                }
     except ImportError:
         logger.warning("Playwright not installed; skipping Tier 3")
     except Exception as e:
@@ -286,8 +330,13 @@ async def smart_scrape(url: str) -> dict:
 
     # Tier 3 (no shared client needed)
     result = await fetch_via_playwright(url)
-    if result and not _looks_suspicious(result.get("markdown", "")):
-        return result
+    if result:
+        content_good = not _looks_suspicious(result.get("markdown", ""))
+        content_embedded = _has_embedded_content(result.get("raw_html_start", ""))
+        if content_good and not content_embedded:
+            return result  # genuinely good content, return immediately
+        logger.info("Tier 3 content flagged: suspicious=%s, embedded=%s",
+                     not content_good, content_embedded)
 
     # Tier 3.5: FlareSolverr for hard Cloudflare challenges
     if result:
