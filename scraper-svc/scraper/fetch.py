@@ -81,6 +81,28 @@ def _make_download_payload(url: str, content: bytes, content_type: str) -> dict:
     }
 
 
+# ── Suspicious content detection (for LLM recovery trigger) ────
+CLOUDFLARE_INDICATORS = [
+    "Just a moment",
+    "Checking your browser",
+    "DDoS protection by",
+    "cf-browser-verification",
+    "challenge-platform",
+]
+
+
+def _looks_suspicious(content: str) -> bool:
+    """Heuristic: does the page content look like a challenge/error page?"""
+    if not content:
+        return True
+    if len(content) < 100:
+        return True
+    for indicator in CLOUDFLARE_INDICATORS:
+        if indicator.lower() in content.lower():
+            return True
+    return False
+
+
 def _looks_like_markdown(text: str) -> bool:
     """Heuristic: does the response look like markdown vs HTML?"""
     if not text:
@@ -229,8 +251,16 @@ async def smart_scrape(url: str) -> dict:
 
     # Tier 3 (no shared client needed)
     result = await fetch_via_playwright(url)
-    if result:
+    if result and not _looks_suspicious(result.get("markdown", "")):
         return result
+
+    # Tier 4: LLM-assisted recovery when content looks suspicious
+    if result:
+        logger.info("Tier 4: attempting LLM recovery for %s", url)
+        from .recovery import attempt_llm_recovery
+        recovery_result = await attempt_llm_recovery(url, result.get("markdown", ""))
+        if recovery_result:
+            return recovery_result
 
     return {
         "error": f"Could not extract content from {url}",
