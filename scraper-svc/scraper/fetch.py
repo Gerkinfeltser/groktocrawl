@@ -238,7 +238,7 @@ async def fetch_via_playwright(url: str) -> dict | None:
                     "markdown": markdown,
                     "source": "playwright",
                     "url": url,
-                    "raw_html_start": html[:10000],
+                    "raw_html_start": html,
                 }
     except ImportError:
         logger.warning("Playwright not installed; skipping Tier 3")
