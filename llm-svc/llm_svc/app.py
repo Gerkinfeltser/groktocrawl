@@ -29,14 +29,29 @@ async def health():
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest):
     user_text = "\n".join(m.content for m in req.messages if m.role == "user")
-    sources = re.findall(r"Source:\s*(\S+)", user_text)
+    system_text = "\n".join(m.content for m in req.messages if m.role == "system")
+
     if req.response_format and req.response_format.get("type") == "json_object":
-        content = json.dumps({"result": "structured response", "sources": sources})
-    else:
-        if sources:
-            content = "Synthesized answer from provided context.\n\nSources used:\n" + "\n".join(f"- {s}" for s in sources)
+        # Handle recovery prompts — extract iframe URLs from page content
+        iframe_match = re.search(r'<iframe[^>]+src="([^"]+)"', user_text)
+        if iframe_match and ("iframe_url" in system_text or "recovery" in system_text.lower()):
+            content = json.dumps({
+                "action": "iframe_url",
+                "url": iframe_match.group(1),
+            })
+        elif "cloudflare" in system_text.lower() or "block_type" in system_text:
+            content = json.dumps({
+                "block_type": "js_challenge",
+                "confidence": "medium",
+                "page_indicators": ["challenge platform detected"],
+                "alternative_paths": [],
+                "human_action_required": False,
+                "message": "Cloudflare JS challenge detected — could not bypass with available tools",
+            })
         else:
-            content = "Synthesized answer from provided context."
+            content = json.dumps({"result": "structured response"})
+    else:
+        content = "Synthesized answer from provided context."
     return {
         "id": "chatcmpl-fixture",
         "object": "chat.completion",
