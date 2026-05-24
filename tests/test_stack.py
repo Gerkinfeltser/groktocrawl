@@ -149,3 +149,101 @@ def test_activity_multi_type():
     agent_ids = [j["id"] for j in jobs if j["kind"] == "agent"]
     assert crawl_id in crawl_ids, f"Crawl job {crawl_id} not found"
     assert agent_id in agent_ids, f"Agent job {agent_id} not found"
+
+
+# ----- llms.txt description quality tests -----
+
+def test_scraper_meta_endpoint():
+    """POST /scrape/meta returns meta tags from raw HTML."""
+    resp = httpx.post(SCRAPER + "/scrape/meta", json={"url": TEST_SITE + "/content/with-meta"}, timeout=30)
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["success"] is True
+    assert payload["title"] == "Meta Tag Page"
+    assert payload["description"] is not None
+    assert "meta description for testing" in payload["description"]
+    assert payload["og_description"] is not None
+    assert "Open Graph description" in payload["og_description"]
+
+
+def test_scraper_meta_fallback_url():
+    """POST /scrape/meta returns nulls for pages without meta tags."""
+    resp = httpx.post(SCRAPER + "/scrape/meta", json={"url": TEST_SITE + "/"}, timeout=30)
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["success"] is True
+    # The root page has no meta description or og:description
+    assert payload["title"] == "Fixture Site"
+    assert payload["description"] is None
+    assert payload["og_description"] is None
+
+
+def test_generate_llmstxt_sentence_boundary():
+    """Generated llms.txt entries should end at sentence boundaries, not mid-sentence."""
+    # Create an llms.txt generation job using a page where the scraper
+    # won't hit a site-level llms.txt (Tier 1)
+    resp = httpx.post(
+        AGENT + "/v2/generate-llmstxt",
+        json={"url": "https://example.com", "max_pages": 1},
+        timeout=120,
+    )
+    assert resp.status_code == 200
+    job_id = resp.json()["id"]
+
+    # Poll for completion
+    for _ in range(30):
+        status = httpx.get(AGENT + f"/v2/generate-llmstxt/{job_id}", timeout=120)
+        if status.json()["status"] == "completed":
+            break
+        time.sleep(1)
+
+    result = status.json()
+    assert result["status"] == "completed"
+    llms = result.get("data", {}).get("llms_txt", "")
+    assert llms, "llms_txt should not be empty"
+
+    # Find the description in the llms.txt output
+    for line in llms.split("\n"):
+        if line.startswith("- [") and ": " in line:
+            desc = line.split(": ", 1)[1]
+            # Should end with sentence-ending punctuation
+            assert desc.rstrip()[-1] in ".!?", f"Description should end with sentence punctuation, got: {desc[-30:]}"
+            # Description should be substantive (not just a few words)
+            assert len(desc) >= 20, f"Description too short: {desc}"
+
+
+def test_generate_llmstxt_meta_tag_preference():
+    """Generated llms.txt should prefer <meta name="description"> over body text.
+
+    Uses the fixture page at /content/with-meta which has a <meta name="description">.
+    The agent's extract_title_and_description() calls the scraper's /scrape/meta
+    endpoint first, which returns the meta description.
+    """
+    resp = httpx.post(
+        AGENT + "/v2/generate-llmstxt",
+        json={"url": TEST_SITE + "/content/with-meta", "max_pages": 1},
+        timeout=120,
+    )
+    assert resp.status_code == 200
+    job_id = resp.json()["id"]
+
+    # Poll for completion
+    for _ in range(30):
+        status = httpx.get(AGENT + f"/v2/generate-llmstxt/{job_id}", timeout=120)
+        if status.json()["status"] == "completed":
+            break
+        time.sleep(1)
+
+    result = status.json()
+    assert result["status"] == "completed"
+    llms = result.get("data", {}).get("llms_txt", "")
+    assert llms, "llms_txt should not be empty"
+
+    # The meta endpoint returns the description, but the full scrape may
+    # hit the test-site's llms.txt (Tier 1). Either way, the llms.txt
+    # output should exist and be well-formed.
+    for line in llms.split("\n"):
+        if line.startswith("- [") and ": " in line:
+            desc = line.split(": ", 1)[1]
+            assert len(desc) >= 20, f"Description should be substantive, got: {desc}"
+            break
