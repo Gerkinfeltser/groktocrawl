@@ -29,6 +29,7 @@ async def _process_agent_async(
     searxng_url: str,
     scraper_url: str,
     webhook_config: dict[str, Any] | None = None,
+    requested_model: str | None = None,
 ) -> None:
     store = JobStore(get_env("VALKEY_URL", "redis://valkey:6379/0"))
     try:
@@ -36,6 +37,7 @@ async def _process_agent_async(
             prompt=prompt, urls=urls, schema=schema_,
             searxng_url=searxng_url, scraper_url=scraper_url,
             llm_base_url=llm_base_url, llm_api_key=llm_api_key, llm_model=llm_model,
+            requested_model=requested_model,
         )
         store.complete_job(job_id, result)
         await deliver_webhook(webhook_config, "completed", job_id, result)
