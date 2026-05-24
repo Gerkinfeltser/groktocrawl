@@ -16,6 +16,33 @@ from playwright.async_api import async_playwright
 
 logger = logging.getLogger(__name__)
 
+# ── Stealth configuration ─────────────────────────────────────
+# Real Chrome user agent to avoid bot detection
+REAL_CHROME_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+CLOUDFLARE_INDICATORS = [
+    "Just a moment...",
+    "Checking your browser",
+    "DDoS protection by",
+    "cf-browser-verification",
+    "challenge-platform",
+]
+
+
+def _is_cloudflare_challenge(title: str, url: str) -> bool:
+    """Heuristic: does the page indicate a Cloudflare challenge?"""
+    for indicator in CLOUDFLARE_INDICATORS:
+        if indicator.lower() in title.lower():
+            return True
+    # Cloudflare challenge URLs often contain cf_chl_opt or __cf_chl
+    if "cf_chl" in url.lower() or "challenge-platform" in url.lower():
+        return True
+    return False
+
 app = FastAPI(title="GroktoCrawl Browser Service", version="0.1.0")
 
 # In-memory session store
@@ -112,12 +139,28 @@ async def create_browser(req: BrowserCreateRequest):
 
     try:
         p = await async_playwright().start()
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+        )
         context = await browser.new_context(
-            viewport={"width": 1280, "height": 720},
-            user_agent="Mozilla/5.0 (compatible; GroktoCrawlBrowser/0.1)",
+            viewport={"width": 1920, "height": 1080},
+            user_agent=REAL_CHROME_UA,
+            locale="en-US",
+            timezone_id="America/New_York",
+            permissions=["geolocation"],
         )
         page = await context.new_page()
+        # Hide Playwright automation signals from bot detection
+        await page.add_init_script("""() => {
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+        }""")
         session = SessionData(browser, context, page, req.ttl)
         _sessions[session_id] = session
         logger.info("Created browser session %s (TTL: %ds)", session_id, req.ttl)
@@ -144,8 +187,18 @@ async def execute_action(session_id: str, req: BrowserExecuteRequest):
         if req.action == "navigate":
             if not req.url:
                 raise HTTPException(status_code=400, detail="url required for navigate action")
-            await page.goto(req.url, wait_until="domcontentloaded", timeout=req.timeout)
-            return BrowserExecuteResponse(result={"url": page.url, "title": await page.title()})
+            await page.goto(req.url, wait_until="networkidle", timeout=req.timeout)
+            # Cloudflare challenge detection — wait for JS challenge to resolve
+            title = await page.title()
+            current_url = page.url
+            if _is_cloudflare_challenge(title, current_url):
+                logger.info("Cloudflare challenge detected on %s, waiting for resolution...", req.url)
+                await page.wait_for_timeout(8000)
+                title = await page.title()
+                current_url = page.url
+                if _is_cloudflare_challenge(title, current_url):
+                    logger.warning("Cloudflare challenge persisted after wait for %s", req.url)
+            return BrowserExecuteResponse(result={"url": current_url, "title": title})
 
         elif req.action == "click":
             if not req.selector:
