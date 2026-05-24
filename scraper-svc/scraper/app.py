@@ -4,16 +4,27 @@ Single endpoint: POST /scrape — takes a URL, returns clean markdown.
 """
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, HttpUrl
 
+from .cookie_store import close_client, get_client
 from .fetch import smart_scrape
 from .meta import fetch_meta_tags
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="GroktoCrawl Scraper", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app):
+    """Connect to Valkey on startup, close on shutdown (graceful if unavailable)."""
+    await get_client()
+    yield
+    await close_client()
+
+
+app = FastAPI(title="GroktoCrawl Scraper", version="0.1.0", lifespan=lifespan)
 
 
 class ScrapeRequest(BaseModel):

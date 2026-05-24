@@ -41,6 +41,13 @@ Complete overhaul of the scraper from a fixed three-tier system to an adaptive f
 - **Substack session-frame redirect detection** — `_is_substack_redirect()` detects when Substack injects `session-attribution-frame`, `channel-frame`, or GTM noscript redirects. Detection integrated into `fetch_via_playwright()` with a 5-second wait for delayed resolution, and into `_looks_suspicious()` for LLM recovery triggering.
 - **Bot challenge re-check** — after the 8-second resolution window, the scraper re-verifies the page title/URL before proceeding, avoiding false positives from brief challenge page flashes.
 
+#### Cookie Persistence (scraper-svc)
+
+- **Valkey-backed Cloudflare cookie store** — the scraper-svc's Playwright renderer now caches and reuses `cf_clearance` cookies via the shared Valkey instance (`scraper-svc/scraper/cookie_store.py`). Cookies are stored with a 25-minute TTL, scoped to TLD+1 domain. Cross-service sharing: cookies solved by the browser-svc are immediately available to the scraper-svc, and vice versa.
+- **Cookie injection before navigation** — `fetch_via_playwright()` injects stored `cf_clearance` cookies into the browser context before navigating, potentially skipping Cloudflare challenges entirely for previously-solved domains.
+- **Cookie storage after successful scrape** — after extracting content, any new `cf_clearance` cookies are persisted to Valkey for future scrapes.
+- **Graceful degradation** — if Valkey is unavailable, the scraper continues without cookie persistence (logs a warning, returns the content normally).
+
 #### LLM Fixture
 
 - **Prompt-aware fixture** — the `llm-svc` fixture now handles recovery prompt schemas: extracts `<iframe src>` URLs from page content when the prompt mentions `iframe_url` or `recovery`, returns Cloudflare/DDoS-Guard classification data when the prompt mentions `cloudflare` or `block_type`. Makes the full pipeline demonstrable with `docker compose --profile fixture up` (no external API key needed).

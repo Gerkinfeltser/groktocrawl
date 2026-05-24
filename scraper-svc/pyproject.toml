@@ -10,6 +10,7 @@ dependencies = [
     "readability-lxml>=0.8.1",
     "markdownify>=0.14.0",
     "beautifulsoup4>=4.13.0",
+    "redis>=5.0",
 ]
 
 [project.optional-dependencies]
