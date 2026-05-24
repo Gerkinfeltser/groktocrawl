@@ -1,6 +1,6 @@
 [project]
 name = "llm-svc"
-version = "0.1.0"
+version = "0.1.1"
 description = "Deterministic OpenAI-compatible LLM fixture service for GroktoCrawl"
 requires-python = ">=3.12"
 dependencies = [
