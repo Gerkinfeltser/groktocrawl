@@ -1,6 +1,6 @@
 [project]
 name = "scraper-svc"
-version = "0.2.0"
+version = "0.3.0"
 description = "GroktoCrawl URL-to-markdown scraper service"
 requires-python = ">=3.12"
 dependencies = [

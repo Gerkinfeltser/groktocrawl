@@ -5,6 +5,42 @@ All notable changes to GroktoCrawl are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-05-24
+
+### Added
+
+#### Substack Scraping (Stealth Playwright Config)
+
+- **Stealth Playwright renderer** (`scraper-svc/scraper/stealth.py`) — the scraper-svc's Tier 3 now launches Chromium with `--disable-blink-features=AutomationControlled`, a real Chrome 131 User-Agent, 1920x1080 viewport, `en-US` locale, `America/New_York` timezone, and `navigator.webdriver` override via `add_init_script()`. Matches the browser-svc's proven configuration exactly.
+
+- **SPA content retry** — when extracted markdown is short (< 500 chars) or suspicious, the scraper scrolls to the bottom of the page and waits up to 6s to trigger lazy-loaded or dynamically-injected content from JS-rendered pages.
+
+- **Substack redirect detection** — `_is_substack_redirect()` detects `session-attribution-frame`, `channel-frame`, and GTM noscript redirects with a 5-second wait for delayed resolution.
+
+- **`networkidle` timeout** — increased to 45s with no `domcontentloaded` fallback, matching the browser-svc pattern that handles Substack's persistent analytics connections.
+
+- **Content gate fix** — `smart_scrape()` now returns extracted content immediately when `_looks_suspicious()` passes, even if embedded content signals (iframes for comments/analytics) are present. Previously, `substackcdn.com` was falsely matching the `cdn.` domain pattern in `EMBEDDED_CONTENT_DOMAINS`, causing 10K+ char articles to be discarded.
+
+- **Browser-svc fallback** (`_fetch_via_browser_svc()`) — when Substack redirects are detected and the content gate can't resolve them, the scraper can create a browser-svc session, navigate, and extract article text via `executeScript` with `document.querySelector('article').innerText`.
+
+#### Cookie Persistence (scraper-svc)
+
+- **Valkey-backed Cloudflare cookie store** (`scraper-svc/scraper/cookie_store.py`) — `cf_clearance` cookies are cached and reused across scrapes via the shared Valkey instance. Cross-service sharing: cookies solved by the browser-svc are immediately available to the scraper-svc (25-minute TTL, TLD+1 domain scoping).
+
+- **Cookie injection before navigation** — `fetch_via_playwright()` injects stored `cf_clearance` cookies before navigating, skipping Cloudflare challenges for previously-solved domains.
+
+- **Cookie storage after successful scrape** — new `cf_clearance` cookies are persisted to Valkey for future scrapes.
+
+- **Graceful degradation** — if Valkey is unavailable, the scraper continues without cookie persistence (logs a warning, returns content normally).
+
+### Changed
+
+- **Browser args stripped to match browser-svc**: removed `--disable-web-security`, `--disable-features=IsolateOrigins,site-per-process`, and `--disable-features=BlockInsecurePrivateNetworkRequests` from the stealth config. These extra flags deviated from real browser behavior and were potentially detectable.
+
+### Fixed
+
+- **False-positive embedded content detection**: `_has_embedded_content()` was matching `substackcdn.com` against the `cdn.` domain pattern in `EMBEDDED_CONTENT_DOMAINS`, causing all Substack pages with comment/analytics iframes to be flagged as embedded-document portals and sent through the recovery chain. Fixed by prioritizing `content_good` over embedded content signals.
+
 ## [0.2.0] — 2026-05-24
 
 ### Added

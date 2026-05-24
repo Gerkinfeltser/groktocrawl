@@ -1,6 +1,6 @@
 [project]
 name = "browser-svc"
-version = "0.2.0"
+version = "0.3.0"
 description = "GroktoCrawl headless browser session service"
 requires-python = ">=3.12"
 dependencies = [
