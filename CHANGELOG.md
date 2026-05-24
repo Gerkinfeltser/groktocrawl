@@ -5,6 +5,58 @@ All notable changes to GroktoCrawl are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-05-24
+
+### Added
+
+#### Five-Tier Scrape Pipeline
+
+Complete overhaul of the scraper from a fixed three-tier system to an adaptive five-tier pipeline:
+
+- **Tier 3.5: FlareSolverr** — optional profile-gated container for hard Cloudflare challenges (CAPTCHA, strict fingerprinting). Enable with `docker compose --profile flare-solverr up`.
+- **Tier 4: LLM-Assisted Recovery** — when standard tiers return suspicious content (Cloudflare challenges, error pages), the scraper calls a configured LLM to analyze the page. The LLM can extract iframe URLs and retry the scrape on the real content URL, return extracted text embedded in the page, or identify bot challenge types.
+- **Tier 5: LLM Cloudflare Classification** — when all bypass methods fail, the LLM explains the block type (CAPTCHA, JS challenge, rate limit) and suggests alternative access paths (Wayback Machine, Google Cache), turning a hard failure into actionable information.
+
+#### Binary Content Support
+
+- **Content-Type detection** (`scraper-svc`) — auto-detects PDF, EPUB, images, and archives at the HTTP tier. Returns a structured `download` payload (filename, size, content_type) alongside markdown instead of failing.
+- **`groktocrawl download <url>`** — new CLI subcommand that fetches binary content directly via HTTP with a real Chrome User-Agent. Supports `--extract-text` for PDF/EPUB text extraction (requires optional `pymupdf`/`ebooklib` deps). Auto-derives filenames from URL or Content-Type.
+
+#### Iframe Content Detection
+
+- **`_has_embedded_content()`** — detects when a Playwright-rendered page contains an `<iframe>`, `<embed>`, or `<object>` pointing to document URLs (PDFs, EPUBs, known document-serving domains like Sci-Hub, Academia, ResearchGate). Pages with embedded content are escalated to LLM recovery for URL extraction instead of returning the portal page text.
+
+#### Cloudflare Bypass
+
+- **Stealth browser config** — browser-svc now launches Playwright with real Chrome User-Agent, `--disable-blink-features=AutomationControlled`, `navigator.webdriver` override, realistic viewport/locale/timezone, and `networkidle` wait strategy. Cloudflare challenge pages are detected and given an 8-second resolution window.
+- **Cookie persistence** — `cf_clearance` cookies are cached in Valkey with a 25-minute TTL. Subsequent scrapes to the same domain skip the Cloudflare challenge.
+- **FlareSolverr sidecar** — profile-gated container (`profiles: [flare-solverr]`) for sites with aggressive Cloudflare protection.
+
+#### DDoS-Guard Detection
+
+- **Browser-svc**: DDoS-Guard JS challenge detection alongside Cloudflare — title checks for "DDoS-Guard", URL checks for `/.well-known/ddos-guard/`.
+- **Scraper-svc**: `fetch_via_playwright()` now uses `networkidle` wait and checks for bot challenges post-navigation, with an 8-second resolution window.
+
+#### LLM Fixture
+
+- **Prompt-aware fixture** — the `llm-svc` fixture now handles recovery prompt schemas: extracts `<iframe src>` URLs from page content when the prompt mentions `iframe_url` or `recovery`, returns Cloudflare/DDoS-Guard classification data when the prompt mentions `cloudflare` or `block_type`. Makes the full pipeline demonstrable with `docker compose --profile fixture up` (no external API key needed).
+
+### Changed
+
+- **Real Chrome User-Agent everywhere**: scraper-svc's `smart_scrape()` httpx client now uses a real Chrome 131 User-Agent instead of the custom `GroktoCrawl/0.1` string that triggered Cloudflare.
+- **`LLM_BASE_URL` configured in docker-compose**: scraper-svc now has `LLM_BASE_URL=http://llm-svc:8011/v1` in its environment block, fixing the port mismatch with the llm-svc fixture.
+- **Recovery prompt content**: removed 4000-char truncation — the LLM recovery module now sends the full page content instead of the first 4000 characters. URL fragments (`#view=FitH`) are stripped from extracted iframe URLs before retrying.
+
+### Fixed
+
+- **Recovery received markdown, not raw HTML** — the LLM recovery module was receiving the markdown-converted page text (no HTML tags) instead of the raw HTML. Iframe URLs in the HTML were invisible to the LLM. Fixed by passing `raw_html_start` when available.
+- **Duplicate `app = FastAPI(...)`** line in browser-svc left from a previous merge conflict resolution.
+- **LLM fixture returned wrong JSON schema** — the fixture was returning `{"result": "structured response"}` which didn't match the recovery module's expected `{"action": "iframe_url", "url": "..."}` schema.
+
+### Infrastructure
+
+- **Contribution templates**: added bug report and feature request issue templates (`.github/ISSUE_TEMPLATE/`), PR template (`.github/PULL_REQUEST_TEMPLATE.md`), and updated `CONTRIBUTING.md` with Conventional Commits, DCO sign-off requirements, and PR template reference.
+
 ## [0.1.1] — 2026-05-24
 
 ### Added
