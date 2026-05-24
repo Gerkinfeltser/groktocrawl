@@ -72,6 +72,17 @@ services:
     ports:
       - "8012:8012"
 
+  flare-solverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    restart: unless-stopped
+    ports:
+      - "${FLARE_SOLVERR_PORT:-8191}:8191"
+    environment:
+      - LOG_LEVEL=${FLARE_SOLVERR_LOG_LEVEL:-info}
+      - CAPTCHA_SOLVER=${FLARE_SOLVERR_CAPTCHA_SOLVER:-none}
+    profiles:
+      - flare-solverr
+
   agent-svc:
     build:
       context: ./agent-svc
