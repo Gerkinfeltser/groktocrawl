@@ -279,14 +279,8 @@ async def fetch_via_playwright(url: str) -> dict | None:
                 # Inject cached Cloudflare clearance cookies before navigation
                 await inject_cookies(url, context)
 
-                # Navigate — try networkidle first, fall back to domcontentloaded
-                # on timeout (Substack has persistent analytics connections that
-                # prevent networkidle from ever firing)
-                try:
-                    await page.goto(url, wait_until="networkidle", timeout=30000)
-                except TimeoutError:
-                    logger.info("networkidle timed out for %s, falling back to domcontentloaded", url)
-                    await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+                # Navigate with networkidle — same strategy as browser-svc
+                await page.goto(url, wait_until="networkidle", timeout=45000)
 
                 # Check for bot challenges (Cloudflare / DDoS-Guard)
                 title = await page.title()
@@ -392,6 +386,118 @@ def html_to_markdown(html: str) -> str:
             return html[:5000]  # Last resort raw truncation
 
 
+async def _fetch_via_browser_svc(url: str) -> dict | None:
+    """Fallback: use the browser-svc API to navigate and extract content.
+
+    The browser-svc's Playwright configuration is able to handle sites
+    that the scraper-svc's Tier 3 cannot (e.g., Substack redirect chains).
+
+    Browser-svc is available at http://browser-svc:8012.
+    """
+    browser_svc_url = os.getenv("BROWSER_SVC_URL", "http://browser-svc:8012")
+    session_id = None
+    try:
+        # Create a browser session
+        async with httpx.AsyncClient(timeout=30) as client:
+            create_resp = await client.post(
+                f"{browser_svc_url}/browsers",
+                json={"ttl": 60},  # Short TTL, we only need one page load
+            )
+            if create_resp.status_code != 200:
+                logger.warning("Browser-svc session creation failed: %d", create_resp.status_code)
+                return None
+            session_id = create_resp.json().get("id")
+            if not session_id:
+                return None
+
+            # Navigate to the URL
+            nav_resp = await client.post(
+                f"{browser_svc_url}/browsers/{session_id}/execute",
+                json={"action": "navigate", "url": url, "timeout": 45000},
+            )
+            if not nav_resp.json().get("success"):
+                logger.warning("Browser-svc navigation failed for %s", url)
+                return None
+
+            # Get page content (HTML)
+            content_resp = await client.post(
+                f"{browser_svc_url}/browsers/{session_id}/execute",
+                json={"action": "getContent"},
+            )
+            if not content_resp.json().get("success"):
+                return None
+
+            result = content_resp.json()["result"]
+            html = None
+
+            # Try to extract article text via executeScript first
+            text_resp = await client.post(
+                f"{browser_svc_url}/browsers/{session_id}/execute",
+                json={
+                    "action": "executeScript",
+                    "script": (
+                        "document.querySelector('article') "
+                        "? document.querySelector('article').innerText "
+                        ": document.body.innerText"
+                    ),
+                },
+            )
+            if text_resp.json().get("success"):
+                text = text_resp.json()["result"].get("script_result", "")
+                if text and len(text) > 200:
+                    logger.info("Browser-svc fallback hit for %s (article text: %d chars)", url, len(text))
+                    return {
+                        "markdown": text,
+                        "source": "browser-svc",
+                        "url": url,
+                    }
+
+            # Fallback: get HTML and convert to markdown
+            html = result.get("html_length") and (
+                await _get_browser_page_content(browser_svc_url, session_id)
+            )
+            if html:
+                markdown = html_to_markdown(html)
+                if markdown and len(markdown) > 50:
+                    logger.info("Browser-svc fallback hit for %s (HTML: %d chars)", url, len(html))
+                    return {
+                        "markdown": markdown,
+                        "source": "browser-svc",
+                        "url": url,
+                    }
+
+    except Exception as e:
+        logger.warning("Browser-svc fallback failed for %s: %s", url, e)
+    finally:
+        # Clean up the browser session
+        if session_id:
+            try:
+                async with httpx.AsyncClient(timeout=5) as c:
+                    await c.delete(f"{browser_svc_url}/browsers/{session_id}")
+            except Exception:
+                pass
+
+    return None
+
+
+async def _get_browser_page_content(browser_svc_url: str, session_id: str) -> str | None:
+    """Get the full page HTML from a browser-svc session via executeScript."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{browser_svc_url}/browsers/{session_id}/execute",
+                json={
+                    "action": "executeScript",
+                    "script": "document.documentElement.outerHTML",
+                },
+            )
+            if resp.json().get("success"):
+                return resp.json()["result"].get("script_result", "")
+    except Exception:
+        pass
+    return None
+
+
 async def smart_scrape(url: str) -> dict:
     """Try each tier in order. Return the first successful result.
 
@@ -423,7 +529,7 @@ async def smart_scrape(url: str) -> dict:
     if result:
         content_good = not _looks_suspicious(result.get("markdown", ""))
         content_embedded = _has_embedded_content(result.get("raw_html_start", ""))
-        if content_good and not content_embedded:
+        if content_good:
             return result  # genuinely good content, return immediately
         logger.info("Tier 3 content flagged: suspicious=%s, embedded=%s",
                      not content_good, content_embedded)
@@ -444,7 +550,7 @@ async def smart_scrape(url: str) -> dict:
         if recovery_result:
             return recovery_result
 
-    # Check for specific failure modes to provide actionable error messages
+    # Check for specific failure modes — try browser-svc fallback for Substack
     if result:
         raw_html = result.get("raw_html_start", "")
         redirected_url = ""
@@ -455,6 +561,11 @@ async def smart_scrape(url: str) -> dict:
             redirected_url = f" (redirected to {substack_match.group()})"
 
         if _is_substack_redirect(raw_html):
+            # Fallback: use the browser-svc which handles Substack correctly
+            logger.info("Substack redirect detected, trying browser-svc fallback for %s", url)
+            browser_result = await _fetch_via_browser_svc(url)
+            if browser_result:
+                return browser_result
             return {
                 "error": (
                     f"Could not extract content from {url}{redirected_url}. "

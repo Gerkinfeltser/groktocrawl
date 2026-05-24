@@ -31,9 +31,6 @@ STEALTH_BROWSER_ARGS = [
     "--disable-blink-features=AutomationControlled",
     "--no-sandbox",
     "--disable-dev-shm-usage",
-    "--disable-features=IsolateOrigins,site-per-process",
-    "--disable-web-security",
-    "--disable-features=BlockInsecurePrivateNetworkRequests",
 ]
 
 # ── Browser context settings ────────────────────────────────────
@@ -43,64 +40,13 @@ STEALTH_CONTEXT_KWARGS = {
     "locale": "en-US",
     "timezone_id": "America/New_York",
     "permissions": ["geolocation"],
-    "geolocation": {"latitude": 40.7128, "longitude": -74.0060},
 }
 
 # ── Init script to hide automation signals ─────────────────────
 STEALTH_INIT_SCRIPT = """() => {
-    // Hide webdriver property
     Object.defineProperty(navigator, 'webdriver', {
         get: () => undefined
     });
-
-    // Populate plugins array (headless Chromium has empty array)
-    Object.defineProperty(navigator, 'plugins', {
-        get: () => [
-            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
-            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
-            { name: 'Native Client', filename: 'internal-nacl-plugin' },
-        ]
-    });
-
-    // Set languages
-    Object.defineProperty(navigator, 'languages', {
-        get: () => ['en-US', 'en']
-    });
-
-    // Chrome runtime presence (some sites check this)
-    window.chrome = {
-        runtime: {},
-        loadTimes: function() {},
-        csi: function() {},
-        app: {}
-    };
-
-    // Override permissions query to hide headless
-    if (navigator.permissions && navigator.permissions.query) {
-        const originalQuery = navigator.permissions.query.bind(navigator.permissions);
-        navigator.permissions.query = (desc) => {
-            if (desc.name === 'notifications' || desc.name === 'clipboard-read') {
-                return Promise.resolve({ state: 'granted' });
-            }
-            return originalQuery(desc);
-        };
-    }
-
-    // WebGL vendor/renderer spoofing
-    const getParameterProxyHandler = {
-        apply: function(target, thisArg, args) {
-            const param = args[0];
-            if (param === 37445) return 'Intel Inc.';       // UNMASKED_VENDOR_WEBGL
-            if (param === 37446) return 'Intel Iris OpenGL Engine';  // UNMASKED_RENDERER_WEBGL
-            return Reflect.apply(target, thisArg, args);
-        }
-    };
-    const canvas = document.createElement('canvas');
-    const gl = canvas.getContext('webgl');
-    if (gl) {
-        const originalGetParameter = gl.getParameter.bind(gl);
-        gl.getParameter = new Proxy(originalGetParameter, getParameterProxyHandler);
-    }
 }"""
 
 
