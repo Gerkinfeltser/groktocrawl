@@ -61,6 +61,7 @@ async def scrape(request: ScrapeRequest):
                 "markdown": result.get("markdown", ""),
                 "source": result.get("source", "unknown"),
                 "url": request.url,
+                **({"download": result["download"]} if result.get("download") else {}),
             },
         )
     except Exception as e:
