@@ -66,6 +66,9 @@ services:
       - "8001:8001"
     environment:
       - LLM_BASE_URL=http://llm-svc:8011/v1
+      - VALKEY_HOST=valkey
+      - VALKEY_PORT=6379
+      - VALKEY_DB=0
 
   browser-svc:
     build:

@@ -268,6 +268,7 @@ async def fetch_via_playwright(url: str) -> dict | None:
     """
     try:
         from playwright.async_api import async_playwright, TimeoutError
+        from .cookie_store import inject_cookies, store_cookies
         from .stealth import create_stealth_browser, create_stealth_context
 
         async with async_playwright() as p:
@@ -275,6 +276,9 @@ async def fetch_via_playwright(url: str) -> dict | None:
             context = await create_stealth_context(browser)
             page = await context.new_page()
             try:
+                # Inject cached Cloudflare clearance cookies before navigation
+                await inject_cookies(url, context)
+
                 # Navigate — try networkidle first, fall back to domcontentloaded
                 # on timeout (Substack has persistent analytics connections that
                 # prevent networkidle from ever firing)
@@ -312,6 +316,8 @@ async def fetch_via_playwright(url: str) -> dict | None:
             markdown = html_to_markdown(html)
             if markdown and len(markdown) > 50:
                 logger.info("Tier 3 hit: playwright render for %s", url)
+                # Store any new cf_clearance cookies for future scrapes
+                await store_cookies(url, context)
                 return {
                     "markdown": markdown,
                     "source": "playwright",

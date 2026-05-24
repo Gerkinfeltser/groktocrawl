@@ -7,6 +7,8 @@ Run with: python3 -m pytest tests/test_stealth.py -v
 import sys
 import os
 
+import pytest
+
 # Ensure the scraper module is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scraper-svc"))
 
@@ -182,3 +184,85 @@ class TestLooksSuspicious:
         func = self._import_func()
         assert not func("The quick brown fox jumps over the lazy dog. " * 10)
         assert not func("Article content with multiple paragraphs. " * 20)
+
+
+class TestCookieKey:
+    """Test _cookie_key() TLD+1 domain extraction."""
+
+    @staticmethod
+    def _import_func():
+        from scraper.cookie_store import _cookie_key
+        return _cookie_key
+
+    def test_standard_substack(self):
+        func = self._import_func()
+        assert func("https://heathercoxrichardson.substack.com/p/june-1-2025") == "cf:clearance:substack.com"
+
+    def test_standard_com_domain(self):
+        func = self._import_func()
+        assert func("https://www.example.com/page") == "cf:clearance:example.com"
+
+    def test_co_uk_domain(self):
+        func = self._import_func()
+        # Note: simple TLD+1 algorithm extracts last 2 dot-parts.
+        # For .co.uk this gives "co.uk" not "example.co.uk".
+        # This is a known limitation shared with browser-svc.
+        key = func("https://blog.example.co.uk/article")
+        assert key.startswith("cf:clearance:")
+        assert "co.uk" in key
+
+    def test_ip_address(self):
+        func = self._import_func()
+        key = func("http://192.168.1.1/admin")
+        assert key.startswith("cf:clearance:")
+
+    def test_localhost(self):
+        func = self._import_func()
+        key = func("http://localhost:8080/health")
+        assert key.startswith("cf:clearance:")
+
+    def test_single_label(self):
+        func = self._import_func()
+        key = func("http://internal-service/page")
+        assert key.startswith("cf:clearance:")
+
+
+class TestCookieStoreGraceful:
+    """Test that cookie functions don't raise when Valkey is unavailable.
+
+    These tests verify graceful degradation — the scraper should continue
+    working without cookie persistence if no Valkey instance is running.
+    """
+
+    @staticmethod
+    def _import_inject():
+        from scraper.cookie_store import inject_cookies
+        return inject_cookies
+
+    @staticmethod
+    def _import_store():
+        from scraper.cookie_store import store_cookies
+        return store_cookies
+
+    @pytest.mark.asyncio
+    async def test_inject_no_valkey(self):
+        """inject_cookies should not raise when Valkey is unavailable."""
+        func = self._import_inject()
+        # No Valkey running — should log and return None gracefully
+        result = await func("https://example.com", None)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_store_no_valkey(self):
+        """store_cookies should not raise when Valkey is unavailable."""
+        func = self._import_store()
+        result = await func("https://example.com", None)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_inject_empty_context(self):
+        """inject_cookies should handle a context with no cookies gracefully."""
+        func = self._import_inject()
+        # Even with no Valkey, passing None context should not crash
+        result = await func("https://example.com", {})
+        assert result is None
