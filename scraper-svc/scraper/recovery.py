@@ -57,6 +57,98 @@ RECOVERY_SCHEMA = {
     "required": ["action"],
 }
 
+# ── Cloudflare classification (last-resort analysis) ───────────
+
+CLOUDFLARE_CLASSIFICATION_PROMPT = """We attempted to fetch {url} and all bypass methods failed. The page content suggests a Cloudflare block was encountered.
+
+We tried:
+1. Direct HTTP fetch
+2. Playwright headless browser with stealth configuration
+3. FlareSolverr (dedicated Cloudflare challenge solver)
+
+All failed. Analyze what type of block we're facing.
+
+Return a JSON object with these fields:
+- block_type: "captcha" | "js_challenge" | "rate_limit" | "ip_block" | "unknown" | "not_cloudflare"
+- confidence: "high" | "medium" | "low"
+- page_indicators: list of strings identifying what was seen
+- alternative_paths: list of objects with type, description, and url for alternative access (e.g., wayback machine, google cache)
+- human_action_required: boolean — does this need a human to solve?
+- message: plain language explanation"""
+
+
+async def classify_cloudflare_block(url: str, page_text: str) -> dict | None:
+    """Last-resort Cloudflare classification when all bypass attempts fail.
+
+    This does NOT attempt to fix the fetch. It explains the failure so the
+    caller can decide what to do (retry, try different route, give up).
+
+    Returns a dict with classification metadata, or None on failure/timeout.
+    """
+    if not page_text:
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=RECOVERY_TIMEOUT) as client:
+            body = {
+                "model": LLM_MODEL,
+                "messages": [
+                    {"role": "system", "content": CLOUDFLARE_CLASSIFICATION_PROMPT.format(url=url)},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"---PAGE CONTENT (first 3000 chars)---\n"
+                            f"{page_text[:3000]}\n"
+                            f"---END---"
+                        ),
+                    },
+                ],
+                "temperature": 0.1,
+                "max_tokens": 1024,
+                "response_format": {"type": "json_object"},
+            }
+
+            headers = {"Content-Type": "application/json"}
+            if LLM_API_KEY:
+                headers["Authorization"] = f"Bearer {LLM_API_KEY}"
+
+            resp = await client.post(
+                f"{LLM_BASE_URL}/chat/completions",
+                headers=headers,
+                json=body,
+            )
+
+            if resp.status_code != 200:
+                return None
+
+            result = resp.json()
+            content = result["choices"][0]["message"]["content"]
+            parsed = json.loads(content)
+
+            logger.info("Cloudflare classification for %s: %s (confidence: %s)",
+                        url, parsed.get("block_type", "unknown"), parsed.get("confidence", "low"))
+
+            return {
+                "markdown": "",
+                "source": "llm-classification",
+                "url": url,
+                "error": parsed.get("message", "Cloudflare block encountered"),
+                "classification": {
+                    "block_type": parsed.get("block_type", "unknown"),
+                    "confidence": parsed.get("confidence", "low"),
+                    "human_action_required": parsed.get("human_action_required", False),
+                    "alternative_paths": parsed.get("alternative_paths", []),
+                    "page_indicators": parsed.get("page_indicators", []),
+                },
+            }
+
+    except (httpx.TimeoutException, httpx.ConnectError):
+        logger.debug("Cloudflare classification timed out or unavailable for %s", url)
+        return None
+    except (json.JSONDecodeError, KeyError, Exception) as e:
+        logger.warning("Cloudflare classification failed for %s: %s", url, e)
+        return None
+
 
 async def attempt_llm_recovery(url: str, page_text: str) -> dict | None:
     """Try to recover from a failed scrape using LLM analysis.
