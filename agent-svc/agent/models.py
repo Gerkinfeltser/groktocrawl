@@ -12,9 +12,18 @@ class ScrapeRequest(BaseModel):
     timeout: int = 30000
 
 
+class DownloadData(BaseModel):
+    """Binary content metadata for non-HTML responses."""
+    filename: str
+    content_type: str
+    size: int
+    data_url: str | None = None
+
+
 class ScrapeData(BaseModel):
     markdown: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
+    download: DownloadData | None = None
 
 
 class ScrapeResponse(BaseModel):
