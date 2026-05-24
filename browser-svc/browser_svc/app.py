@@ -5,16 +5,73 @@ Each session is an isolated Chromium instance with its own context.
 """
 
 import asyncio
+import json
 import logging
+import os
 import time
 import uuid
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from playwright.async_api import async_playwright
 
 logger = logging.getLogger(__name__)
+
+# ── Cookie persistence ─────────────────────────────────────────
+COOKIE_STORE_PREFIX = "cf:clearance:"
+COOKIE_TTL_SECONDS = 1500  # 25 minutes (under Cloudflare's typical 30m expiry)
+
+
+def _cookie_key(url: str) -> str:
+    """Extract TLD+1 domain for cookie scoping."""
+    hostname = urlparse(url).hostname or "unknown"
+    parts = hostname.split(".")
+    if len(parts) >= 2:
+        domain = ".".join(parts[-2:])
+    else:
+        domain = parts[0]
+    return f"{COOKIE_STORE_PREFIX}{domain}"
+
+
+async def _inject_cookies(url: str, context, redis_client) -> None:
+    """Inject stored Cloudflare clearance cookies before navigation."""
+    if not redis_client:
+        return
+    try:
+        key = _cookie_key(url)
+        stored = await redis_client.get(key)
+        if stored:
+            data = json.loads(stored)
+            await context.add_cookies(data["cookies"])
+            remaining = data.get("ttl", 0) - (time.time() - data.get("resolved_at", 0))
+            if remaining > 0:
+                logger.info("Injected %d stored cookies for %s (%.0fs remaining)",
+                            len(data["cookies"]), url, remaining)
+    except Exception as e:
+        logger.debug("Cookie injection failed for %s: %s", url, e)
+
+
+async def _store_cookies(url: str, context, redis_client) -> None:
+    """Store Cloudflare clearance cookies after successful navigation."""
+    if not redis_client:
+        return
+    try:
+        cookies = await context.cookies()
+        cf_cookies = [c for c in cookies if c.get("name") == "cf_clearance"]
+        if cf_cookies:
+            key = _cookie_key(url)
+            payload = json.dumps({
+                "cookies": cf_cookies,
+                "resolved_at": time.time(),
+                "ttl": COOKIE_TTL_SECONDS,
+            })
+            await redis_client.setex(key, COOKIE_TTL_SECONDS, payload)
+            logger.info("Stored %d cf_clearance cookies for %s", len(cf_cookies), url)
+    except Exception as e:
+        logger.debug("Cookie storage failed for %s: %s", url, e)
+
 
 # ── Stealth configuration ─────────────────────────────────────
 # Real Chrome user agent to avoid bot detection
@@ -38,11 +95,12 @@ def _is_cloudflare_challenge(title: str, url: str) -> bool:
     for indicator in CLOUDFLARE_INDICATORS:
         if indicator.lower() in title.lower():
             return True
-    # Cloudflare challenge URLs often contain cf_chl_opt or __cf_chl
     if "cf_chl" in url.lower() or "challenge-platform" in url.lower():
         return True
     return False
 
+
+app = FastAPI(title="GroktoCrawl Browser Service", version="0.1.0")
 app = FastAPI(title="GroktoCrawl Browser Service", version="0.1.0")
 
 # In-memory session store
@@ -101,6 +159,20 @@ class BrowserListResponse(BaseModel):
 
 @app.on_event("startup")
 async def startup():
+    # Connect to Valkey/Redis for cookie persistence
+    valkey_host = os.getenv("VALKEY_HOST", "valkey")
+    valkey_port = int(os.getenv("VALKEY_PORT", "6379"))
+    try:
+        import redis.asyncio as aioredis
+        app.state.redis = aioredis.Redis(
+            host=valkey_host, port=valkey_port, decode_responses=True,
+        )
+        await app.state.redis.ping()
+        logger.info("Connected to Valkey at %s:%s", valkey_host, valkey_port)
+    except Exception as e:
+        logger.warning("Valkey not available at %s:%s — cookie persistence disabled (%s)",
+                       valkey_host, valkey_port, e)
+        app.state.redis = None
     asyncio.create_task(_cleanup_loop())
 
 
@@ -187,6 +259,10 @@ async def execute_action(session_id: str, req: BrowserExecuteRequest):
         if req.action == "navigate":
             if not req.url:
                 raise HTTPException(status_code=400, detail="url required for navigate action")
+            # Inject stored Cloudflare clearance cookies before navigation
+            redis_client = getattr(app.state, "redis", None)
+            await _inject_cookies(req.url, session.context, redis_client)
+
             await page.goto(req.url, wait_until="networkidle", timeout=req.timeout)
             # Cloudflare challenge detection — wait for JS challenge to resolve
             title = await page.title()
@@ -198,6 +274,10 @@ async def execute_action(session_id: str, req: BrowserExecuteRequest):
                 current_url = page.url
                 if _is_cloudflare_challenge(title, current_url):
                     logger.warning("Cloudflare challenge persisted after wait for %s", req.url)
+
+            # Store Cloudflare cookies after successful navigation
+            await _store_cookies(req.url, session.context, redis_client)
+
             return BrowserExecuteResponse(result={"url": current_url, "title": title})
 
         elif req.action == "click":
