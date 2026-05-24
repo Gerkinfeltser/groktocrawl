@@ -107,6 +107,7 @@ async def create_agent(request: Request, body: AgentRequest):
             searxng_url=request.app.state.searxng_url,
             scraper_url=request.app.state.scraper_url,
             webhook_config=body.webhook,
+            requested_model=body.model,
         )
     )
     return AgentCreateResponse(id=job_id)
