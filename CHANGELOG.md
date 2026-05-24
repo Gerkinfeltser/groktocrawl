@@ -35,7 +35,11 @@ Complete overhaul of the scraper from a fixed three-tier system to an adaptive f
 #### DDoS-Guard Detection
 
 - **Browser-svc**: DDoS-Guard JS challenge detection alongside Cloudflare — title checks for "DDoS-Guard", URL checks for `/.well-known/ddos-guard/`.
-- **Scraper-svc**: `fetch_via_playwright()` now uses `networkidle` wait and checks for bot challenges post-navigation, with an 8-second resolution window.
+- **Scraper-svc bot challenge detection**: `fetch_via_playwright()` now uses `networkidle` wait and checks for bot challenges post-navigation, with an 8-second resolution window.
+- **Stealth scraper-svc Playwright config** — the scraper-svc's Tier 3 renderer now uses the same stealth configuration as browser-svc: `--disable-blink-features=AutomationControlled`, real Chrome 131 User-Agent, 1920x1080 viewport, `en-US` locale, `America/New_York` timezone, and `navigator.webdriver` override via `add_init_script()`. Additional fingerprint hardening: `navigator.plugins` array population, `navigator.languages` override, `window.chrome` presence, and WebGL vendor/renderer spoofing. See `scraper-svc/scraper/stealth.py`.
+- **`networkidle` → `domcontentloaded` timeout fallback** — when `networkidle` exceeds 30s (caused by persistent analytics connections on sites like Substack), the scraper falls back to `domcontentloaded` and proceeds with the rendered content instead of failing.
+- **Substack session-frame redirect detection** — `_is_substack_redirect()` detects when Substack injects `session-attribution-frame`, `channel-frame`, or GTM noscript redirects. Detection integrated into `fetch_via_playwright()` with a 5-second wait for delayed resolution, and into `_looks_suspicious()` for LLM recovery triggering.
+- **Bot challenge re-check** — after the 8-second resolution window, the scraper re-verifies the page title/URL before proceeding, avoiding false positives from brief challenge page flashes.
 
 #### LLM Fixture
 
