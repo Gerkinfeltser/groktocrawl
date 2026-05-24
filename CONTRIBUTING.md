@@ -75,6 +75,34 @@ curl http://localhost:8080/health
 - `test-site/` — fixture website for integration tests
 - `tests/` — integration tests
 
+## Commit Guidelines
+
+This project uses **Conventional Commits**:
+
+```
+<type>: <short description>
+
+<longer explanation if needed>
+```
+
+Types: `feat`, `fix`, `refactor`, `docs`, `test`, `ci`, `chore`, `perf`, `style`
+
+Branch names should match the commit type: `feat/add-widget`, `fix/login-timeout`.
+
+### Sign-Off (DCO)
+
+Every commit must include a `Signed-off-by` trailer, certifying that you have the right to contribute the code under the MIT License:
+
+```bash
+git commit -s -m "feat: add widget"
+```
+
+This is a [Developer Certificate of Origin](https://developercertificate.org/) requirement. It is legally simpler than a CLA.
+
+## PR Template
+
+A pull request template is available at `.github/PULL_REQUEST_TEMPLATE.md`. Fill it out completely when opening a PR.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the MIT License.
