@@ -89,18 +89,32 @@ CLOUDFLARE_INDICATORS = [
     "challenge-platform",
 ]
 
+DDOS_GUARD_INDICATORS = [
+    "DDoS-Guard",
+    "DDOS-GUARD",
+    "ddos-guard",
+    "Checking your browser before accessing",
+    ".well-known/ddos-guard",
+]
 
-def _is_cloudflare_challenge(title: str, url: str) -> bool:
-    """Heuristic: does the page indicate a Cloudflare challenge?"""
+
+def _is_bot_challenge(title: str, url: str) -> bool:
+    """Heuristic: does the page indicate a bot challenge (Cloudflare or DDoS-Guard)?"""
+    # Cloudflare checks
     for indicator in CLOUDFLARE_INDICATORS:
         if indicator.lower() in title.lower():
             return True
     if "cf_chl" in url.lower() or "challenge-platform" in url.lower():
         return True
+    # DDoS-Guard checks
+    for indicator in DDOS_GUARD_INDICATORS:
+        if indicator.lower() in title.lower():
+            return True
+    if "ddos-guard" in url.lower() or "/.well-known/ddos-guard" in url.lower():
+        return True
     return False
 
 
-app = FastAPI(title="GroktoCrawl Browser Service", version="0.1.0")
 app = FastAPI(title="GroktoCrawl Browser Service", version="0.1.0")
 
 # In-memory session store
@@ -264,16 +278,16 @@ async def execute_action(session_id: str, req: BrowserExecuteRequest):
             await _inject_cookies(req.url, session.context, redis_client)
 
             await page.goto(req.url, wait_until="networkidle", timeout=req.timeout)
-            # Cloudflare challenge detection — wait for JS challenge to resolve
+            # Bot challenge detection (Cloudflare / DDoS-Guard) — wait for JS challenge to resolve
             title = await page.title()
             current_url = page.url
-            if _is_cloudflare_challenge(title, current_url):
+            if _is_bot_challenge(title, current_url):
                 logger.info("Cloudflare challenge detected on %s, waiting for resolution...", req.url)
                 await page.wait_for_timeout(8000)
                 title = await page.title()
                 current_url = page.url
-                if _is_cloudflare_challenge(title, current_url):
-                    logger.warning("Cloudflare challenge persisted after wait for %s", req.url)
+                if _is_bot_challenge(title, current_url):
+                    logger.warning("Bot challenge persisted after wait for %s", req.url)
 
             # Store Cloudflare cookies after successful navigation
             await _store_cookies(req.url, session.context, redis_client)
