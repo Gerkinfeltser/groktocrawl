@@ -120,6 +120,21 @@ The scraper uses a **three-tier strategy**: check `/llms.txt` first, try `Accept
 
 All Firecrawl v2 API-compatible in request/response shape.
 
+### Agent endpoint
+
+The `POST /v2/agent` endpoint accepts an optional `model` field to override the environment-configured LLM on a per-request basis:
+
+```json
+{
+  "prompt": "Research the latest AI safety papers",
+  "model": "gpt-4o"
+}
+```
+
+When `model` is omitted or set to `"default"`, the `LLM_MODEL` from `.env` is used. This is useful for routing simple lookups to a cheaper model and complex research to a more capable one.
+
+The agent is powered by a **determined research prompt** that evaluates source quality, synthesizes across multiple pages, detects contradictions, and cites sources by URL. It does not fabricate information — if the available sources don't answer the question, it says so and suggests what would be needed.
+
 ## OpenAPI / Swagger Docs
 
 Interactive API documentation is available when the stack is running:
