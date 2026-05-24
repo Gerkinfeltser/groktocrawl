@@ -1,0 +1,184 @@
+"""Tests for stealth Playwright configuration and bot detection logic.
+
+These test the core detection functions that don't need a running Docker stack.
+Run with: python3 -m pytest tests/test_stealth.py -v
+"""
+
+import sys
+import os
+
+# Ensure the scraper module is importable
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scraper-svc"))
+
+
+def test_stealth_module_imports():
+    """Verify the stealth module imports and exposes expected functions."""
+    from scraper.stealth import (
+        create_stealth_browser,
+        create_stealth_context,
+        STEALTH_BROWSER_ARGS,
+        STEALTH_CONTEXT_KWARGS,
+        STEALTH_INIT_SCRIPT,
+        REAL_CHROME_UA,
+    )
+    assert callable(create_stealth_browser)
+    assert callable(create_stealth_context)
+    assert "--disable-blink-features=AutomationControlled" in STEALTH_BROWSER_ARGS
+    assert "user_agent" in STEALTH_CONTEXT_KWARGS
+    assert STEALTH_CONTEXT_KWARGS["user_agent"] == REAL_CHROME_UA
+    assert "viewport" in STEALTH_CONTEXT_KWARGS
+    assert STEALTH_CONTEXT_KWARGS["viewport"] == {"width": 1920, "height": 1080}
+    assert "locale" in STEALTH_CONTEXT_KWARGS
+    assert STEALTH_CONTEXT_KWARGS["locale"] == "en-US"
+    assert "webdriver" in STEALTH_INIT_SCRIPT  # Object.defineProperty(navigator, 'webdriver')
+    assert "plugins" in STEALTH_INIT_SCRIPT    # Object.defineProperty(navigator, 'plugins')
+    assert "chrome" in STEALTH_INIT_SCRIPT     # window.chrome
+    assert "getParameter" in STEALTH_INIT_SCRIPT  # WebGL spoofing
+
+
+def test_stealth_browser_args_comprehensive():
+    """Verify all expected stealth browser args are present."""
+    from scraper.stealth import STEALTH_BROWSER_ARGS
+    expected_args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+    ]
+    for arg in expected_args:
+        assert arg in STEALTH_BROWSER_ARGS, f"Missing expected arg: {arg}"
+
+
+def test_stealth_context_has_realistic_fingerprint():
+    """Verify stealth context has realistic browser fingerprint settings."""
+    from scraper.stealth import STEALTH_CONTEXT_KWARGS
+    # Should have realistic viewport
+    assert STEALTH_CONTEXT_KWARGS["viewport"]["width"] >= 1280
+    assert STEALTH_CONTEXT_KWARGS["viewport"]["height"] >= 720
+    # Should have locale and timezone
+    assert STEALTH_CONTEXT_KWARGS.get("locale")
+    assert STEALTH_CONTEXT_KWARGS.get("timezone_id")
+
+
+def test_stealth_init_script_syntax():
+    """Verify the init script is valid JavaScript syntax (basic check)."""
+    from scraper.stealth import STEALTH_INIT_SCRIPT
+    # Should be a string containing a function
+    assert STEALTH_INIT_SCRIPT.startswith("() =>")
+    # Should contain key stealth patches
+    assert "webdriver" in STEALTH_INIT_SCRIPT
+    assert "plugins" in STEALTH_INIT_SCRIPT
+    assert "languages" in STEALTH_INIT_SCRIPT
+    assert "chrome" in STEALTH_INIT_SCRIPT
+    # Should have matching braces
+    open_braces = STEALTH_INIT_SCRIPT.count("{")
+    close_braces = STEALTH_INIT_SCRIPT.count("}")
+    assert open_braces == close_braces, f"Unbalanced braces: {open_braces} vs {close_braces}"
+
+
+def test_stealth_ua_matches_chrome_131():
+    """Verify the User-Agent string is a real Chrome 131 UA."""
+    from scraper.stealth import REAL_CHROME_UA
+    assert "Chrome/131" in REAL_CHROME_UA
+    assert "Mozilla/5.0" in REAL_CHROME_UA
+    assert "Windows NT" in REAL_CHROME_UA
+    assert "Safari/537.36" in REAL_CHROME_UA
+
+
+class TestBotChallengeDetection:
+    """Test _is_bot_challenge() for Cloudflare and DDoS-Guard patterns."""
+
+    @staticmethod
+    def _import_func():
+        from scraper.fetch import _is_bot_challenge
+        return _is_bot_challenge
+
+    def test_cloudflare_js_challenge_title(self):
+        func = self._import_func()
+        assert func("Just a moment...", "https://example.com")
+        assert func("Checking your browser before accessing", "https://example.com")
+        assert func("DDoS protection by Cloudflare", "https://example.com")
+
+    def test_cloudflare_challenge_url(self):
+        func = self._import_func()
+        assert func("Example", "https://example.com/cdn-cgi/challenge-platform/")
+        assert func("Example", "https://example.com/?cf_chl_tk=abc")
+
+    def test_ddos_guard_challenge_title(self):
+        func = self._import_func()
+        assert func("DDoS-Guard", "https://example.com")
+        assert func("Checking your browser before accessing the site", "https://example.com")
+
+    def test_ddos_guard_challenge_url(self):
+        func = self._import_func()
+        assert func("Example", "https://example.com/.well-known/ddos-guard/")
+        assert func("Example", "https://example.com/?ddos-guard")
+
+    def test_normal_page_not_detected(self):
+        func = self._import_func()
+        assert not func("Welcome to my blog", "https://blog.example.com/posts/hello-world")
+        assert not func("Heather Cox Richardson", "https://heathercoxrichardson.substack.com/p/june-1-2025")
+        assert not func("The Free Press", "https://www.thefp.com/p/some-article")
+
+
+class TestSubstackRedirectDetection:
+    """Test _is_substack_redirect() for Substack session/channel frame patterns."""
+
+    @staticmethod
+    def _import_func():
+        from scraper.fetch import _is_substack_redirect
+        return _is_substack_redirect
+
+    def test_session_attribution_frame(self):
+        func = self._import_func()
+        assert func("https://substack.com/session-attribution-frame?origin=...")
+
+    def test_channel_frame(self):
+        func = self._import_func()
+        assert func("https://substack.com/channel-frame?channel=...")
+
+    def test_gtm_redirect(self):
+        func = self._import_func()
+        assert func("https://www.googletagmanager.com/ns.html?id=GTM-TFQLSP2")
+
+    def test_normal_substack_url_not_detected(self):
+        func = self._import_func()
+        assert not func("https://heathercoxrichardson.substack.com/p/june-1-2025")
+        assert not func("https://simonsarris.substack.com/p/some-article")
+
+    def test_empty_url_not_detected(self):
+        func = self._import_func()
+        assert not func("")
+        assert not func("https://example.com")
+
+
+class TestLooksSuspicious:
+    """Test _looks_suspicious() includes Substack patterns and existing checks."""
+
+    @staticmethod
+    def _import_func():
+        from scraper.fetch import _looks_suspicious
+        return _looks_suspicious
+
+    def test_empty_content_suspicious(self):
+        func = self._import_func()
+        assert func("")
+        assert func(None)  # type: ignore
+
+    def test_short_content_suspicious(self):
+        func = self._import_func()
+        assert func("Hello")
+
+    def test_cloudflare_indicators(self):
+        func = self._import_func()
+        assert func("Just a moment... checking your browser")
+        assert func("DDoS protection by Cloudflare")
+
+    def test_substack_indicators(self):
+        func = self._import_func()
+        assert func("substack.com/session-attribution-frame")
+        assert func("substack.com/channel-frame")
+
+    def test_normal_content_not_suspicious(self):
+        func = self._import_func()
+        assert not func("The quick brown fox jumps over the lazy dog. " * 10)
+        assert not func("Article content with multiple paragraphs. " * 20)
