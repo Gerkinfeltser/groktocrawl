@@ -92,6 +92,14 @@ CLOUDFLARE_INDICATORS = [
     "challenge-platform",
 ]
 
+DDOS_GUARD_INDICATORS = [
+    "DDoS-Guard",
+    "DDOS-GUARD",
+    "ddos-guard",
+    "Checking your browser before accessing",
+    ".well-known/ddos-guard",
+]
+
 
 def _looks_suspicious(content: str) -> bool:
     """Heuristic: does the page content look like a challenge/error page?"""
@@ -99,7 +107,7 @@ def _looks_suspicious(content: str) -> bool:
         return True
     if len(content) < 100:
         return True
-    for indicator in CLOUDFLARE_INDICATORS:
+    for indicator in CLOUDFLARE_INDICATORS + DDOS_GUARD_INDICATORS:
         if indicator.lower() in content.lower():
             return True
     return False
@@ -223,9 +231,13 @@ async def fetch_via_playwright(url: str) -> dict | None:
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                # Wait a bit for JS to execute
-                await page.wait_for_timeout(2000)
+                await page.goto(url, wait_until="networkidle", timeout=30000)
+                # Bot challenge detection (Cloudflare / DDoS-Guard)
+                title = await page.title()
+                current_url = page.url
+                if _looks_suspicious(title + " " + current_url):
+                    logger.info("Bot challenge detected on %s, waiting for resolution...", url)
+                    await page.wait_for_timeout(8000)
                 html = await page.content()
             finally:
                 await browser.close()
