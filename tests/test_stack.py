@@ -149,3 +149,91 @@ def test_activity_multi_type():
     agent_ids = [j["id"] for j in jobs if j["kind"] == "agent"]
     assert crawl_id in crawl_ids, f"Crawl job {crawl_id} not found"
     assert agent_id in agent_ids, f"Agent job {agent_id} not found"
+
+
+# ----- llms.txt description quality tests -----
+
+def test_scraper_meta_endpoint():
+    """POST /scrape/meta returns meta tags from raw HTML."""
+    resp = httpx.post(SCRAPER + "/scrape/meta", json={"url": TEST_SITE + "/content/with-meta"}, timeout=30)
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["success"] is True
+    assert payload["title"] == "Meta Tag Page"
+    assert payload["description"] is not None
+    assert "meta description for testing" in payload["description"]
+    assert payload["og_description"] is not None
+    assert "Open Graph description" in payload["og_description"]
+
+
+def test_scraper_meta_fallback_url():
+    """POST /scrape/meta returns nulls for pages without meta tags."""
+    resp = httpx.post(SCRAPER + "/scrape/meta", json={"url": TEST_SITE + "/"}, timeout=30)
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["success"] is True
+    # The root page has no meta description or og:description
+    assert payload["title"] == "Fixture Site"
+    assert payload["description"] is None
+    assert payload["og_description"] is None
+
+
+def test_generate_llmstxt_sentence_boundary():
+    """Generated llms.txt entries should end at sentence boundaries, not mid-sentence."""
+    # Create an llms.txt generation job
+    resp = httpx.post(
+        AGENT + "/v2/generate-llmstxt",
+        json={"url": TEST_SITE + "/content/multi-sentence", "max_pages": 1},
+        timeout=120,
+    )
+    assert resp.status_code == 200
+    job_id = resp.json()["id"]
+
+    # Poll for completion
+    for _ in range(30):
+        status = httpx.get(AGENT + f"/v2/generate-llmstxt/{job_id}", timeout=120)
+        if status.json()["status"] == "completed":
+            break
+        time.sleep(1)
+
+    result = status.json()
+    assert result["status"] == "completed"
+    llms = result.get("data", {}).get("llms_txt", "")
+    assert llms, "llms_txt should not be empty"
+
+    # The description should end with a sentence-ending punctuation, not mid-word
+    # Find the description in the llms.txt output
+    for line in llms.split("\n"):
+        if line.startswith("- [") and ": " in line:
+            desc = line.split(": ", 1)[1]
+            # Should end with sentence punctuation
+            assert desc.rstrip()[-1] in ".!?", f"Description should end with sentence punctuation, got: {desc[-20:]}"
+            # Should be longer than the old 150-char hard limit if content permits
+            assert len(desc) > 100, f"Description should be substantive, got {len(desc)} chars: {desc}"
+
+
+def test_generate_llmstxt_meta_tag_preference():
+    """Generated llms.txt should prefer <meta name="description"> over body text."""
+    resp = httpx.post(
+        AGENT + "/v2/generate-llmstxt",
+        json={"url": TEST_SITE + "/content/with-meta", "max_pages": 1},
+        timeout=120,
+    )
+    assert resp.status_code == 200
+    job_id = resp.json()["id"]
+
+    # Poll for completion
+    for _ in range(30):
+        status = httpx.get(AGENT + f"/v2/generate-llmstxt/{job_id}", timeout=120)
+        if status.json()["status"] == "completed":
+            break
+        time.sleep(1)
+
+    result = status.json()
+    assert result["status"] == "completed"
+    llms = result.get("data", {}).get("llms_txt", "")
+    assert llms, "llms_txt should not be empty"
+
+    # Should contain the meta description, not the body text
+    assert "meta description for testing" in llms, "llms.txt should use meta description"
+    assert "This body text should not be used" not in llms, "llms.txt should not use body text when meta is available"

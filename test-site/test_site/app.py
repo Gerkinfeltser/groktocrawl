@@ -98,3 +98,71 @@ async def dynamic():
         </html>
         """
     )
+
+
+# ----- llms.txt test fixtures -----
+
+@app.get("/content/multi-sentence")
+async def content_multi_sentence():
+    """A page with long multi-sentence content for sentence-boundary testing."""
+    return HTMLResponse(
+        """
+        <html>
+          <body>
+            <h1>Multi-Sentence Page</h1>
+            <p>This is the first sentence of the description. This is the second
+            sentence that continues the thought with more detail. This third sentence
+            adds even more context for the reader to understand the page topic.
+            And here is a fourth sentence just to make sure we have enough content
+            to test the sentence boundary detection logic.</p>
+          </body>
+        </html>
+        """
+    )
+
+
+@app.get("/content/with-meta")
+async def content_with_meta():
+    """A page with explicit <meta name="description"> for meta tag preference testing."""
+    return HTMLResponse(
+        """
+        <html>
+          <head>
+            <title>Meta Tag Page</title>
+            <meta name="description" content="This is the meta description for testing that GroktoCrawl prefers structured metadata over body content when generating llms.txt entries.">
+            <meta property="og:description" content="This is the Open Graph description for testing.">
+          </head>
+          <body>
+            <h1>Meta Tag Page</h1>
+            <p>This body text should not be used because the meta description is better.</p>
+          </body>
+        </html>
+        """
+    )
+
+
+@app.get("/content/with-boilerplate")
+async def content_with_boilerplate():
+    """A page with cookie banner and nav content before the main content."""
+    return HTMLResponse(
+        """
+        <html>
+          <body>
+            <div id="cookie-banner">
+              <p>This website uses cookies to improve your experience. Accept all cookies? Cookie settings here.</p>
+            </div>
+            <nav>
+              <ul>
+                <li><a href="/">Home</a></li>
+                <li><a href="/pricing">Pricing</a></li>
+                <li><a href="/about">About</a></li>
+              </ul>
+            </nav>
+            <div id="main-content">
+              <h1>Boilerplate Test Page</h1>
+              <p>This is the real page content that should be extracted as the description after skipping the cookie banner and navigation boilerplate elements effectively.</p>
+            </div>
+          </body>
+        </html>
+        """
+    )
