@@ -316,7 +316,13 @@ async def smart_scrape(url: str) -> dict:
     async with httpx.AsyncClient(
         follow_redirects=True,
         timeout=30,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; GroktoCrawl/0.1; +https://github.com/groktocrawl)"},
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+        },
     ) as client:
         # Tier 1
         result = await fetch_via_llms_txt(url, client)

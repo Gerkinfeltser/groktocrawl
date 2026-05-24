@@ -178,8 +178,8 @@ async def attempt_llm_recovery(url: str, page_text: str) -> dict | None:
                         "role": "user",
                         "content": (
                             f"URL fetched: {url}\n\n"
-                            f"---PAGE CONTENT (first 4000 chars)---\n"
-                            f"{page_text[:4000]}\n"
+                            f"---PAGE CONTENT---\n"
+                            f"{page_text}\n"
                             f"---END---"
                         ),
                     },
@@ -212,6 +212,9 @@ async def attempt_llm_recovery(url: str, page_text: str) -> dict | None:
 
             if action == "iframe_url" and parsed.get("url"):
                 extracted_url = parsed["url"]
+                # Strip URL fragments (#...) to avoid issues with HTTP clients
+                if "#" in extracted_url:
+                    extracted_url = extracted_url.split("#")[0]
                 logger.info("LLM recovery: retrying on extracted URL %s", extracted_url)
                 from .fetch import smart_scrape
                 return await smart_scrape(extracted_url)
