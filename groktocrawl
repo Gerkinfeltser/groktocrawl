@@ -321,9 +321,7 @@ def cmd_search(client: Client, args: argparse.Namespace) -> None:
     except ApiError as e:
         die(str(e))
 
-    data = result.get("data", [])
-    if not isinstance(data, list):
-        data = []
+    data = result.get("data", {}).get("web", [])
 
     if JSON_OUTPUT:
         emit("", {"results": data, "query": args.query})
