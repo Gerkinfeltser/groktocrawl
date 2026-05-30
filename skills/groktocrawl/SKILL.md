@@ -45,7 +45,7 @@ groktocrawl agent "What were the key Google I/O 2025 announcements?"
 | crawl | Site crawling | `groktocrawl crawl <url> --max-depth 3` |
 | agent | Autonomous research | `groktocrawl agent "<prompt>"` |
 | browser | Headless browser | `groktocrawl browser create --ttl 300` |
-| monitor | Change detection | `groktocrawl monitor <url>` |
+
 | active | List crawl jobs | `groktocrawl active --json` |
 
 ## When to use which
@@ -157,27 +157,48 @@ groktocrawl search "site:example.com tutorial" --limit 5 --json
 
 ## Change monitoring
 
-Track when a page's content changes — useful for documentation updates, blog posts, pricing pages, or any URL whose content you want to watch.
+Track when a page's content changes — useful for documentation updates, blog posts, pricing pages, or any URL whose content you want to watch. The CLI does **not** have a `monitor` subcommand — use the API directly via curl.
 
 ```bash
-# Set up a monitor on a URL
-groktocrawl monitor https://example.com/docs --interval daily
+# Create a monitor (checks every 6 hours by default)
+curl -s -X POST $GROKTOCRAWL_API_URL/v2/monitor \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/docs", "schedule": "0 */6 * * *"}'
 
-# List all active monitors and crawl jobs
-groktocrawl active --json
+# List all monitors and their last-check status
+curl -s $GROKTOCRAWL_API_URL/v2/monitor | python3 -m json.tool
+
+# Get a specific monitor's status
+curl -s $GROKTOCRAWL_API_URL/v2/monitor/<id> | python3 -m json.tool
+
+# Update a monitor
+curl -s -X PATCH $GROKTOCRAWL_API_URL/v2/monitor/<id> \
+  -H "Content-Type: application/json" \
+  -d '{"schedule": "0 */12 * * *"}'
+
+# Delete a monitor
+curl -s -X DELETE $GROKTOCRAWL_API_URL/v2/monitor/<id>
 ```
 
-**Output of `active`:** Returns a JSON array of job objects. Each job has an `id`, `url`, `status` (one of `processing`, `completed`, `failed`), and timestamps. If a crawl or agent job failed partway through, it may still appear here with partial results despite the client timing out.
+**How it works internally** (\`agent-svc/agent/monitor.py\`):
+- **Scheduler:** A scheduler container in the Docker stack runs \`python3 -m agent.monitor check_all\` on cron.
+- **Check cycle:** For each registered monitor, the scheduler scrapes the URL via the scraper service, computes a unified diff against the previous content, and stores the result in Valkey.
+- **Storage:** Monitor configs live in Valkey under the \`monitors\` hash. Check history is stored in \`monitor:{id}:history\` lists (last 50 checks retained).
+- **Change detection:** First check stores content without diff. Subsequent checks compare and produce a unified diff (capped at 100 lines).
+- **Webhook notifications:** If configured with a \`webhook\` URL, the server POSTs \`{"event": "monitor.changed", "monitor_id": "...", "url": "...", "diff": "..."}\` on change.
 
-**Monitor lifecycle:**
-- **Setup:** `groktocrawl monitor <url>` registers a URL for periodic change detection. The `--interval` flag controls check frequency (e.g., `daily`, `weekly`, `hourly`).
-- **Checking:** Use `groktocrawl active --json` to list all active monitors and their last-check status. Each entry shows `url`, `status`, `last_checked`, and `changed` (boolean).
-- **Results:** When a change is detected, the monitor records the diff. Check the `active` output for `changed: true` entries, then re-scrape the URL for current content.
-- **Teardown:** There is no built-in `monitor remove` command. To stop monitoring, note the job ID from `active` output and contact the server admin or restart the service.
+**Monitor API response fields:**
+| Field | Type | Description |
+|-------|------|-------------|
+| id | string | UUID |
+| url | string | The monitored URL |
+| schedule | string | Cron expression (default \`0 */6 * * *\`) |
+| webhook | string? | Optional webhook URL called on change |
+| last_checked | string? | ISO timestamp of last check |
+| last_result | string? | "changed" or "unchanged" |
+| created_at | string | ISO timestamp of creation |
 
-**When to use monitor vs active:**
-- `monitor` — set up a recurring check on a specific URL
-- `active` — inspect all running jobs (crawls, agents, monitors) and their statuses
+**Note on \`active\`:** \`groktocrawl active --json\` shows **crawl/agent jobs only** (\`GET /crawl/active\`). Monitors are not included. Use \`GET /v2/monitor\` via curl to list them.
 
 ## Pitfalls
 
