@@ -787,7 +787,7 @@ def make_parser() -> argparse.ArgumentParser:
 
     p_browser_exec = p_browser_sub.add_parser("exec", help="Execute an action in a session")
     p_browser_exec.add_argument("session_id", help="Session ID")
-    p_browser_exec.add_argument("action", help="Action: navigate, click, type, screenshot, scroll, wait, getContent, executeScript")
+    p_browser_exec.add_argument("action", help="Action: navigate (load URL), click, type, screenshot, scroll, wait, getContent (returns metadata only), executeScript (run JS, e.g. 'document.body.innerText')")
     p_browser_exec.add_argument("--url", help="URL for navigate action")
     p_browser_exec.add_argument("--selector", help="CSS selector for click/type/wait")
     p_browser_exec.add_argument("--text", help="Text for type action")
