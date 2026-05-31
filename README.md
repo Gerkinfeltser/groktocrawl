@@ -229,6 +229,52 @@ Add to `~/.hermes/.env` if your instance runs elsewhere:
 GROKTOCRAWL_API_URL=http://localhost:8080
 ```
 
+## Security
+
+### API Authentication (recommended for production)
+
+Set `API_KEY` in your `.env` file to enable bearer token authentication:
+
+```env
+API_KEY=sk-your-secret-key-here
+```
+
+Once set, every API call must include an `Authorization` or `X-API-Key` header:
+
+```bash
+curl -X POST http://localhost:8080/v2/scrape \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-your-secret-key-here" \
+  -d '{"url": "https://example.com"}'
+
+# Or via CLI:
+groktocrawl --api-key sk-your-secret-key-here scrape https://example.com
+```
+
+When **no** `API_KEY` is configured, the API is fully open (backward
+compatible). Each response includes an `X-Security-Warning` header and
+the `/health` endpoint adds a `security` field to warn callers.
+
+### Private Network Protection
+
+The built-in browser and scraper services block navigation to private IPs
+(RFC 1918), loopback addresses, cloud metadata endpoints, and the Docker
+host machine. This prevents SSRF-based pivoting through the headless
+browser. The blocklist applies to both direct URLs and resolved hostnames
+(DNS rebinding protection).
+
+### Service Architecture
+
+Only the **agent API** (port `8080`) is exposed to the host. Internal
+services (`browser-svc`, `scraper-svc`, `parse-svc`) are reachable only
+via Docker internal DNS — they do not publish host ports. All requests
+route through the agent API.
+
+### Reporting Vulnerabilities
+
+See [SECURITY.md](SECURITY.md) for our disclosure policy and how to
+privately report security issues.
+
 ## Project Status
 
 Active development. All core Firecrawl v2 API endpoints implemented and integration-tested. See [issues](https://github.com/groktopus/groktocrawl/issues) for upcoming features. Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).

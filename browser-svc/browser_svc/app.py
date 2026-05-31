@@ -8,8 +8,11 @@ import asyncio
 import json
 import logging
 import os
+import re
+import socket
 import time
 import uuid
+from ipaddress import ip_address, ip_network
 from typing import Any
 from urllib.parse import urlparse
 
@@ -113,6 +116,95 @@ def _is_bot_challenge(title: str, url: str) -> bool:
     if "ddos-guard" in url.lower() or "/.well-known/ddos-guard" in url.lower():
         return True
     return False
+
+
+# ── Private IP / SSRF protection ─────────────────────────────────
+
+# Private and special-purpose IP ranges that should never be navigated to
+_PRIVATE_NETWORKS = [
+    ip_network("10.0.0.0/8"),
+    ip_network("172.16.0.0/12"),
+    ip_network("192.168.0.0/16"),
+    ip_network("127.0.0.0/8"),          # loopback
+    ip_network("::1/128"),               # IPv6 loopback
+    ip_network("169.254.0.0/16"),       # link-local
+    ip_network("0.0.0.0/8"),            # "this" network
+    ip_network("100.64.0.0/10"),        # Carrier-grade NAT (RFC 6598)
+    ip_network("198.18.0.0/15"),        # Benchmarking (RFC 2544)
+    ip_network("240.0.0.0/4"),          # Reserved / future use
+]
+
+_METADATA_IPS = {
+    ip_address("169.254.169.254"),      # AWS/GCP/Azure metadata
+    ip_address("fd00:ec2::254"),        # AWS IMDSv2 IPv6
+}
+
+# Docker-internal hostnames that resolve to the host machine
+_PRIVATE_HOSTNAME_SUFFIXES = [
+    ".docker.internal",
+]
+
+
+def _resolve_to_ips(hostname: str) -> list:
+    """Resolve a hostname to all IP addresses (IPv4 and IPv6)."""
+    try:
+        addrinfo = socket.getaddrinfo(hostname, None)
+        ips = set()
+        for family, _, _, _, sockaddr in addrinfo:
+            try:
+                ips.add(ip_address(sockaddr[0]))
+            except ValueError:
+                continue
+        return list(ips)
+    except socket.gaierror:
+        return []
+
+
+def _is_private_url(url: str) -> tuple[bool, str]:
+    """Check if a URL targets a private/internal IP or hostname.
+
+    Returns (is_private, reason) tuple.
+    """
+    parsed = urlparse(url)
+    hostname = parsed.hostname or ""
+
+    # Reject empty/relative URLs
+    if not hostname:
+        return True, "Empty or relative URL"
+
+    # Check hostname suffixes for internal Docker resolution
+    hostname_lower = hostname.lower()
+    for suffix in _PRIVATE_HOSTNAME_SUFFIXES:
+        if hostname_lower.endswith(suffix):
+            return True, f"Hostname '{hostname}' resolves to Docker host machine"
+
+    # Check if hostname is itself a private IP literal
+    try:
+        addr = ip_address(hostname)
+        for net in _PRIVATE_NETWORKS:
+            if addr in net:
+                return True, f"IP address {hostname} is in private range {net}"
+        if addr in _METADATA_IPS:
+            return True, f"IP address {hostname} is a cloud metadata endpoint"
+        # It's a valid, non-private IP literal — safe to navigate
+        return False, ""
+    except ValueError:
+        pass  # Not an IP literal, treat as hostname
+
+    # Resolve hostname to IPs and check each
+    ips = _resolve_to_ips(hostname)
+    if not ips:
+        # Can't resolve — log and reject (DNS rebinding risk)
+        return True, f"Could not resolve hostname '{hostname}' — blocked for safety"
+
+    for addr in ips:
+        for net in _PRIVATE_NETWORKS:
+            if addr in net:
+                return True, f"Hostname '{hostname}' resolves to private IP {addr} ({net})"
+        if addr in _METADATA_IPS:
+            return True, f"Hostname '{hostname}' resolves to metadata endpoint {addr}"
+
+    return False, ""
 
 
 app = FastAPI(title="GroktoCrawl Browser Service", version="0.1.0")
@@ -273,6 +365,13 @@ async def execute_action(session_id: str, req: BrowserExecuteRequest):
         if req.action == "navigate":
             if not req.url:
                 raise HTTPException(status_code=400, detail="url required for navigate action")
+            # Security: reject private/internal destination URLs
+            is_private, reason = _is_private_url(req.url)
+            if is_private:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Navigation to private or internal destination blocked: {reason}",
+                )
             # Inject stored Cloudflare clearance cookies before navigation
             redis_client = getattr(app.state, "redis", None)
             await _inject_cookies(req.url, session.context, redis_client)

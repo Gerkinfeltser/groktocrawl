@@ -75,6 +75,15 @@ def _get_default_server() -> str:
 
 DEFAULT_SERVER = _get_default_server()
 API_VERSION = "v2"
+SECURITY_WARNING_HEADER = "X-Security-Warning"
+_security_warnings_shown: set[str] = set()
+
+
+def _server_id(url: str) -> str:
+    """Extract host:port from a URL for deduplicating security warnings."""
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    return f"{parsed.hostname}:{parsed.port or (443 if parsed.scheme == 'https' else 80)}"
 POLL_INTERVAL = 2
 
 QUIET = False
@@ -164,6 +173,12 @@ class Client:
             body = resp.json()
         except (json.JSONDecodeError, ValueError):
             body = {"raw": resp.text[:500]}
+
+        # Check for security warning header (one-time stderr warning)
+        warning = resp.headers.get(SECURITY_WARNING_HEADER)
+        if warning and _server_id(resp.url) not in _security_warnings_shown:
+            _security_warnings_shown.add(_server_id(resp.url))
+            print(f"\u26a0\ufe0f  Security warning: {warning}", file=sys.stderr)
 
         if resp.status_code >= 400:
             detail = body.get("detail", body.get("error", body.get("message", str(body))))
