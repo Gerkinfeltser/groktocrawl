@@ -102,7 +102,6 @@ class SearchResult(BaseModel):
     url: str
     title: str
     description: str = ""
-    markdown: str = ""
 
 
 class SearchResponse(BaseModel):

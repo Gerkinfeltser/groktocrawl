@@ -14,7 +14,7 @@ class SearXNGClient:
         self.base_url = base_url.rstrip("/")
         self._client = httpx.AsyncClient(
             timeout=15,
-            headers={"User-Agent": "GroktoCrawl/0.1"},
+            headers={"User-Agent": "GroktoCrawl/0.1", "Accept": "text/html,application/json", "X-Forwarded-For": "127.0.0.1"},
         )
 
     async def search(self, query: str, limit: int = 10) -> list[dict]:
