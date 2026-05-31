@@ -265,3 +265,4 @@ The active CLI is on PATH. The skill's `scripts/groktocrawl` is a reference copy
 
 - [references/triggers.md](references/triggers.md) — Decision table
 - [assets/examples.md](assets/examples.md) — Extended usage examples
+- [assets/examples.md](assets/examples.md) — Extended usage examples
