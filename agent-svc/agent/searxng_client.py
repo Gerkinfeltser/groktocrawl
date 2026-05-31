@@ -17,21 +17,30 @@ class SearXNGClient:
             headers={"User-Agent": "GroktoCrawl/0.1", "Accept": "text/html,application/json", "X-Forwarded-For": "127.0.0.1"},
         )
 
-    async def search(self, query: str, limit: int = 10) -> list[dict]:
+    async def search(self, query: str, limit: int = 10, categories: list[str] | None = None) -> list[dict]:
         """Search the web and return structured results.
+
+        Uses SearXNG's JSON API. When categories is None, defaults to "general".
+        Multiple categories (e.g. ["news", "science"]) are comma-separated per
+        the SearXNG API convention.
 
         Returns a list of dicts with keys: url, title, description, engine.
         """
+        params = {
+            "q": query,
+            "format": "json",
+            "language": "en",
+            "pageno": 1,
+        }
+        if categories:
+            params["categories"] = ",".join(categories)
+        else:
+            params["categories"] = "general"
+
         try:
             resp = await self._client.get(
                 f"{self.base_url}/search",
-                params={
-                    "q": query,
-                    "format": "json",
-                    "language": "en",
-                    "categories": "general",
-                    "pageno": 1,
-                },
+                params=params,
             )
             if resp.status_code != 200:
                 logger.warning("SearXNG returned %d: %s", resp.status_code, resp.text[:200])
