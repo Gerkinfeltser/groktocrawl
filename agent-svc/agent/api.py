@@ -185,7 +185,7 @@ async def search_v1(request: Request, body: SearchRequest):
 
     searxng = SearXNGClient(request.app.state.searxng_url)
     try:
-        results = await searxng.search(body.query, limit=body.limit)
+        results = await searxng.search(body.query, limit=body.limit, categories=body.categories)
         return {
             "success": True,
             "data": [
@@ -207,7 +207,7 @@ async def search(request: Request, body: SearchRequest):
 
     searxng = SearXNGClient(request.app.state.searxng_url)
     try:
-        results = await searxng.search(body.query, limit=body.limit)
+        results = await searxng.search(body.query, limit=body.limit, categories=body.categories)
         search_results = [
             SearchResult(url=r["url"], title=r["title"], description=r.get("description", ""))
             for r in results
