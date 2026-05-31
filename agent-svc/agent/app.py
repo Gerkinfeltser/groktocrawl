@@ -74,20 +74,22 @@ def create_app() -> FastAPI:
             )
         return response
 
-    # ── Include API router with auth dependency ─────────────────────
-    app.include_router(router, dependencies=[Depends(verify_api_key)])
-
-    # ── Health endpoint (always unauthenticated) ────────────────────
+    # ── Health endpoint (always unauthenticated, defined before router) ─
     @app.get("/health")
     async def health():
-        result = {"status": "ok"}
         if not AUTH_ENABLED:
-            result["security"] = {
-                "auth_enabled": False,
-                "warning": SECURITY_WARNING_BODY,
-                "docs": "https://github.com/groktopus/groktocrawl#security",
+            return {
+                "status": "ok",
+                "security": {
+                    "auth_enabled": False,
+                    "warning": SECURITY_WARNING_BODY,
+                    "docs": "https://github.com/groktopus/groktocrawl#security",
+                },
             }
-        return result
+        return {"status": "ok"}
+
+    # ── Include API router with auth dependency ─────────────────────
+    app.include_router(router, dependencies=[Depends(verify_api_key)])
 
     @app.on_event("shutdown")
     async def shutdown_event():
