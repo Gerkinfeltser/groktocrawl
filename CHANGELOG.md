@@ -9,10 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- _Nothing yet._
+
+## [0.4.0] — 2026-05-31
+
+### Added
+
+- **CLI subcommands for monitor, parse, and generate-llmstxt** (`groktocrawl` binary) — three new entry points for managing change monitors (create/list/get/update/delete), parsing document files (PDF, EPUB, DOCX) to markdown, and generating llms.txt for a website with async polling. (#79, #81)
+- **SkillOpt Epoch 1 — skill document restructure** (`skills/groktocrawl/`) — added browser session lifecycle guidance, structured extraction examples, search backend config reference, and cross-command chaining patterns. (#73)
+- **SkillOpt Epoch 2 — structured extraction workflow** — full session ID plumbing through multiple commands, browser session lifecycle reference, multi-step research workflow example with PDF source handling, and "When to use which" decision table. (#74)
+- **Skill document optimization** — replaced sparse command list with comprehensive workflow-oriented references including domain exploration strategy, change monitoring, and error recovery patterns. (#72)
 - **Agent system prompt upgrade** (`agent-svc/agent/research.py`) — replaced the minimal 7-line `SYSTEM_PROMPT` with a comprehensive prompt that instructs the LLM to evaluate source quality, synthesize across multiple pages, detect contradictions, flag thin evidence, and cite sources by URL. The new prompt defines a clear source authority ladder (official docs > established news > blogs/forums) and tells the agent to be thorough and precise rather than just "concise."
 - **Extract prompt upgrade** — `EXTRACT_SYSTEM_PROMPT` now instructs the LLM to extract ALL instances of requested data, flag missing/ambiguous values, and organize output clearly.
 - **Model selection passthrough** — the `model` field from `POST /v2/agent` requests is now respected. When set to a specific model name (e.g., `"gpt-4o"`) it overrides the environment-configured default. When omitted or `"default"`, behavior is unchanged. Files changed: `api.py`, `worker.py`, `research.py`.
 - **Domain metadata in context** — each scraped source now includes `(domain: example.com)` in the context passed to the LLM, giving the research agent signal for credibility evaluation without adding a maintenance-heavy classification system.
+
+### Changed
+
+- **Search results format** — `/v2/search` now returns results grouped by source type per Firecrawl v2 spec (`{"data": {"web": [...]}}`) instead of a flat array. (#66)
+
+### Fixed
+
+- **50x search speedup** — removed redundant per-result scraping from `/v2/search`. Previously, every search result was independently scraped in addition to the search itself. Now results are returned directly without post-processing. (#69)
+- **Search CLI parsing** — `groktocrawl search` correctly reads from `data.web` dict instead of the flat `data` list, fixing silent empty-result returns on old CLI versions. (#71)
+- **SkillOpt Epoch 3 — structured data extraction guidance** — documented `extract` command prompt tips, error recovery patterns (JS-rendered pages, broad prompts, auth walls), and when to use `extract` vs `browser + executeScript`. (#75)
+- **SkillOpt Epoch 4 — multi-source research fallback chain** — documented systematic escalation from search → scrape → browser → agent, including when-to-escalate thresholds (500-char scrape, 403/blocked, conflicting info). (#76)
+- **SkillOpt Epoch 5 — change monitoring documentation** — added monitor lifecycle guidance, active job tracking distinction (monitors vs crawl/agent jobs), and Valkey storage details. (#77)
+- **Monitor docs correction** — clarified that monitor management uses the REST API (POST/PATCH/DELETE /v2/monitor), not CLI subcommands. (#78)
 
 ## [0.3.0] — 2026-05-24
 
