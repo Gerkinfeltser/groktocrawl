@@ -29,6 +29,19 @@ scripts/groktocrawl search "latest AI news" --limit 3 --scrape-results
 scripts/groktocrawl search "python async" --limit 5 --json
 ```
 
+## Search-then-scrape workflow
+
+```bash
+# Step 1: Search with JSON output to inspect results
+scripts/groktocrawl search "mesh networking" --limit 3 --json
+
+# Step 2: Scrape a specific result URL from the search output
+scripts/groktocrawl scrape https://en.wikipedia.org/wiki/Mesh_networking
+
+# One-shot version (search + content in one command):
+scripts/groktocrawl search "mesh networking" --limit 3 --scrape-results
+```
+
 ## Map
 
 ```bash

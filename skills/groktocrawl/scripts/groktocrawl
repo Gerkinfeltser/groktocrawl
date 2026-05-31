@@ -9,7 +9,8 @@ Commands:
   map      Discover URLs on a site
   crawl    Crawl a website
   agent    Start an autonomous research agent
-
+  download Download binary content (PDF, EPUB, image, etc.) to disk
+  extract  Extract structured data from URLs
 Global flags:
   --server <url>   API URL (default: GROKTOCRAWL_API_URL env or http://localhost:8080)
   --json           Machine-readable JSON output
@@ -320,9 +321,7 @@ def cmd_search(client: Client, args: argparse.Namespace) -> None:
     except ApiError as e:
         die(str(e))
 
-    data = result.get("data", [])
-    if not isinstance(data, list):
-        data = []
+    data = result.get("data", {}).get("web", [])
 
     if JSON_OUTPUT:
         emit("", {"results": data, "query": args.query})
@@ -475,6 +474,111 @@ def cmd_agent(client: Client, args: argparse.Namespace) -> None:
             die(f"Agent failed: {status.get('error', 'unknown')}")
         else:
             info(f"  Status: {s}")
+
+
+
+
+def cmd_download(client: Client, args: argparse.Namespace) -> None:
+    """Download binary content (PDF, EPUB, image, etc.) from a URL."""
+    import os
+    from urllib.parse import urlparse
+
+    from requests import get as http_get
+
+    url = args.url
+    output = args.output
+    extract_text = getattr(args, 'extract_text', False)
+
+    if client.dry_run:
+        emit(f"[dry-run] Would download {url}", {"dry_run": True, "command": "download", "url": url})
+        return
+
+    log(f"Downloading {url}...")
+    try:
+        resp = http_get(
+            url,
+            stream=True,
+            timeout=60,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+            },
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        die(f"Download failed: {e}")
+
+    content_type = resp.headers.get("content-type", "application/octet-stream").split(";")[0].strip()
+
+    # Derive filename if not provided
+    if not output:
+        parsed = urlparse(url)
+        path = parsed.path.rstrip("/")
+        basename = path.split("/")[-1] if path else "download"
+        if "." not in basename:
+            ext_map = {
+                "application/pdf": ".pdf",
+                "application/epub+zip": ".epub",
+                "application/zip": ".zip",
+                "image/png": ".png",
+                "image/jpeg": ".jpg",
+                "image/gif": ".gif",
+                "image/webp": ".webp",
+                "text/csv": ".csv",
+                "application/json": ".json",
+            }
+            ext = ext_map.get(content_type, "")
+            basename = f"{basename}{ext}" if ext else basename
+        output = basename
+
+    # Write content to disk
+    content = resp.content
+    with open(output, "wb") as f:
+        f.write(content)
+
+    log(f"Saved {len(content)} bytes to {output} (type: {content_type})")
+
+    # Optional text extraction
+    if extract_text:
+        text = None
+        try:
+            if content_type == "application/pdf":
+                try:
+                    import fitz
+                    doc = fitz.open(stream=content, filetype="pdf")
+                    text = "\n".join(page.get_text() for page in doc)
+                except ImportError:
+                    warn("PyMuPDF not installed. Install with: pip install pymupdf")
+            elif content_type == "application/epub+zip":
+                try:
+                    import ebooklib
+                    from ebooklib import epub
+                    from bs4 import BeautifulSoup
+                    from io import BytesIO
+                    book = epub.read_epub(BytesIO(content))
+                    chapters = []
+                    for item in book.get_items():
+                        if item.get_type() == ebooklib.ITEM_DOCUMENT:
+                            soup = BeautifulSoup(item.get_content(), "html.parser")
+                            chapters.append(soup.get_text())
+                    text = "\n".join(chapters)
+                except ImportError:
+                    warn("ebooklib not installed. Install with: pip install ebooklib beautifulsoup4")
+        except Exception as e:
+            warn(f"Text extraction failed: {e}")
+
+        if text:
+            text_path = output.rsplit(".", 1)[0] + ".txt"
+            with open(text_path, "w") as f:
+                f.write(text)
+            log(f"Extracted text ({len(text)} chars) to {text_path}")
+
+    # JSON output
+    if JSON_OUTPUT:
+        emit("", {"success": True, "filename": output, "size": len(content), "content_type": content_type})
 
 
 
@@ -665,6 +769,11 @@ def make_parser() -> argparse.ArgumentParser:
     p_agent.add_argument("--urls", nargs="+", help="Seed URLs to focus research")
     p_agent.add_argument("--no-poll", action="store_true", help="Don't poll for results")
 
+    p_download = subparsers.add_parser("download", help="Download binary content (PDF, EPUB, image, etc.) to disk")
+    p_download.add_argument("url", help="URL to download")
+    p_download.add_argument("-o", "--output", help="Save path (default: auto-derived from URL)")
+    p_download.add_argument("--extract-text", action="store_true", help="Also extract text for supported types (PDF, EPUB)")
+
     p_extract = subparsers.add_parser("extract", help="Extract structured data from URLs")
     p_extract.add_argument("urls", nargs="+", help="URLs to extract data from")
     p_extract.add_argument("--prompt", help="Extraction prompt")
@@ -678,7 +787,7 @@ def make_parser() -> argparse.ArgumentParser:
 
     p_browser_exec = p_browser_sub.add_parser("exec", help="Execute an action in a session")
     p_browser_exec.add_argument("session_id", help="Session ID")
-    p_browser_exec.add_argument("action", help="Action: navigate, click, type, screenshot, scroll, wait, getContent, executeScript")
+    p_browser_exec.add_argument("action", help="Action: navigate (load URL), click, type, screenshot, scroll, wait, getContent (returns metadata only), executeScript (run JS, e.g. 'document.body.innerText')")
     p_browser_exec.add_argument("--url", help="URL for navigate action")
     p_browser_exec.add_argument("--selector", help="CSS selector for click/type/wait")
     p_browser_exec.add_argument("--text", help="Text for type action")
@@ -744,6 +853,7 @@ def main() -> None:
         "map": cmd_map,
         "crawl": cmd_crawl,
         "agent": cmd_agent,
+        "download": cmd_download,
         "extract": cmd_extract,
         "browser": cmd_browser,
         "active": cmd_active,
