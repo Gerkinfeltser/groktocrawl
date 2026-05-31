@@ -42,7 +42,7 @@ def create_app() -> FastAPI:
     scraper_url = os.getenv("SCRAPER_URL", "http://scraper-svc:8001")
 
     app.state.redis = Redis.from_url(redis_url, decode_responses=True)
-    app.state.job_store = JobStore(app.state.redis)
+    app.state.job_store = JobStore(redis_url)
     app.state.searxng_client = SearXNGClient(searxng_url)
     app.state.scraper_client = ScraperClient(scraper_url)
     app.state.llm_client = LLMClient(llm_base_url, llm_api_key, llm_model)
