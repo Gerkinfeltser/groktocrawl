@@ -62,8 +62,6 @@ services:
     build:
       context: ./scraper-svc
     restart: unless-stopped
-    ports:
-      - "8001:8001"
     environment:
       - LLM_BASE_URL=http://llm-svc:8011/v1
       - VALKEY_HOST=valkey
@@ -74,8 +72,6 @@ services:
     build:
       context: ./browser-svc
     restart: unless-stopped
-    ports:
-      - "8012:8012"
 
   flare-solverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
@@ -123,8 +119,6 @@ services:
     build:
       context: ./parse-svc
     restart: unless-stopped
-    ports:
-      - "8013:8013"
 
 volumes:
   valkey_data:

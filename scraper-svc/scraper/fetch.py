@@ -8,6 +8,8 @@ Tier 3: Playwright render + readability extraction (heavyweight).
 import logging
 import os
 import re
+import socket
+from ipaddress import ip_address, ip_network
 from urllib.parse import urlparse
 
 import httpx
@@ -257,6 +259,86 @@ async def fetch_via_content_negotiation(url: str, client: httpx.AsyncClient) -> 
     return None
 
 
+# ── Private IP / SSRF protection ─────────────────────────────────
+
+_PRIVATE_NETWORKS = [
+    ip_network("10.0.0.0/8"),
+    ip_network("172.16.0.0/12"),
+    ip_network("192.168.0.0/16"),
+    ip_network("127.0.0.0/8"),
+    ip_network("::1/128"),
+    ip_network("169.254.0.0/16"),
+    ip_network("0.0.0.0/8"),
+    ip_network("100.64.0.0/10"),
+    ip_network("198.18.0.0/15"),
+    ip_network("240.0.0.0/4"),
+]
+
+_METADATA_IPS = {
+    ip_address("169.254.169.254"),
+    ip_address("fd00:ec2::254"),
+}
+
+_PRIVATE_HOSTNAME_SUFFIXES = [
+    ".docker.internal",
+]
+
+
+def _resolve_to_ips(hostname: str) -> list:
+    try:
+        addrinfo = socket.getaddrinfo(hostname, None)
+        ips = set()
+        for family, _, _, _, sockaddr in addrinfo:
+            try:
+                ips.add(ip_address(sockaddr[0]))
+            except ValueError:
+                continue
+        return list(ips)
+    except socket.gaierror:
+        return []
+
+
+def _is_private_url(url: str) -> tuple[bool, str]:
+    """Check if a URL targets a private/internal IP or hostname.
+
+    Returns (is_private, reason) tuple. Shared logic with browser-svc.
+    """
+    parsed = urlparse(url)
+    hostname = parsed.hostname or ""
+
+    if not hostname:
+        return True, "Empty or relative URL"
+
+    hostname_lower = hostname.lower()
+    for suffix in _PRIVATE_HOSTNAME_SUFFIXES:
+        if hostname_lower.endswith(suffix):
+            return True, f"Hostname '{hostname}' resolves to Docker host machine"
+
+    try:
+        addr = ip_address(hostname)
+        for net in _PRIVATE_NETWORKS:
+            if addr in net:
+                return True, f"IP address {hostname} is in private range {net}"
+        if addr in _METADATA_IPS:
+            return True, f"IP address {hostname} is a cloud metadata endpoint"
+        return False, ""
+    except ValueError:
+        pass
+
+    ips = _resolve_to_ips(hostname)
+    if not ips:
+        return True, f"Could not resolve hostname '{hostname}' — blocked for safety"
+
+    for addr in ips:
+        for net in _PRIVATE_NETWORKS:
+            if addr in net:
+                return True, f"Hostname '{hostname}' resolves to private IP {addr} ({net})"
+        if addr in _METADATA_IPS:
+            return True, f"Hostname '{hostname}' resolves to metadata endpoint {addr}"
+
+    return False, ""
+
+
 async def fetch_via_playwright(url: str) -> dict | None:
     """Tier 3: Render with stealth Playwright, then extract main content.
 
@@ -276,6 +358,12 @@ async def fetch_via_playwright(url: str) -> dict | None:
             context = await create_stealth_context(browser)
             page = await context.new_page()
             try:
+                # Security: reject private/internal destination URLs
+                is_private, reason = _is_private_url(url)
+                if is_private:
+                    logger.warning("Blocked navigation to private URL %s: %s", url, reason)
+                    return None
+
                 # Inject cached Cloudflare clearance cookies before navigation
                 await inject_cookies(url, context)
 
