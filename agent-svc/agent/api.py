@@ -174,6 +174,33 @@ async def create_batch_scrape(request: Request, body: BatchScrapeRequest):
     return CrawlCreateResponse(id=job_id)
 
 
+@router.post("/v1/search")
+async def search_v1(request: Request, body: SearchRequest):
+    """Firecrawl v1-compatible search endpoint.
+
+    Returns a flat data array (v1 format) rather than the nested
+    data.web / data.images / data.news structure used by v2.
+    """
+    from .searxng_client import SearXNGClient
+
+    searxng = SearXNGClient(request.app.state.searxng_url)
+    try:
+        results = await searxng.search(body.query, limit=body.limit)
+        return {
+            "success": True,
+            "data": [
+                {
+                    "url": r["url"],
+                    "title": r["title"],
+                    "description": r.get("description", ""),
+                }
+                for r in results
+            ],
+        }
+    finally:
+        await searxng.close()
+
+
 @router.post("/v2/search", response_model=SearchResponse)
 async def search(request: Request, body: SearchRequest):
     from .searxng_client import SearXNGClient
