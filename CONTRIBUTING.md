@@ -75,6 +75,32 @@ curl http://localhost:8080/health
 - `test-site/` — fixture website for integration tests
 - `tests/` — integration tests
 
+## Architecture Decision Records
+
+Significant architectural decisions are documented as ADRs in `docs/adr/`. Each ADR follows the MADR template and covers context, decision drivers, considered options, and consequences.
+
+**Convention:**
+
+- **File name:** `NNNN-title-with-dashes.md` (sequential numbers, imperative verb phrase)
+- **Statuses:** `proposed`, `accepted`, `rejected`, `deprecated`, `superseded by ADR-NNNN`
+- **Immutability:** ADRs are never edited after acceptance. To change a decision, write a new ADR and update the old one's status.
+- **Linking:** Reference related ADRs via relative links in the Links section.
+
+**When to write an ADR:**
+
+- Adding a new integration or service
+- Changing an existing architectural pattern
+- Choosing between significant alternatives with lasting impact
+- Any decision a future contributor would want to understand *why* it was made
+
+**Workflow:**
+
+1. Create the ADR as `docs/adr/NNNN-title-with-dashes.md` (next available number)
+2. Get it reviewed as part of the PR
+3. On acceptance, update the ADR status and the table in `docs/adr/README.md`
+
+See `docs/adr/README.md` for the full index of existing ADRs.
+
 ## Commit Guidelines
 
 This project uses **Conventional Commits**:

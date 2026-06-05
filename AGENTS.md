@@ -36,6 +36,8 @@ groktocrawl/
 
 ## Key Architecture Decisions
 
+Architecture Decision Records (ADRs) live in `docs/adr/` and capture the context and rationale behind significant design choices. Always check the ADR index at `docs/adr/README.md` before making architectural changes — existing ADRs may document constraints or rejected alternatives that inform your approach.
+
 ### Inline async processing (no RQ worker)
 
 Jobs are processed with `asyncio.create_task()` inside the API process. This avoids needing a separate worker container. For production deployments with high throughput, restore the RQ queue and add a worker container.
