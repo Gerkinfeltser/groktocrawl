@@ -218,3 +218,38 @@ def test_assess_quality_returns_dict_contract():
     assert "boilerplate" in result["checks"]
     assert "completeness" in result["checks"]
     assert "block_detected" in result["checks"]
+
+
+# ── _quality_acceptable ──────────────────────────────────────────
+
+
+def test_quality_acceptable_above_threshold():
+    from scraper.fetch import _quality_acceptable, QA_MIN_QUALITY_THRESHOLD
+
+    # Above default threshold (0.3)
+    result = {"quality": {"score": 0.7}}
+    assert _quality_acceptable(result) is True
+
+
+def test_quality_acceptable_below_threshold():
+    from scraper.fetch import _quality_acceptable
+
+    # Below default threshold (0.3)
+    result = {"quality": {"score": 0.1}}
+    assert _quality_acceptable(result) is False
+
+
+def test_quality_acceptable_no_quality_field():
+    from scraper.fetch import _quality_acceptable
+
+    # No quality field — return as-is (barrier detection, etc.)
+    result = {"markdown": "some content"}
+    assert _quality_acceptable(result) is True
+
+
+def test_quality_acceptable_at_threshold():
+    from scraper.fetch import _quality_acceptable, QA_MIN_QUALITY_THRESHOLD
+
+    # Exactly at threshold should pass
+    result = {"quality": {"score": QA_MIN_QUALITY_THRESHOLD}}
+    assert _quality_acceptable(result) is True
