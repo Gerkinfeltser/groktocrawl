@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import socket
+from dataclasses import dataclass
 from ipaddress import ip_address, ip_network
 from urllib.parse import urlparse
 
@@ -142,19 +143,125 @@ def _is_substack_redirect(url: str) -> bool:
     return False
 
 
-# ── Suspicious content detection (for LLM recovery trigger) ────
+# ── Barrier classification (replaces _looks_suspicious) ──────────
 
 
-def _looks_suspicious(content: str) -> bool:
-    """Heuristic: does the page content look like a challenge/error page?"""
-    if not content:
-        return True
+@dataclass
+class BarrierInfo:
+    """Structured result of barrier classification on a scraped page."""
+
+    detected: bool
+    barrier_type: str | None  # "cloudflare", "ddos-guard", "captcha", "rate-limit", "substack-redirect", "empty", "suspicious", None
+    confidence: float
+    detail: str = ""
+    title: str = ""
+
+
+def _classify_barrier(title: str, url: str, content: str, html: str | None = None) -> BarrierInfo:
+    """Classify whether a scraped page is a barrier/challenge page.
+
+    Replaces the old boolean _looks_suspicious() with structured,
+    multi-signal classification. Returns a BarrierInfo dataclass
+    with detected flag, barrier type, confidence score, and detail.
+
+    Confidence is derived from the number of distinct matched signals:
+      1 signal  → 0.70
+      2 signals → 0.85
+      3+ signals → 0.95
+    """
+    if not content and not html:
+        return BarrierInfo(detected=True, barrier_type="empty", confidence=0.95, detail="No content returned", title=title)
+
+    signals: list[str] = []
+    content_lower = content.lower() if content else ""
+    title_lower = title.lower() if title else ""
+    url_lower = url.lower() if url else ""
+    html_lower = html.lower() if html else ""
+
+    # ── Signal: Empty content ─────────────────────────────────
     if len(content) < 100:
-        return True
-    for indicator in CLOUDFLARE_INDICATORS + DDOS_GUARD_INDICATORS + SUBSTACK_REDIRECT_PATTERNS:
-        if indicator.lower() in content.lower():
-            return True
-    return False
+        signals.append("empty")
+
+    # ── Signal: Title-based Cloudflare detection ──────────────
+    for indicator in CLOUDFLARE_INDICATORS:
+        if indicator.lower() in title_lower:
+            signals.append("cloudflare-title")
+            break
+
+    # ── Signal: Explicit title match ──────────────────────────
+    if "attention required" in title_lower or "403 forbidden" in title_lower:
+        if "cloudflare" not in signals:
+            signals.append("cloudflare-title")
+
+    # ── Signal: URL-based Cloudflare detection ────────────────
+    if "cf_chl" in url_lower or "challenge-platform" in url_lower:
+        signals.append("cloudflare-url")
+
+    # ── Signal: DDoS-Guard title detection ────────────────────
+    for indicator in DDOS_GUARD_INDICATORS:
+        if indicator.lower() in title_lower:
+            signals.append("ddos-guard-title")
+            break
+
+    # ── Signal: DDoS-Guard URL detection ──────────────────────
+    if "ddos-guard" in url_lower or "/.well-known/ddos-guard" in url_lower:
+        signals.append("ddos-guard-url")
+
+    # ── Signal: Captcha detection in content ──────────────────
+    if "hcaptcha" in content_lower or "recaptcha" in content_lower:
+        signals.append("captcha")
+
+    # ── Signal: Rate-limit detection in content ───────────────
+    if "rate limit" in content_lower or "too many requests" in content_lower:
+        signals.append("rate-limit")
+
+    # ── Signal: Substack redirect ─────────────────────────────
+    for pattern in SUBSTACK_REDIRECT_PATTERNS:
+        if pattern in url_lower or (html and pattern in html_lower):
+            signals.append("substack-redirect")
+            break
+
+    # ── Signal: Indicator words in content (fallback) ─────────
+    if not signals:
+        for indicator in CLOUDFLARE_INDICATORS + DDOS_GUARD_INDICATORS + SUBSTACK_REDIRECT_PATTERNS:
+            if indicator.lower() in content_lower:
+                signals.append("content-match")
+                break
+
+    # ── Confidence scoring ────────────────────────────────────
+    signal_count = len(set(signals))
+    if signal_count == 0:
+        return BarrierInfo(detected=False, barrier_type=None, confidence=0.0, detail="No barrier signals detected", title=title)
+
+    confidence = min(0.50 + (signal_count * 0.20), 0.95)
+
+    # ── Determine the primary barrier type ────────────────────
+    barrier_type: str | None = None
+    for keyword, btype in [
+        ("cloudflare", "cloudflare"),
+        ("ddos-guard", "ddos-guard"),
+        ("captcha", "captcha"),
+        ("rate-limit", "rate-limit"),
+        ("substack-redirect", "substack-redirect"),
+        ("empty", "empty"),
+        ("content-match", "suspicious"),
+    ]:
+        if any(keyword in s for s in signals):
+            barrier_type = btype
+            break
+
+    detail_parts = []
+    for s in sorted(set(signals)):
+        detail_parts.append(s)
+    detail = f"Matched signals: {', '.join(detail_parts)}"
+
+    return BarrierInfo(
+        detected=True,
+        barrier_type=barrier_type,
+        confidence=confidence,
+        detail=detail,
+        title=title,
+    )
 
 
 # ── Embedded content detection ─────────────────────────────────
@@ -399,7 +506,7 @@ async def fetch_via_playwright(url: str) -> dict | None:
                 html = await page.content()
                 markdown = html_to_markdown(html) if html else ""
 
-                if not markdown or len(markdown) < 500 or _looks_suspicious(markdown):
+                if not markdown or len(markdown) < 500 or _classify_barrier(title, url, markdown, html).detected:
                     for attempt in range(2):
                         logger.info(
                             "SPA retry %d for %s (markdown: %d chars)",
@@ -411,7 +518,7 @@ async def fetch_via_playwright(url: str) -> dict | None:
 
                         html = await page.content()
                         markdown = html_to_markdown(html) if html else ""
-                        if markdown and len(markdown) >= 500 and not _looks_suspicious(markdown):
+                        if markdown and len(markdown) >= 500 and not _classify_barrier(title, url, markdown, html).detected:
                             logger.info(
                                 "SPA retry %d succeeded for %s (%d chars)",
                                 attempt + 1, url, len(markdown),
@@ -425,6 +532,26 @@ async def fetch_via_playwright(url: str) -> dict | None:
         if html:
             markdown = html_to_markdown(html)
             if markdown and len(markdown) > 50:
+                # ── Barrier check before returning ─────────────
+                barrier = _classify_barrier(title, url, markdown, html)
+                if barrier.detected and barrier.confidence > 0.7:
+                    logger.warning(
+                        "Barrier detected in playwright result for %s: %s (confidence: %.2f)",
+                        url, barrier.barrier_type, barrier.confidence,
+                    )
+                    return {
+                        "error": f"Barrier detected: {barrier.barrier_type} (confidence: {barrier.confidence:.2f})",
+                        "barrier": {
+                            "detected": True,
+                            "type": barrier.barrier_type,
+                            "confidence": barrier.confidence,
+                            "detail": barrier.detail,
+                        },
+                        "markdown": "",
+                        "source": "barrier-detection",
+                        "url": url,
+                    }
+
                 logger.info("Tier 3 hit: playwright render for %s", url)
                 # Store any new cf_clearance cookies for future scrapes
                 await store_cookies(url, context)
@@ -465,6 +592,26 @@ async def fetch_via_flaresolverr(url: str) -> dict | None:
                     if html:
                         markdown = html_to_markdown(html)
                         if markdown and len(markdown) > 50:
+                            # ── Barrier check ─────────────────
+                            barrier = _classify_barrier("", url, markdown, html)
+                            if barrier.detected and barrier.confidence > 0.7:
+                                logger.warning(
+                                    "Barrier detected in flare-solverr result for %s: %s (confidence: %.2f)",
+                                    url, barrier.barrier_type, barrier.confidence,
+                                )
+                                return {
+                                    "error": f"Barrier detected: {barrier.barrier_type} (confidence: {barrier.confidence:.2f})",
+                                    "barrier": {
+                                        "detected": True,
+                                        "type": barrier.barrier_type,
+                                        "confidence": barrier.confidence,
+                                        "detail": barrier.detail,
+                                    },
+                                    "markdown": "",
+                                    "source": "barrier-detection",
+                                    "url": url,
+                                }
+
                             logger.info("Tier 3.5 hit: flare-solverr for %s", url)
                             return {"markdown": markdown, "source": "flare-solverr", "url": url}
     except (httpx.ConnectError, httpx.TimeoutException):
@@ -561,6 +708,26 @@ async def _fetch_via_browser_svc(url: str) -> dict | None:
             if text_resp.json().get("success"):
                 text = text_resp.json()["result"].get("script_result", "")
                 if text and len(text) > 200:
+                    # ── Barrier check ─────────────────────────
+                    barrier = _classify_barrier("", url, text, None)
+                    if barrier.detected and barrier.confidence > 0.7:
+                        logger.warning(
+                            "Barrier detected in browser-svc result for %s: %s (confidence: %.2f)",
+                            url, barrier.barrier_type, barrier.confidence,
+                        )
+                        return {
+                            "error": f"Barrier detected: {barrier.barrier_type} (confidence: {barrier.confidence:.2f})",
+                            "barrier": {
+                                "detected": True,
+                                "type": barrier.barrier_type,
+                                "confidence": barrier.confidence,
+                                "detail": barrier.detail,
+                            },
+                            "markdown": "",
+                            "source": "barrier-detection",
+                            "url": url,
+                        }
+
                     logger.info("Browser-svc fallback hit for %s (article text: %d chars)", url, len(text))
                     return {
                         "markdown": text,
@@ -575,6 +742,26 @@ async def _fetch_via_browser_svc(url: str) -> dict | None:
             if html:
                 markdown = html_to_markdown(html)
                 if markdown and len(markdown) > 50:
+                    # ── Barrier check ─────────────────────────
+                    barrier = _classify_barrier("", url, markdown, html)
+                    if barrier.detected and barrier.confidence > 0.7:
+                        logger.warning(
+                            "Barrier detected in browser-svc HTML result for %s: %s (confidence: %.2f)",
+                            url, barrier.barrier_type, barrier.confidence,
+                        )
+                        return {
+                            "error": f"Barrier detected: {barrier.barrier_type} (confidence: {barrier.confidence:.2f})",
+                            "barrier": {
+                                "detected": True,
+                                "type": barrier.barrier_type,
+                                "confidence": barrier.confidence,
+                                "detail": barrier.detail,
+                            },
+                            "markdown": "",
+                            "source": "barrier-detection",
+                            "url": url,
+                        }
+
                     logger.info("Browser-svc fallback hit for %s (HTML: %d chars)", url, len(html))
                     return {
                         "markdown": markdown,
@@ -655,17 +842,35 @@ async def smart_scrape(url: str) -> dict:
     # Tier 3 (no shared client needed)
     result = await fetch_via_playwright(url)
     if result:
-        content_good = not _looks_suspicious(result.get("markdown", ""))
-        content_embedded = _has_embedded_content(result.get("raw_html_start", ""))
+        # If the fetch function returned a barrier detection, skip all further tiers
+        if "barrier" in result:
+            logger.warning(
+                "Barrier detected at Tier 3 for %s, skipping remaining tiers",
+                url,
+            )
+            return result
+
+        # Use barrier classification instead of old _looks_suspicious
+        markdown_text = result.get("markdown", "")
+        raw_html = result.get("raw_html_start", "")
+        barrier = _classify_barrier("", url, markdown_text, raw_html)
+        content_good = not barrier.detected or barrier.confidence <= 0.7
+        content_embedded = _has_embedded_content(raw_html)
         if content_good:
             return result  # genuinely good content, return immediately
-        logger.info("Tier 3 content flagged: suspicious=%s, embedded=%s",
-                     not content_good, content_embedded)
+        logger.info("Tier 3 content flagged: barrier=%s (conf=%.2f), embedded=%s",
+                     barrier.barrier_type or "none", barrier.confidence, content_embedded)
 
     # Tier 3.5: FlareSolverr for hard Cloudflare challenges
     if result:
         fs_result = await fetch_via_flaresolverr(url)
         if fs_result:
+            if "barrier" in fs_result:
+                logger.warning(
+                    "Barrier detected at Tier 3.5 for %s, skipping remaining tiers",
+                    url,
+                )
+                return fs_result
             return fs_result
 
     # Tier 4: LLM-assisted recovery when content looks suspicious
