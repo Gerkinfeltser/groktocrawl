@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 
 FLARE_SOLVERR_URL = os.getenv("FLARE_SOLVERR_URL", "http://flare-solverr:8191/v1")
 
+from .adapters.base import AdapterContext, get_registry
+
+
 # ── Binary content-type detection ──────────────────────────────
 BINARY_TYPE_PREFIXES = ("image/", "audio/", "video/")
 BINARY_TYPE_EXACT = {
@@ -627,6 +630,18 @@ async def smart_scrape(url: str) -> dict:
             ),
         },
     ) as client:
+        # Adapter registry check (pre-pipeline, before any HTTP)
+        registry = get_registry()
+        if registry._entries:
+            ctx = AdapterContext(
+                browser_svc_url=os.getenv("BROWSER_SVC_URL", "http://browser-svc:8012"),
+                config=dict(os.environ),
+            )
+            adapter_result = await registry.dispatch(url, ctx)
+            if adapter_result:
+                logger.info("Adapter hit: %s for %s", adapter_result.source, url)
+                return adapter_result.to_dict()
+
         # Tier 1
         result = await fetch_via_llms_txt(url, client)
         if result:

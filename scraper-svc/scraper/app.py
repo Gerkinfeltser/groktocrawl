@@ -18,7 +18,20 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app):
-    """Connect to Valkey on startup, close on shutdown (graceful if unavailable)."""
+    """Connect to Valkey on startup, close on shutdown.
+
+    Also loads site adapters (YouTube, etc.) — safe to call even
+    if the adapters package is not yet installed.
+    """
+    from .adapters.base import get_registry
+
+    try:
+        registry = get_registry()
+        registry.load_all()
+        logger.info("Loaded %d site adapters", len(registry._entries))
+    except Exception as exc:
+        logger.warning("Failed to load adapters: %s", exc)
+
     await get_client()
     yield
     await close_client()

@@ -275,6 +275,35 @@ route through the agent API.
 See [SECURITY.md](SECURITY.md) for our disclosure policy and how to
 privately report security issues.
 
+## Adapters
+
+GroktoCrawl supports **site-specific content handlers** that extract richer content from JavaScript-heavy sites. When `scrape <url>` is called, the adapter registry checks if a handler matches the URL before running the generic pipeline. If it matches, the adapter handles extraction with its own fallback chain. If it fails, the generic pipeline runs as normal.
+
+### YouTube Adapter
+
+`scrape <youtube-url>` returns a markdown document with:
+
+- **YAML frontmatter:** video_id, title, channel, channel_url, thumbnail_url, source
+- **Markdown body:** full video transcript
+
+**Fallback chain:** youtube_transcript_api (free, no key) → browser render + DOM extraction
+
+**Configuration:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `ADAPTER_YOUTUBE_API_KEY` | *(none)* | YouTube Data API v3 key (optional — transcript works without it) |
+
+### Adding a New Adapter
+
+1. Create `scraper-svc/scraper/adapters/<site>.py`
+2. Subclass `SiteAdapter`, set `name`, `patterns`, `priority`, implement `scrape()`
+3. Decorate with `@adapter` for auto-registration
+4. Add any new dependencies to `scraper-svc/pyproject.toml`
+5. Add `.env` variables to `.env.sample` and document them in this section
+
+See `docs/adr/` for the architecture decision records behind the adapter pattern, and `CONTRIBUTING.md` for the ADR convention.
+
 ## Project Status
 
 Active development. All core Firecrawl v2 API endpoints implemented and integration-tested. See [issues](https://github.com/groktopus/groktocrawl/issues) for upcoming features. Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
