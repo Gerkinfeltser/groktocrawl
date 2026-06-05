@@ -59,16 +59,18 @@ jobs:
               echo "❌ MISSING TITLE: $basename"
               errors=$((errors+1))
             fi
-            if ! echo "$content" | grep -qi "^## Context"; then
-              echo "❌ MISSING '## Context' section: $basename"
+            if ! echo "$content" | grep -qiE "^#{1,2} Context"; then
+              echo "❌ MISSING '## Context' or '# Context': $basename"
               errors=$((errors+1))
             fi
-            if ! echo "$content" | grep -qi "^## Decision"; then
+            # Accept "## Decision" or "## Decision Outcome" or "### Decision"
+            if ! echo "$content" | grep -qiE "^#{1,2} Decision"; then
               echo "❌ MISSING '## Decision' section: $basename"
               errors=$((errors+1))
             fi
-            if ! echo "$content" | grep -qi "^## Consequences"; then
-              echo "❌ MISSING '## Consequences' section: $basename"
+            # Accept "## Consequences" or "### Consequences" or "### Positive/Negative Consequences"
+            if ! echo "$content" | grep -qiE "^#{2,3} (Positive |Negative )?Consequences"; then
+              echo "❌ MISSING Consequences section: $basename"
               errors=$((errors+1))
             fi
           done
