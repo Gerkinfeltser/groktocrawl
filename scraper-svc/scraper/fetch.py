@@ -927,11 +927,56 @@ def _add_quality(result: dict, html: str = "", title: str = "") -> dict:
     return result
 
 
-async def smart_scrape(url: str) -> dict:
-    """Try each tier in order. Return the first successful result.
+QA_MIN_QUALITY_THRESHOLD = float(os.getenv("QA_MIN_QUALITY_THRESHOLD", "0.3"))
 
-    Returns a dict with keys: markdown, source, url, error (optional).
+
+def _quality_acceptable(result: dict) -> bool:
+    """Check if a scrape result's quality is above the degradation threshold.
+
+    Results without a quality field (e.g., barrier detections) are returned
+    as-is without degradation.
     """
+    quality = result.get("quality")
+    if quality is None:
+        return True  # No quality assessment available — return as-is
+    score = quality.get("score", 1.0)
+    return score >= QA_MIN_QUALITY_THRESHOLD
+
+
+async def _maybe_degrade(result: dict, tier_label: str, best_effort: list) -> dict | None:
+    """Check quality and decide whether to return or degrade to next tier.
+
+    If quality is acceptable, returns the result dict (caller should return it).
+    If quality is below threshold, adds to best_effort list and returns None
+    (caller should fall through to next tier).
+
+    Returns:
+        The result dict if acceptable, None if degraded.
+    """
+    result = _add_quality(result)
+    if _quality_acceptable(result):
+        return result
+    bq = result.get("quality", {})
+    bs = bq.get("score", 0.0)
+    logger.info(
+        "Degrading from %s: quality=%.2f < %.2f",
+        tier_label, bs, QA_MIN_QUALITY_THRESHOLD,
+    )
+    result["_degraded_from"] = tier_label
+    best_effort.append(result)
+    return None
+
+
+async def smart_scrape(url: str) -> dict:
+    """Try each tier in order. Return the first successful result with acceptable quality.
+
+    Degrades through tiers when quality is below QA_MIN_QUALITY_THRESHOLD.
+    Returns the best-effort result if all tiers produce low quality.
+
+    Returns a dict with keys: markdown, source, url, quality, error (optional).
+    """
+    best_effort: list[dict] = []
+
     async with httpx.AsyncClient(
         follow_redirects=True,
         timeout=30,
@@ -958,90 +1003,95 @@ async def smart_scrape(url: str) -> dict:
         # Cache check (after adapter, before tier pipeline)
         cached = await _check_cache(url)
         if cached:
-            return _add_quality(cached)
+            cached = _add_quality(cached)
+            if _quality_acceptable(cached):
+                return cached
+            logger.info("Cache hit below quality threshold, re-fetching %s", url)
 
-        # Tier 1
+        # Tier 1: /llms.txt
         result = await fetch_via_llms_txt(url, client)
         if result:
-            result = _add_quality(result)
-            await _set_cache(url, result)
-            return result
+            accepted = await _maybe_degrade(result, "tier1-llms-txt", best_effort)
+            if accepted:
+                await _set_cache(url, accepted)
+                return accepted
 
-        # Tier 2
+        # Tier 2: Accept: text/markdown
         result = await fetch_via_content_negotiation(url, client)
         if result:
-            result = _add_quality(result)
-            await _set_cache(url, result)
-            return result
+            accepted = await _maybe_degrade(result, "tier2-content-negotiation", best_effort)
+            if accepted:
+                await _set_cache(url, accepted)
+                return accepted
 
-    # Tier 3 (no shared client needed)
+    # Tier 3: Playwright render + readability (no shared client needed)
     result = await fetch_via_playwright(url)
     if result:
-        # If the fetch function returned a barrier detection, skip all further tiers
+        # Barrier detection — if page IS a challenge/error, skip remaining tiers
         if "barrier" in result:
-            logger.warning(
-                "Barrier detected at Tier 3 for %s, skipping remaining tiers",
-                url,
-            )
+            logger.warning("Barrier detected at Tier 3 for %s, skipping remaining tiers", url)
             return result
 
-        # Use barrier classification instead of old _looks_suspicious
         markdown_text = result.get("markdown", "")
         raw_html = result.get("raw_html_start", "")
         barrier = _classify_barrier("", url, markdown_text, raw_html)
         content_good = not barrier.detected or barrier.confidence <= 0.7
         content_embedded = _has_embedded_content(raw_html)
+
         if content_good:
-            result = _add_quality(result, html=raw_html)  # genuinely good content, return immediately
-            await _set_cache(url, result)
-            return result
-        logger.info("Tier 3 content flagged: barrier=%s (conf=%.2f), embedded=%s",
-                     barrier.barrier_type or "none", barrier.confidence, content_embedded)
+            accepted = await _maybe_degrade(result, "tier3-playwright", best_effort)
+            if accepted:
+                await _set_cache(url, accepted)
+                return accepted
+            # Low quality — degrade through remaining tiers
+            logger.info("Tier 3 content quality below threshold, degrading for %s", url)
+        else:
+            logger.info("Tier 3 content flagged: barrier=%s (conf=%.2f), embedded=%s",
+                        barrier.barrier_type or "none", barrier.confidence, content_embedded)
 
     # Tier 3.5: FlareSolverr for hard Cloudflare challenges
     if result:
         fs_result = await fetch_via_flaresolverr(url)
         if fs_result:
             if "barrier" in fs_result:
-                logger.warning(
-                    "Barrier detected at Tier 3.5 for %s, skipping remaining tiers",
-                    url,
-                )
+                logger.warning("Barrier detected at Tier 3.5 for %s, skipping remaining tiers", url)
                 return fs_result
-            fs_result = _add_quality(fs_result)
-            await _set_cache(url, fs_result)
-            return fs_result
+            accepted = await _maybe_degrade(fs_result, "tier35-flaresolverr", best_effort)
+            if accepted:
+                await _set_cache(url, accepted)
+                return accepted
 
     # Tier 4: LLM-assisted recovery when content looks suspicious
     if result:
         logger.info("Tier 4: attempting LLM recovery for %s", url)
         from .recovery import attempt_llm_recovery
-        # Pass raw HTML (with iframe tags) instead of converted markdown
+
         page_content = result.get("raw_html_start") or result.get("markdown", "")
         recovery_result = await attempt_llm_recovery(url, page_content)
         if recovery_result:
-            recovery_result = _add_quality(recovery_result)
-            await _set_cache(url, recovery_result)
-            return recovery_result
+            accepted = await _maybe_degrade(recovery_result, "tier4-llm-recovery", best_effort)
+            if accepted:
+                await _set_cache(url, accepted)
+                return accepted
 
-    # Check for specific failure modes — try browser-svc fallback for Substack
+    # Browser-svc fallback for Substack (last resort before error)
     if result:
         raw_html = result.get("raw_html_start", "")
         redirected_url = ""
-        # Extract redirected URL from raw HTML if available (Substack embeds it)
         import re as _re
+
         substack_match = _re.search(r'substack\.com/[^"\'\\s]+', raw_html)
         if substack_match:
             redirected_url = f" (redirected to {substack_match.group()})"
 
         if _is_substack_redirect(raw_html):
-            # Fallback: use the browser-svc which handles Substack correctly
             logger.info("Substack redirect detected, trying browser-svc fallback for %s", url)
             browser_result = await _fetch_via_browser_svc(url)
             if browser_result:
-                browser_result = _add_quality(browser_result)
-                await _set_cache(url, browser_result)
-                return browser_result
+                accepted = await _maybe_degrade(browser_result, "browser-svc", best_effort)
+                if accepted:
+                    await _set_cache(url, accepted)
+                    return accepted
             return {
                 "error": (
                     f"Could not extract content from {url}{redirected_url}. "
@@ -1054,6 +1104,19 @@ async def smart_scrape(url: str) -> dict:
                 "source": "none",
                 "url": url,
             }
+
+    # All tiers exhausted — return best effort if any tier produced content
+    if best_effort:
+        best = max(best_effort, key=lambda r: r.get("quality", {}).get("score", 0.0))
+        bq = best.get("quality", {})
+        bs = bq.get("score", 0.0)
+        logger.warning(
+            "All tiers exhausted for %s, returning best effort (quality=%.2f, source=%s)",
+            url, bs, best.get("source", "unknown"),
+        )
+        best["warning"] = f"Suboptimal content — quality ({bs:.2f}) below threshold ({QA_MIN_QUALITY_THRESHOLD:.2f})"
+        await _set_cache(url, best)
+        return best
 
     return {
         "error": f"Could not extract content from {url}",
