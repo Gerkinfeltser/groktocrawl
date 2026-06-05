@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Extraction quality gates** — post-extraction content quality assessment for boilerplate detection, completeness checks, and block page detection. Three lightweight heuristic gates in `scraper-svc/scraper/extract.py` produce a composite quality score (0.0–1.0) with structured breakdown. Quality score is returned in scrape response metadata — non-blocking, consumers set their own tolerance. See ADR-0016.
+- **`quality` field in scrape response** — `ScrapeResponse.data` and `ScrapeData.quality` now carry the quality assessment result: `{"score": 0.95, "checks": {"boilerplate": "pass", "completeness": "pass", "block_detected": "pass"}, "detail": "all checks passed"}`.
+- **Unit tests for quality gates** — 18 tests covering boilerplate detection, completeness checking, block page detection, and integrated quality assessment.
+
+### Changed
+
+- `smart_scrape()` calls `assess_quality()` after each successful tier, attaching the quality result to the response dict.
+- `ScrapeData` model in agent-svc now includes an optional `quality` field.
+
 ## [0.6.0] — 2026-06-05
 
 ### Added

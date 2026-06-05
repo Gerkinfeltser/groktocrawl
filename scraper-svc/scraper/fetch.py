@@ -17,6 +17,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from .extract import assess_quality
+
 logger = logging.getLogger(__name__)
 
 FLARE_SOLVERR_URL = os.getenv("FLARE_SOLVERR_URL", "http://flare-solverr:8191/v1")
@@ -912,6 +914,19 @@ async def _get_browser_page_content(browser_svc_url: str, session_id: str) -> st
     return None
 
 
+def _add_quality(result: dict, html: str = "", title: str = "") -> dict:
+    """Assess content quality and add quality metadata to a scrape result dict.
+
+    Lightweight post-extraction quality check — runs after each successful tier.
+    Quality score is non-blocking; consumers set their own tolerance.
+    """
+    markdown = result.get("markdown", "")
+    url = result.get("url", "")
+    quality = assess_quality(markdown, html=html, url=url, title=title)
+    result["quality"] = quality
+    return result
+
+
 async def smart_scrape(url: str) -> dict:
     """Try each tier in order. Return the first successful result.
 
@@ -943,17 +958,19 @@ async def smart_scrape(url: str) -> dict:
         # Cache check (after adapter, before tier pipeline)
         cached = await _check_cache(url)
         if cached:
-            return cached
+            return _add_quality(cached)
 
         # Tier 1
         result = await fetch_via_llms_txt(url, client)
         if result:
+            result = _add_quality(result)
             await _set_cache(url, result)
             return result
 
         # Tier 2
         result = await fetch_via_content_negotiation(url, client)
         if result:
+            result = _add_quality(result)
             await _set_cache(url, result)
             return result
 
@@ -975,8 +992,9 @@ async def smart_scrape(url: str) -> dict:
         content_good = not barrier.detected or barrier.confidence <= 0.7
         content_embedded = _has_embedded_content(raw_html)
         if content_good:
+            result = _add_quality(result, html=raw_html)  # genuinely good content, return immediately
             await _set_cache(url, result)
-            return result  # genuinely good content, return immediately
+            return result
         logger.info("Tier 3 content flagged: barrier=%s (conf=%.2f), embedded=%s",
                      barrier.barrier_type or "none", barrier.confidence, content_embedded)
 
@@ -990,6 +1008,7 @@ async def smart_scrape(url: str) -> dict:
                     url,
                 )
                 return fs_result
+            fs_result = _add_quality(fs_result)
             await _set_cache(url, fs_result)
             return fs_result
 
@@ -1001,6 +1020,7 @@ async def smart_scrape(url: str) -> dict:
         page_content = result.get("raw_html_start") or result.get("markdown", "")
         recovery_result = await attempt_llm_recovery(url, page_content)
         if recovery_result:
+            recovery_result = _add_quality(recovery_result)
             await _set_cache(url, recovery_result)
             return recovery_result
 
@@ -1019,6 +1039,7 @@ async def smart_scrape(url: str) -> dict:
             logger.info("Substack redirect detected, trying browser-svc fallback for %s", url)
             browser_result = await _fetch_via_browser_svc(url)
             if browser_result:
+                browser_result = _add_quality(browser_result)
                 await _set_cache(url, browser_result)
                 return browser_result
             return {
