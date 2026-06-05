@@ -104,7 +104,7 @@ async def run_research(
         target_urls = list(urls) if urls else []
         if not target_urls:
             logger.info("No URLs provided. Searching for: %s", prompt)
-            search_results = await searxng.search(prompt, limit=10)
+            search_results, _health = await searxng.search(prompt, limit=10)
             target_urls = [r["url"] for r in search_results if r.get("url")]
 
         documents, source_details = await _scrape_urls(target_urls, scraper)

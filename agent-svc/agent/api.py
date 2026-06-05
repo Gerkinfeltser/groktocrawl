@@ -185,7 +185,7 @@ async def search_v1(request: Request, body: SearchRequest):
 
     searxng = SearXNGClient(request.app.state.searxng_url)
     try:
-        results = await searxng.search(
+        results, _health = await searxng.search(
             body.query, limit=body.limit,
             categories=body.categories, sources=body.sources,
         )
@@ -210,7 +210,7 @@ async def search(request: Request, body: SearchRequest):
 
     searxng = SearXNGClient(request.app.state.searxng_url)
     try:
-        results = await searxng.search(
+        results, _health = await searxng.search(
             body.query, limit=body.limit,
             categories=body.categories, sources=body.sources,
         )
