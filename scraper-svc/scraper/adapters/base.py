@@ -186,6 +186,15 @@ class AdapterRegistry:
             except Exception as exc:
                 logger.warning("Failed to load adapter module %s: %s", name, exc)
 
+        # Register all decorated adapter classes
+        # Must happen after imports to ensure @adapter decorators have fired.
+        global _registry_list
+        for cls in _registry_list:
+            instance = cls()
+            self.register(instance)
+            logger.debug("Registered adapter: %s", instance.name)
+        _registry_list = []
+
     async def dispatch(self, url: str, ctx: AdapterContext) -> AdapterResult | None:
         """Try each matching adapter in priority order.
 

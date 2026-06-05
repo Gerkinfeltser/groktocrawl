@@ -95,18 +95,23 @@ async def _fetch_oembed(video_id: str) -> dict:
 async def _fetch_transcript(video_id: str) -> str | None:
     """Fetch the video transcript via ``youtube_transcript_api``.
 
+    Runs the sync API in a thread to avoid blocking the event loop.
+
     Returns the full transcript as a single text block, or ``None``
     if unavailable.
     """
+    import asyncio
+
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
 
-        transcript_list = await YouTubeTranscriptApi.get_transcript_async(
-            video_id, languages=["en"]
-        )
-        if not transcript_list:
-            return None
-        return " ".join(item["text"] for item in transcript_list)
+        def _get_transcript():
+            api = YouTubeTranscriptApi()
+            transcript_list = api.fetch(video_id, languages=["en"])
+            return " ".join(item.text for item in transcript_list)
+
+        transcript = await asyncio.to_thread(_get_transcript)
+        return transcript if transcript else None
     except ImportError:
         logger.debug("youtube_transcript_api not installed")
         return None
