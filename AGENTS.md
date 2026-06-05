@@ -56,6 +56,8 @@ The agent service uses an OpenAI-compatible client. Swap the provider by changin
 
 **System prompt:** The agent's research behavior is defined by `SYSTEM_PROMPT` and `EXTRACT_SYSTEM_PROMPT` constants in `research.py`. These are fixed — not configurable at runtime. They instruct the LLM to evaluate source quality, synthesize across pages, detect contradictions, and cite sources.
 
+**Search parameters:** `POST /v2/search` accepts Firecrawl v2 `sources` and `categories` dimensions alongside `query` and `limit`. These are translated to SearXNG categories — see `searxng_client.py` for the translation maps and `docs/adr/0013-search-architecture-with-vertical-categories.md` for the architecture. The CLI exposes `--sources` (web, news, images, video, social) and `--categories` (research, github, pdf, etc.) flags.
+
 ## Testing
 
 ```bash

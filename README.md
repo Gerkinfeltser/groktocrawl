@@ -81,12 +81,15 @@ The scraper uses a **three-tier strategy**: check `/llms.txt` first, try `Accept
 `groktocrawl` is a CLI tool in the repo root. It needs `requests` (`pip install requests`).
 
 ```bash
-./groktocrawl scrape <url>                  # Scrape a page to markdown
-./groktocrawl search <query> --limit 5      # Search the web
-./groktocrawl map <url> --limit 100         # Discover URLs on a site
-./groktocrawl crawl <url> --max-depth 2     # Crawl a website
-./groktocrawl agent "<prompt>"              # Autonomous research agent
-./groktocrawl --json --server <url> <cmd>   # JSON output, custom server
+./groktocrawl scrape <url>                      # Scrape a page to markdown
+./groktocrawl search <query> --limit 5          # Search the web (default: general)
+./groktocrawl search <query> --sources news     # Search news sources only
+./groktocrawl search <query> --categories research  # Search with content category (mapped to SearXNG)
+./groktocrawl search <query> --sources news --categories research  # Combined filter
+./groktocrawl map <url> --limit 100             # Discover URLs on a site
+./groktocrawl crawl <url> --max-depth 2         # Crawl a website
+./groktocrawl agent "<prompt>"                  # Autonomous research agent
+./groktocrawl --json --server <url> <cmd>       # JSON output, custom server
 ```
 
 ## API Endpoints
@@ -119,6 +122,36 @@ The scraper uses a **three-tier strategy**: check `/llms.txt` first, try `Accept
 | GET | `/v2/generate-llmstxt/:jobId` | Get generation status and result |
 
 All Firecrawl v2 API-compatible in request/response shape.
+
+### Search endpoint
+
+`POST /v2/search` accepts Firecrawl v2's two-dimensional search model:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `query` | `string` | **Required.** Search query |
+| `limit` | `int` | Max results (default: 5) |
+| `sources` | `string[]` | Source type filter: `web`, `news`, `images`, `video`, `social` |
+| `categories` | `string[]` | Content category: `research`, `github`, `pdf`, `news`, `science`, `it`, `general` |
+
+Both `sources` and `categories` are translated to SearXNG-native categories and can be combined:
+
+| Firecrawl value | Mapped to SearXNG |
+|----------------|-------------------|
+| `sources=news` | `categories=news` |
+| `sources=images` | `categories=images` |
+| `sources=web` | `categories=general` |
+| `categories=research` | `categories=science` |
+| `categories=github` | `categories=it` |
+| `categories=pdf` | `categories=general` |
+
+Unknown values pass through to SearXNG as-is for forward compatibility. When neither
+`sources` nor `categories` is specified, defaults to `general`.
+
+Results are grouped by source type in the response:
+```json
+{"data": {"web": [...], "images": [], "news": []}}
+```
 
 ### Agent endpoint
 

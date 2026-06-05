@@ -208,10 +208,16 @@ class Client:
         query: str,
         limit: int = 5,
         scrape: bool = False,
+        categories: Optional[list[str]] = None,
+        sources: Optional[list[str]] = None,
     ) -> Dict[str, Any]:
         data: Dict[str, Any] = {"query": query, "limit": limit}
         if scrape:
             data["scrapeOptions"] = {"formats": ["markdown"]}
+        if categories:
+            data["categories"] = categories
+        if sources:
+            data["sources"] = sources
         return self._request("POST", "/search", json_data=data)
 
     def map_urls(
@@ -382,7 +388,10 @@ def cmd_search(client: Client, args: argparse.Namespace) -> None:
         return
 
     try:
-        result = client.search(query=args.query, limit=args.limit, scrape=args.scrape_results)
+        result = client.search(
+            query=args.query, limit=args.limit, scrape=args.scrape_results,
+            categories=args.categories, sources=args.sources,
+        )
     except ApiError as e:
         die(str(e))
 
@@ -998,6 +1007,8 @@ def make_parser() -> argparse.ArgumentParser:
     p_search.add_argument("query", help="Search query")
     p_search.add_argument("--limit", "-l", type=int, default=5, help="Max results (default: 5)")
     p_search.add_argument("--scrape-results", action="store_true", help="Also scrape each result for full content")
+    p_search.add_argument("--sources", nargs="+", choices=["web", "news", "images", "video", "social"], help="Source types to search (Firecrawl v2)")
+    p_search.add_argument("--categories", nargs="+", help="Content categories: research, github, pdf, news, science, it (mapped to SearXNG equivalents)")
 
     p_map = subparsers.add_parser("map", help="Discover URLs on a site")
     p_map.add_argument("url", help="Site URL to map")
