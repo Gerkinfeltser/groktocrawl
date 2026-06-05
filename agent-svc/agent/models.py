@@ -97,6 +97,7 @@ class SearchRequest(BaseModel):
     query: str
     limit: int = 5
     categories: list[str] | None = None
+    sources: list[str] | None = None
 
 
 class SearchResult(BaseModel):

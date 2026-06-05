@@ -185,7 +185,10 @@ async def search_v1(request: Request, body: SearchRequest):
 
     searxng = SearXNGClient(request.app.state.searxng_url)
     try:
-        results = await searxng.search(body.query, limit=body.limit, categories=body.categories)
+        results = await searxng.search(
+            body.query, limit=body.limit,
+            categories=body.categories, sources=body.sources,
+        )
         return {
             "success": True,
             "data": [
@@ -207,12 +210,23 @@ async def search(request: Request, body: SearchRequest):
 
     searxng = SearXNGClient(request.app.state.searxng_url)
     try:
-        results = await searxng.search(body.query, limit=body.limit, categories=body.categories)
+        results = await searxng.search(
+            body.query, limit=body.limit,
+            categories=body.categories, sources=body.sources,
+        )
         search_results = [
             SearchResult(url=r["url"], title=r["title"], description=r.get("description", ""))
             for r in results
         ]
-        return SearchResponse(data={"web": search_results, "images": [], "news": []})
+        # Route results to the correct top-level key based on sources filter
+        data: dict[str, list] = {"web": [], "images": [], "news": []}
+        if body.sources:
+            for src in body.sources:
+                if src in data:
+                    data[src] = search_results
+        else:
+            data["web"] = search_results
+        return SearchResponse(data=data)
     finally:
         await searxng.close()
 
