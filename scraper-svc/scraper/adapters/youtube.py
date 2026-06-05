@@ -9,6 +9,7 @@ Fallback chain:
 Metadata sources:
   - oEmbed API (https://www.youtube.com/oembed?format=json) for title,
     author_name, author_url, thumbnail_url
+  - Page HTML LD+JSON or meta description for video description text
   - Browser DOM parsing for view count, publish date (fallback)
 """
 
@@ -87,6 +88,142 @@ async def _fetch_oembed(video_id: str) -> dict:
     except Exception as exc:
         logger.debug("oEmbed failed for video %s: %s", video_id, exc)
     return {}
+
+
+# ── Video description via page HTML ────────────────────────────
+
+
+async def _fetch_description(video_id: str) -> str | None:
+    """Fetch the video description from the YouTube page HTML.
+
+    Strategy:
+    1. Parse ``"description":{"simpleText":"..."}`` from the page's
+       embedded JSON data (contains the full description text)
+    2. Fallback to ``<meta name="description">`` content attribute
+       (truncated to ~168 chars, but always present)
+
+    Uses a lightweight ``httpx.get()`` — no browser rendering needed.
+    Returns the description text or ``None``.
+    """
+    import httpx
+
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+            })
+            if resp.status_code != 200:
+                logger.debug("Description fetch returned %d for %s", resp.status_code, video_id)
+                return None
+
+            html = resp.text
+
+            # Strategy 1: description.simpleText from embedded JSON data
+            # Format: "description":{"simpleText":"..."}
+            for marker in (
+                '"description":{"simpleText":"',
+                '"description": {"simpleText": "',
+            ):
+                idx = html.find(marker)
+                if idx >= 0:
+                    start = idx + len(marker)
+                    result = []
+                    i = start
+                    while i < len(html) and i < start + 20000:
+                        ch = html[i]
+                        if ch == "\\":
+                            if i + 1 < len(html):
+                                nxt = html[i + 1]
+                                if nxt == "n":
+                                    result.append("\n")
+                                elif nxt == '"':
+                                    result.append('"')
+                                elif nxt == "\\":
+                                    result.append("\\")
+                                elif nxt == "r":
+                                    pass  # skip \r
+                                elif nxt == "t":
+                                    result.append("\t")
+                                elif nxt == "/":
+                                    result.append("/")
+                                elif nxt == "u":
+                                    # Unicode escape — skip 4 hex digits
+                                    i += 5
+                                    continue
+                                else:
+                                    result.append(nxt)
+                                i += 2
+                            else:
+                                break
+                        elif ch == '"':
+                            break
+                        else:
+                            result.append(ch)
+                            i += 1
+
+                    desc = "".join(result).strip()
+                    if desc:
+                        logger.debug(
+                            "Description extracted via simpleText for %s (%d chars)",
+                            video_id, len(desc),
+                        )
+                        return desc
+
+            # Strategy 2: meta description tag (truncated fallback)
+            meta_match = re.search(
+                r'<meta\s+[^>]*name="description"[^>]*content="([^"]*)"',
+                html,
+                re.IGNORECASE,
+            )
+            if meta_match:
+                desc = meta_match.group(1)
+                desc = desc.replace("&#39;", "'").replace("&amp;", "&").replace("&quot;", '"')
+                if desc:
+                    logger.debug(
+                        "Description extracted via meta tag for %s (%d chars)",
+                        video_id, len(desc),
+                    )
+                    return desc
+
+    except Exception as exc:
+        logger.debug("Description fetch failed for %s: %s", video_id, exc)
+
+    return None
+
+
+def _description_to_markdown(desc: str) -> str:
+    """Convert a YouTube video description to basic markdown.
+
+    - Preserves paragraph breaks (double newlines)
+    - Wraps bare URLs in ``<>`` autolink syntax
+    - Passes through all other text unchanged
+    """
+    # URL pattern: http:// or https:// followed by non-whitespace
+    url_re = re.compile(r"https?://[^\s<>]+")
+
+    def _autolink(m):
+        url = m.group(0)
+        # Strip trailing punctuation that's not part of the URL
+        url = url.rstrip(".,;:!?)]}>")
+        return f"<{url}>"
+
+    # Process each paragraph
+    paragraphs = desc.split("\n\n")
+    processed = []
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        # Autolink URLs in this paragraph
+        para = url_re.sub(_autolink, para)
+        processed.append(para)
+
+    return "\n\n".join(processed)
 
 
 # ── Transcript via youtube_transcript_api ────────────────────────
@@ -259,14 +396,28 @@ class YouTubeAdapter(SiteAdapter):
             "source": "youtube-adapter",
         }
 
-        # Fallback 1: youtube_transcript_api
+        # Fetch transcript + description in parallel
+        import asyncio
+
         transcript = None
+        description = None
         try:
-            transcript = await ctx.with_timeout(
-                _fetch_transcript(video_id), timeout=12
+            t_result, d_result = await asyncio.gather(
+                ctx.with_timeout(_fetch_transcript(video_id), timeout=12),
+                ctx.with_timeout(_fetch_description(video_id), timeout=10),
+                return_exceptions=True,
             )
-        except AdapterError:
-            logger.debug("Transcript fetch timed out for %s", video_id)
+            if isinstance(t_result, str) and t_result:
+                transcript = t_result
+            elif isinstance(t_result, AdapterError):
+                logger.debug("Transcript fetch failed: %s", t_result)
+
+            if isinstance(d_result, str) and d_result:
+                description = d_result
+            elif isinstance(d_result, AdapterError):
+                logger.debug("Description fetch failed: %s", d_result)
+        except Exception as exc:
+            logger.debug("Parallel fetch error for %s: %s", video_id, exc)
 
         if transcript:
             logger.info(
@@ -279,6 +430,15 @@ class YouTubeAdapter(SiteAdapter):
             markdown = (
                 f"# {title}\n\n"
                 f"**Channel:** {author}\n\n"
+            )
+            # Insert description section if available
+            if description:
+                desc_md = _description_to_markdown(description)
+                markdown += (
+                    f"---\n\n"
+                    f"## Description\n\n{desc_md}\n\n"
+                )
+            markdown += (
                 f"---\n\n"
                 f"## Transcript\n\n{transcript}"
             )
