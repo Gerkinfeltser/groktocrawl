@@ -28,7 +28,10 @@ An Architecture Decision Record captures an important architectural decision mad
 | 0007 | [Adapter Timeout and Circuit Breaker](0007-adapter-timeout-and-circuit-breaker.md) | accepted |
 | 0008 | [Three-Layer Testing Strategy](0008-three-layer-testing-strategy.md) | accepted |
 | 0009 | [Zero CLI Surface Changes](0009-zero-cli-surface-changes.md) | accepted |
-
-## For Contributors
+| 0010 | [Five-Tier Scraper Pipeline with LLM Recovery](0010-five-tier-scraper-with-llm-recovery.md) | accepted |
+| 0011 | [Stealth Playwright Configuration](0011-stealth-playwright-configuration.md) | accepted |
+| 0012 | [Webhook Delivery for Async Endpoints](0012-webhook-delivery-for-async-endpoints.md) | accepted |
+| 0013 | [Search Architecture with Vertical Categories](0013-search-architecture-with-vertical-categories.md) | accepted |
+| 0014 | [Binary Content Detection and Download](0014-binary-content-detection-and-download.md) | accepted |
 
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full ADR workflow: when to write an ADR, how to number it, and how to get it reviewed in a PR.
