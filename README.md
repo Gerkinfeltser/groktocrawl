@@ -294,6 +294,17 @@ GroktoCrawl supports **site-specific content handlers** that extract richer cont
 |---|---|---|
 | `ADAPTER_YOUTUBE_API_KEY` | *(none)* | YouTube Data API v3 key (optional — transcript works without it) |
 
+### Bluesky Adapter
+
+`scrape <bsky.app-url>` returns a markdown document with:
+
+- **YAML frontmatter:** author, handle, did, post_id, timestamp, reply_count, like_count, repost_count
+- **Markdown body:** post text + thread replies
+
+**Fallback chain:** AT Protocol XRPC API (public, no auth) → browser render + DOM extraction
+
+**Configuration:** None — the public API requires no authentication.
+
 ### Adding a New Adapter
 
 1. Create `scraper-svc/scraper/adapters/<site>.py`
