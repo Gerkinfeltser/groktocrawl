@@ -5,6 +5,8 @@ Tier 2: Accept: text/markdown — per-page markdown via content negotiation.
 Tier 3: Playwright render + readability extraction (heavyweight).
 """
 
+import hashlib
+import json
 import logging
 import os
 import re
@@ -18,6 +20,115 @@ import httpx
 logger = logging.getLogger(__name__)
 
 FLARE_SOLVERR_URL = os.getenv("FLARE_SOLVERR_URL", "http://flare-solverr:8191/v1")
+
+# ── Valkey scrape result cache ──────────────────────────────────
+
+_cache_client = None  # Module-level lazy singleton
+
+
+def _normalize_url_for_cache(url: str) -> str:
+    """Normalize a URL for consistent cache keying.
+
+    Lowercases scheme and hostname, strips trailing slash from path
+    (preserving root '/'), and sorts query parameters.
+    """
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    netloc = parsed.netloc.lower()
+    path = parsed.path.rstrip("/") if parsed.path != "/" else "/"
+    query = parsed.query
+    fragment = parsed.fragment
+    # Sort query parameters for consistency
+    if query:
+        params = sorted(query.split("&"))
+        query = "&".join(params)
+    normalized = f"{scheme}://{netloc}{path}"
+    if query:
+        normalized += f"?{query}"
+    if fragment:
+        normalized += f"#{fragment}"
+    return normalized
+
+
+def _scrape_cache_key(url: str) -> str:
+    """Build the Valkey key for a cached scrape result.
+
+    Key: scrape_cache:{sha256_hex_of_normalized_url}
+    """
+    normalized = _normalize_url_for_cache(url)
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return f"scrape_cache:{digest}"
+
+
+async def _get_cache_client():
+    """Get or create the Valkey cache client singleton.
+
+    Returns the client if connected, or None if Valkey is unavailable
+    (graceful degradation — cache is a performance optimization, not
+    a requirement).
+    """
+    global _cache_client
+    if _cache_client is not None:
+        return _cache_client
+
+    redis_url = os.getenv("VALKEY_URL", "redis://valkey:6379/0")
+
+    try:
+        import redis.asyncio as aioredis
+
+        _cache_client = aioredis.from_url(
+            redis_url, decode_responses=True,
+        )
+        await _cache_client.ping()
+        logger.info("Connected to Valkey for scrape result cache at %s", redis_url)
+        return _cache_client
+    except Exception as e:
+        logger.warning("Valkey unavailable for scrape cache at %s — caching disabled (%s)", redis_url, e)
+        _cache_client = None
+        return None
+
+
+async def _check_cache(url: str) -> dict | None:
+    """Check Valkey for a cached scrape result for the given URL.
+
+    Returns the cached result dict if found and within TTL, or None
+    on cache miss or Valkey unavailability.
+    """
+    client = await _get_cache_client()
+    if not client:
+        return None
+    try:
+        key = _scrape_cache_key(url)
+        cached = await client.get(key)
+        if cached:
+            logger.info("Cache hit for %s (key=%s)", url, key)
+            return json.loads(cached)
+    except Exception as e:
+        logger.debug("Cache read failed for %s: %s", url, e)
+    return None
+
+
+async def _set_cache(url: str, result: dict) -> None:
+    """Store a scrape result in Valkey cache.
+
+    Safe to call even if Valkey is unavailable — silently no-ops.
+    Uses SETEX with TTL from SCRAPE_CACHE_TTL env var (default: 3600).
+    """
+    client = await _get_cache_client()
+    if not client:
+        return
+    # Skip caching adapter results (they use external APIs with their own state)
+    source = result.get("source", "")
+    if source == "adapter":
+        return
+    try:
+        key = _scrape_cache_key(url)
+        ttl = int(os.getenv("SCRAPE_CACHE_TTL", "3600"))
+        payload = json.dumps(result)
+        await client.setex(key, ttl, payload)
+        logger.info("Cached scrape result for %s (key=%s, ttl=%ds)", url, key, ttl)
+    except Exception as e:
+        logger.debug("Cache write failed for %s: %s", url, e)
 
 from .adapters.base import AdapterContext, get_registry
 
@@ -829,14 +940,21 @@ async def smart_scrape(url: str) -> dict:
                 logger.info("Adapter hit: %s for %s", adapter_result.source, url)
                 return adapter_result.to_dict()
 
+        # Cache check (after adapter, before tier pipeline)
+        cached = await _check_cache(url)
+        if cached:
+            return cached
+
         # Tier 1
         result = await fetch_via_llms_txt(url, client)
         if result:
+            await _set_cache(url, result)
             return result
 
         # Tier 2
         result = await fetch_via_content_negotiation(url, client)
         if result:
+            await _set_cache(url, result)
             return result
 
     # Tier 3 (no shared client needed)
@@ -857,6 +975,7 @@ async def smart_scrape(url: str) -> dict:
         content_good = not barrier.detected or barrier.confidence <= 0.7
         content_embedded = _has_embedded_content(raw_html)
         if content_good:
+            await _set_cache(url, result)
             return result  # genuinely good content, return immediately
         logger.info("Tier 3 content flagged: barrier=%s (conf=%.2f), embedded=%s",
                      barrier.barrier_type or "none", barrier.confidence, content_embedded)
@@ -871,6 +990,7 @@ async def smart_scrape(url: str) -> dict:
                     url,
                 )
                 return fs_result
+            await _set_cache(url, fs_result)
             return fs_result
 
     # Tier 4: LLM-assisted recovery when content looks suspicious
@@ -881,6 +1001,7 @@ async def smart_scrape(url: str) -> dict:
         page_content = result.get("raw_html_start") or result.get("markdown", "")
         recovery_result = await attempt_llm_recovery(url, page_content)
         if recovery_result:
+            await _set_cache(url, recovery_result)
             return recovery_result
 
     # Check for specific failure modes — try browser-svc fallback for Substack
@@ -898,6 +1019,7 @@ async def smart_scrape(url: str) -> dict:
             logger.info("Substack redirect detected, trying browser-svc fallback for %s", url)
             browser_result = await _fetch_via_browser_svc(url)
             if browser_result:
+                await _set_cache(url, browser_result)
                 return browser_result
             return {
                 "error": (
