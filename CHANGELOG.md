@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Graceful degradation** — `smart_scrape()` now checks content quality after each tier. When quality is below `QA_MIN_QUALITY_THRESHOLD` (default 0.3), the pipeline degrades to the next tier instead of returning low-quality content. Best-effort result is returned if all tiers produce low quality, with a `warning` field. Configurable via `QA_MIN_QUALITY_THRESHOLD` env var.
 - **Extraction quality gates** — post-extraction content quality assessment for boilerplate detection, completeness checks, and block page detection. Three lightweight heuristic gates in `scraper-svc/scraper/extract.py` produce a composite quality score (0.0–1.0) with structured breakdown. Quality score is returned in scrape response metadata — non-blocking, consumers set their own tolerance. See ADR-0016.
 - **`quality` field in scrape response** — `ScrapeResponse.data` and `ScrapeData.quality` now carry the quality assessment result: `{"score": 0.95, "checks": {"boilerplate": "pass", "completeness": "pass", "block_detected": "pass"}, "detail": "all checks passed"}`.
 - **Unit tests for quality gates** — 18 tests covering boilerplate detection, completeness checking, block page detection, and integrated quality assessment.
