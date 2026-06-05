@@ -94,18 +94,86 @@ async def _fetch_post_thread(did: str, rkey: str) -> dict | None:
     return None
 
 
+def _format_text_with_facets(record: dict) -> str:
+    """Convert Bluesky post text with richtext facets to markdown.
+
+    Handles facet types:
+    - ``app.bsky.richtext.facet#link`` → ``[text](uri)``
+    - ``app.bsky.richtext.facet#mention`` → ``[@handle](at://did)``
+    - ``app.bsky.richtext.facet#tag`` → ``#tag``
+
+    Facet ``byteStart``/``byteEnd`` are UTF-8 byte offsets.  We
+    convert them to Python string indexes by counting bytes.
+    """
+    text = record.get("text", "") or ""
+    facets = record.get("facets")
+    if not facets:
+        return text
+
+    def _byte_offset_to_char_index(s: str, byte_offset: int) -> int:
+        """Convert a UTF-8 byte offset to a Python character index."""
+        encoded = s.encode("utf-8")
+        return len(encoded[:byte_offset].decode("utf-8", errors="replace"))
+
+    # Sort facets by start position so we process left to right
+    sorted_facets = sorted(facets, key=lambda f: f["index"]["byteStart"])
+
+    result_parts: list[str] = []
+    cursor = 0
+
+    for facet in sorted_facets:
+        idx = facet.get("index", {})
+        start_byte = idx.get("byteStart", 0)
+        end_byte = idx.get("byteEnd", 0)
+
+        start = _byte_offset_to_char_index(text, start_byte)
+        end = _byte_offset_to_char_index(text, end_byte)
+
+        # Clamp to text bounds
+        start = max(0, min(start, len(text)))
+        end = max(start, min(end, len(text)))
+
+        # Any plain text before this facet
+        if start > cursor:
+            result_parts.append(text[cursor:start])
+
+        # The raw text this facet covers
+        facet_text = text[start:end]
+
+        # Determine facet type and apply formatting
+        features = facet.get("features", [])
+        formatted = facet_text
+        for feature in features:
+            ftype = feature.get("$type", "")
+            if "link" in ftype:
+                uri = feature.get("uri", "")
+                if uri:
+                    formatted = f"[{facet_text}]({uri})"
+            elif "mention" in ftype:
+                did = feature.get("did", "")
+                if did:
+                    formatted = f"[{facet_text}](at://{did})"
+            # Tags just render as plain text (no URL to link to)
+
+        result_parts.append(formatted)
+        cursor = end
+
+    # Any remaining text after the last facet
+    if cursor < len(text):
+        result_parts.append(text[cursor:])
+
+    return "".join(result_parts)
+
+
 def _extract_post_text(post: dict) -> str:
     """Extract the text content from a Bluesky post record.
 
-    Handles ``record.text`` and optionally ``record.facets``
-    (richtext facets for mentions, links, tags).
-
-    Returns plain text (v1) — facet-to-markdown conversion is
-    a future enhancement.
+    Converts richtext facets (mentions, links, tags) to inline
+    markdown where possible.
     """
     record = post.get("record", {})
     if isinstance(record, dict):
-        return record.get("text", "")
+        return _format_text_with_facets(record)
     return str(record) if record else ""
 
 
