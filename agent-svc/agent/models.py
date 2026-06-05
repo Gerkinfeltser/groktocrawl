@@ -24,6 +24,7 @@ class ScrapeData(BaseModel):
     markdown: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
     download: DownloadData | None = None
+    quality: dict[str, Any] | None = None
 
 
 class ScrapeResponse(BaseModel):

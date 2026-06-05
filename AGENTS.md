@@ -25,7 +25,7 @@ groktocrawl/
 │   └── scraper/
 │       ├── app.py      # FastAPI, single /scrape endpoint
 │       ├── fetch.py    # Three-tier fetch strategy
-│       └── extract.py  # HTML → markdown conversion
+│       └── extract.py  # HTML → markdown conversion + content quality gates (ADR-0016)
 ├── search-svc/         # Search fixture for local testing
 ├── llm-svc/            # LLM fixture for local testing
 ├── test-site/          # Fixture website for integration tests

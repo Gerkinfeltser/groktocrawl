@@ -76,6 +76,8 @@ flowchart TD
 
 The scraper uses a **three-tier strategy**: check `/llms.txt` first, try `Accept: text/markdown` second, render with Playwright third.
 
+Every scrape response includes a **`quality` field** with post-extraction content quality assessment (boilerplate detection, completeness checks, block page detection). See `docs/adr/0016-extraction-quality-gates.md` for details.
+
 ## CLI
 
 `groktocrawl` is a CLI tool in the repo root. It needs `requests`.

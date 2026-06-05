@@ -79,15 +79,15 @@ async def scrape(request: ScrapeRequest):
         result = await smart_scrape(request.url)
         if result.get("error"):
             return ScrapeResponse(success=False, error=result["error"])
-        return ScrapeResponse(
-            success=True,
-            data={
-                "markdown": result.get("markdown", ""),
-                "source": result.get("source", "unknown"),
-                "url": request.url,
-                **({"download": result["download"]} if result.get("download") else {}),
-            },
-        )
+        data = {
+            "markdown": result.get("markdown", ""),
+            "source": result.get("source", "unknown"),
+            "url": request.url,
+            "quality": result.get("quality"),
+        }
+        if result.get("download"):
+            data["download"] = result["download"]
+        return ScrapeResponse(success=True, data=data)
     except Exception as e:
         logger.exception("Scrape failed for %s", request.url)
         return ScrapeResponse(success=False, error=str(e))
