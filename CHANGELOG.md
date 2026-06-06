@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`POST /v2/answer` retries more search results when scraping fails** — `_scrape_urls()` now loops through search results until enough sources are successfully scraped, bounded by 2x the requested count. Prevents empty responses when the top results are from sites that block scraping (BBC, Facebook, etc.) but usable sources exist further down.
+
 ### Added
 
 - **`POST /v2/answer` — grounded Q&A endpoint with citations** — lightweight synchronous single-turn endpoint sitting between `/v2/search` (raw results) and `/v2/agent` (deep multi-step research). Pipeline: search → scrape → LLM → citations in one round-trip. Supports `stream: true` for SSE token-by-token streaming. Returns structured response with `answer` (markdown), `sources` (list), `citations` (index→URL mapping), `search_type`, and `latency_ms`. Configurable `num_sources` (1-20) and `model` per-request override.
