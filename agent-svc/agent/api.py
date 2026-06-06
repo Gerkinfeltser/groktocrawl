@@ -81,7 +81,7 @@ async def scrape(request: Request, body: ScrapeRequest):
             success=True,
             data=ScrapeData(
                 markdown=scraper_data.get("markdown", ""),
-                metadata=scraper_data.get("metadata", {"source": scraper_data.get("source", "unknown")}),
+                metadata=scraper_data.get("metadata") or {"source": scraper_data.get("source", "unknown")},
             ),
         )
     return ScrapeResponse(success=False, error=result.get("error", "Scrape failed"))

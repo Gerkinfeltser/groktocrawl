@@ -1103,6 +1103,7 @@ async def smart_scrape(url: str) -> dict:
         cached = await _check_cache(url)
         if cached:
             cached = _add_quality(cached)
+            _enrich_with_metadata(cached)
             if _quality_acceptable(cached):
                 return cached
             logger.info("Cache hit below quality threshold, re-fetching %s", url)
@@ -1115,8 +1116,9 @@ async def smart_scrape(url: str) -> dict:
         if result:
             accepted = await _maybe_degrade(result, "tier1-llms-txt", best_effort)
             if accepted:
+                accepted = await _enrich_with_politeness(accepted, url)
                 await _set_cache(url, accepted)
-                return await _enrich_with_politeness(accepted, url)
+                return accepted
 
         # Tier 2: Accept: text/markdown
         proceed, blocked = await _politeness_check_and_delay(url)
@@ -1126,8 +1128,9 @@ async def smart_scrape(url: str) -> dict:
         if result:
             accepted = await _maybe_degrade(result, "tier2-content-negotiation", best_effort)
             if accepted:
+                accepted = await _enrich_with_politeness(accepted, url)
                 await _set_cache(url, accepted)
-                return await _enrich_with_politeness(accepted, url)
+                return accepted
 
     # Tier 3: Playwright render + readability (no shared client needed)
     proceed, blocked = await _politeness_check_and_delay(url)
@@ -1149,8 +1152,9 @@ async def smart_scrape(url: str) -> dict:
         if content_good:
             accepted = await _maybe_degrade(result, "tier3-playwright", best_effort)
             if accepted:
+                accepted = await _enrich_with_politeness(accepted, url)
                 await _set_cache(url, accepted)
-                return await _enrich_with_politeness(accepted, url)
+                return accepted
             # Low quality — degrade through remaining tiers
             logger.info("Tier 3 content quality below threshold, degrading for %s", url)
         else:
@@ -1169,8 +1173,9 @@ async def smart_scrape(url: str) -> dict:
                 return fs_result
             accepted = await _maybe_degrade(fs_result, "tier35-flaresolverr", best_effort)
             if accepted:
+                accepted = await _enrich_with_politeness(accepted, url)
                 await _set_cache(url, accepted)
-                return await _enrich_with_politeness(accepted, url)
+                return accepted
 
     # Tier 4: LLM-assisted recovery when content looks suspicious
     if result:
@@ -1182,8 +1187,9 @@ async def smart_scrape(url: str) -> dict:
         if recovery_result:
             accepted = await _maybe_degrade(recovery_result, "tier4-llm-recovery", best_effort)
             if accepted:
+                accepted = await _enrich_with_politeness(accepted, url)
                 await _set_cache(url, accepted)
-                return await _enrich_with_politeness(accepted, url)
+                return accepted
 
     # Browser-svc fallback for Substack (last resort before error)
     if result:
@@ -1201,8 +1207,9 @@ async def smart_scrape(url: str) -> dict:
             if browser_result:
                 accepted = await _maybe_degrade(browser_result, "browser-svc", best_effort)
                 if accepted:
+                    accepted = await _enrich_with_politeness(accepted, url)
                     await _set_cache(url, accepted)
-                    return await _enrich_with_politeness(accepted, url)
+                    return accepted
                 return await _enrich_with_politeness(
                     {
                         "error": (
