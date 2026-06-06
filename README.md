@@ -365,6 +365,47 @@ GroktoCrawl supports **site-specific content handlers** that extract richer cont
 
 **Configuration:** None — the public API requires no authentication.
 
+### GitHub Adapters
+
+Two adapters handle different URL types on `github.com`, working together via priority dispatch:
+
+| Priority | Adapter | Handles | Primary Strategy |
+|----------|---------|---------|-----------------|
+| 200 | GitHub File | raw files, blobs, READMEs, directory listings | raw.githubusercontent.com direct fetch |
+| 190 | GitHub Social | issues, PRs, discussions, releases, commits | GraphQL API (v4) |
+
+`scrape <github-url>` returns structured markdown with YAML frontmatter containing owner, repo, and type-specific metadata.
+
+**Resource coverage:**
+
+| URL Pattern | Handled By | Features |
+|---|---|---|
+| `raw.githubusercontent.com/*` | File adapter | Raw content, no rate limit |
+| `github.com/*/blob/*` | File adapter | Rewrites to raw URL |
+| `github.com/*` (repo root) | File adapter | README + stars/forks/language/topics |
+| `github.com/*/tree/*` | File adapter | Directory listing, items sorted dirs-first |
+| `github.com/*/issues/{n}` | Social adapter | Body, comments, labels, state, milestone |
+| `github.com/*/pull/{n}` | Social adapter | Body, reviews, diff stats, changed files, merge status |
+| `github.com/*/discussions/{n}` | Social adapter | Category, upvotes, answer, comments |
+| `github.com/*/releases/tag/{v}` | Social adapter | Release notes, assets, download URLs |
+| `github.com/*/releases` | Social adapter | Releases list with descriptions |
+| `github.com/*/commit/{sha}` | Social adapter | Message, author, associated PRs |
+
+**Fallback chains:**
+
+- **File adapter:** raw.githubusercontent.com direct fetch → GitHub Contents API → generic tier
+- **Social adapter:** GitHub GraphQL API (single query) → GitHub REST API → HTML page scrape (readability) → generic tier
+
+**Configuration:**
+
+The `GITHUB_TOKEN` environment variable enables authenticated access:
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `GITHUB_TOKEN` | *(none)* | 5,000 API req/hr vs 60/hr unauth; enables GraphQL; always falls back to HTML scrape |
+
+A token with `public_repo` scope is sufficient for public repositories. For private repos, use `repo` scope. Without a token, the file adapter works fully and the social adapter falls back to REST (60 req/hr) then HTML scrape — every URL type returns useful content.
+
 ### Adding a New Adapter
 
 1. Create `scraper-svc/scraper/adapters/<site>.py`
