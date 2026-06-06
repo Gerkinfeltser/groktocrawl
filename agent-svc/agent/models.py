@@ -237,6 +237,36 @@ class LLMsTextStatusResponse(BaseModel):
     expires_at: str | None = None
 
 
+class Source(BaseModel):
+    """A source used to ground an answer."""
+    url: str
+    title: str = ""
+    relevance: str = ""
+
+
+class Citation(BaseModel):
+    """An inline citation mapping [N] to a URL."""
+    index: int
+    url: str
+
+
+class AnswerRequest(BaseModel):
+    query: str = Field(..., max_length=10000, description="Natural language question")
+    search_type: str = Field(default="auto", description="Hint for search depth")
+    num_sources: int = Field(default=5, ge=1, le=20, description="How many sources to ground the answer")
+    model: str = Field(default="default", description="Per-request LLM override")
+    stream: bool = Field(default=False, description="SSE streaming response")
+
+
+class AnswerResponse(BaseModel):
+    success: bool = True
+    answer: str = ""
+    sources: list[Source] = Field(default_factory=list)
+    citations: list[Citation] = Field(default_factory=list)
+    search_type: str = "auto"
+    latency_ms: int = 0
+
+
 class ActivityItem(BaseModel):
     """A single job entry in the activity feed."""
     id: str

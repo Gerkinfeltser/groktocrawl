@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`POST /v2/answer` — grounded Q&A endpoint with citations** — lightweight synchronous single-turn endpoint sitting between `/v2/search` (raw results) and `/v2/agent` (deep multi-step research). Pipeline: search → scrape → LLM → citations in one round-trip. Supports `stream: true` for SSE token-by-token streaming. Returns structured response with `answer` (markdown), `sources` (list), `citations` (index→URL mapping), `search_type`, and `latency_ms`. Configurable `num_sources` (1-20) and `model` per-request override.
+- **`LLMClient.generate_stream()`** — new async generator method for SSE streaming from any OpenAI-compatible LLM. Yields `token`, `done`, and `error` event dicts.
+- **Conditional auth header in LLMClient** — `Authorization: Bearer` header is now only sent when `api_key` is non-empty, fixing compatibility with LLM backends that reject empty Bearer tokens.
+- **Integration tests for `/v2/answer`** — 3 tests covering sync response structure, citation parsing, and SSE streaming event flow.
+
 - **Politeness protocol — optional per-domain rate limiting with robots.txt respect** — new `scraper-svc/scraper/politeness.py` module. Gated behind `SCRAPER_POLITENESS_ENABLED=true` in Docker `.env`, off by default. When enabled: fetches and caches robots.txt per domain (Valkey-backed), enforces configurable `Crawl-delay` between requests, and blocks URLs matching `Disallow` paths. Politeness metadata returned in scrape response. Configurable via `SCRAPER_POLITENESS_CRAWL_DELAY` and `SCRAPER_POLITENESS_ROBOTS_TTL` env vars. See `.env.sample` for full documentation.
 - **Unit tests for politeness module** — 14 tests covering robots.txt parsing, check/delay/block decision flow, rate limit timing, metadata reporting, and domain extraction.
 - **`politeness` field in scrape response** — `ScrapeResponse.data.politeness` returned when `SCRAPER_POLITENESS_ENABLED=true`.

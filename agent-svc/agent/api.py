@@ -29,6 +29,7 @@ from .models import (
     ParseResponse,
     LLMsTextRequest, LLMsTextCreateResponse, LLMsTextStatusResponse,
     ActivityResponse, ActivityItem,
+    AnswerRequest, AnswerResponse, Source, Citation,
 )
 from .store import JobStore
 from .monitor import get_all_monitors, get_monitor, save_monitor, delete_monitor
@@ -230,6 +231,68 @@ async def search(request: Request, body: SearchRequest):
         return SearchResponse(data=data)
     finally:
         await searxng.close()
+
+
+@router.post("/v2/answer", response_model=AnswerResponse)
+async def answer(request: Request, body: AnswerRequest):
+    """Grounded Q&A: search → scrape → LLM → citations.
+
+    Synchronous single-turn endpoint. For streaming, set ``stream: true``
+    to receive Server-Sent Events.
+    """
+    if body.stream:
+        from fastapi.responses import StreamingResponse
+
+        async def event_stream():
+            from .research import run_answer_stream
+            async for event in run_answer_stream(
+                query=body.query,
+                num_sources=body.num_sources,
+                search_type=body.search_type,
+                searxng_url=request.app.state.searxng_url,
+                scraper_url=request.app.state.scraper_url,
+                llm_base_url=request.app.state.llm_base_url,
+                llm_api_key=request.app.state.llm_api_key,
+                llm_model=request.app.state.llm_model,
+                requested_model=body.model if body.model != "default" else None,
+            ):
+                if event["type"] == "sources":
+                    import json
+                    yield f"data: {json.dumps({'type': 'sources', 'sources': event['sources']})}\n\n"
+                elif event["type"] == "token":
+                    import json
+                    yield f"data: {json.dumps({'type': 'token', 'content': event['content']})}\n\n"
+                elif event["type"] == "done":
+                    import json
+                    yield f"data: {json.dumps({'type': 'done', 'answer': event['answer'], 'citations': event['citations'], 'latency_ms': event['latency_ms']})}\n\n"
+                elif event["type"] == "error":
+                    import json
+                    yield f"data: {json.dumps({'type': 'error', 'content': event['content']})}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    # Sync path
+    from .research import run_answer
+    result = await run_answer(
+        query=body.query,
+        num_sources=body.num_sources,
+        search_type=body.search_type,
+        searxng_url=request.app.state.searxng_url,
+        scraper_url=request.app.state.scraper_url,
+        llm_base_url=request.app.state.llm_base_url,
+        llm_api_key=request.app.state.llm_api_key,
+        llm_model=request.app.state.llm_model,
+        requested_model=body.model if body.model != "default" else None,
+    )
+    return AnswerResponse(
+        success=True,
+        answer=result["answer"],
+        sources=[Source(**s) for s in result["sources"]],
+        citations=[Citation(**c) for c in result["citations"]],
+        search_type=result["search_type"],
+        latency_ms=result["latency_ms"],
+    )
 
 
 @router.post("/v2/extract", response_model=ExtractCreateResponse)

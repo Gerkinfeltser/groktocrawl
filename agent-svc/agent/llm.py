@@ -26,6 +26,86 @@ class LLMClient:
         self.model = model
         self._client = httpx.AsyncClient(timeout=120)
 
+    async def generate_stream(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        context: str | None = None,
+    ):
+        """Generate a streaming response from the LLM (SSE).
+
+        Yields dicts with keys:
+          - {"type": "token", "content": str} — a single token
+          - {"type": "done", "full_content": str} — final complete text
+          - {"type": "error", "content": str} — error message
+
+        Args:
+            system_prompt: System-level instructions.
+            user_prompt: The user's task/question.
+            context: Optional scraped context to include.
+        """
+        messages = [{"role": "system", "content": system_prompt}]
+
+        if context:
+            messages.append({
+                "role": "user",
+                "content": "Here is the information I gathered:\n\n"
+                           f"{context}\n\nBased on this, {user_prompt}",
+            })
+        else:
+            messages.append({"role": "user", "content": user_prompt})
+
+        body: dict = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.3,
+            "max_tokens": 8192,
+            "stream": True,
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        full_content = ""
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json=body,
+                ) as resp:
+                    if resp.status_code != 200:
+                        error_text = await resp.aread()
+                        logger.error("LLM API error %d: %s", resp.status_code, error_text[:500])
+                        yield {"type": "error", "content": f"LLM API returned {resp.status_code}"}
+                        return
+
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        data_str = line[6:].strip()
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                            delta = chunk.get("choices", [{}])[0].get("delta", {})
+                            token = delta.get("content", "")
+                            if token:
+                                full_content += token
+                                yield {"type": "token", "content": token}
+                        except json.JSONDecodeError:
+                            continue
+
+            yield {"type": "done", "full_content": full_content}
+
+        except Exception as e:
+            logger.error("LLM stream call failed: %s", e)
+            yield {"type": "error", "content": f"LLM call failed: {e}"}
+
     async def generate(
         self,
         system_prompt: str,
@@ -72,8 +152,9 @@ class LLMClient:
 
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
         }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
 
         try:
             resp = await self._client.post(
