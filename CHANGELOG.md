@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Substack adapter** (`scraper-svc/scraper/adapters/substack.py`) — reliable content extraction for Substack publications via RSS feed lookup. Three-tier fallback: RSS feed (primary, no auth) → readability-lxml page extraction → browser-svc render. Returns YAML frontmatter (title, author, publication, published_date) with full article body as clean markdown. Detects both `*.substack.com` URLs and vanity domains (e.g. `www.lennysnewsletter.com`) via RSS feed fingerprinting with per-domain probe caching. Priority 200.
+- **Unit tests for Substack adapter** — 26 tests covering URL pattern matching, vanity domain probe caching, RSS feed parsing (items, fields, edge cases), item matching by link and slug, and content-to-markdown conversion.
 - **`POST /v2/answer` — grounded Q&A endpoint with citations** — lightweight synchronous single-turn endpoint sitting between `/v2/search` (raw results) and `/v2/agent` (deep multi-step research). Pipeline: search → scrape → LLM → citations in one round-trip. Supports `stream: true` for SSE token-by-token streaming. Returns structured response with `answer` (markdown), `sources` (list), `citations` (index→URL mapping), `search_type`, and `latency_ms`. Configurable `num_sources` (1-20) and `model` per-request override.
 - **`LLMClient.generate_stream()`** — new async generator method for SSE streaming from any OpenAI-compatible LLM. Yields `token`, `done`, and `error` event dicts.
 - **Conditional auth header in LLMClient** — `Authorization: Bearer` header is now only sent when `api_key` is non-empty, fixing compatibility with LLM backends that reject empty Bearer tokens.

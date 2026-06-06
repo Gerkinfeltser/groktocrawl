@@ -366,6 +366,19 @@ GroktoCrawl supports **site-specific content handlers** that extract richer cont
 
 **Configuration:** None — the public API requires no authentication.
 
+### Substack Adapter
+
+`scrape <substack-url>` returns a markdown document with:
+
+- **YAML frontmatter:** title, author, publication, published_date, source
+- **Markdown body:** full article text in clean markdown
+
+**Fallback chain:** RSS feed (fast, structured, no auth) → readability-lxml page extraction → browser render
+
+**Configuration:** None — Substack requires no API keys.
+
+**Vanity domain detection:** The adapter automatically detects Substack-hosted publications behind custom domains (e.g. `www.lennysnewsletter.com`) by probing `{domain}/feed` for the Substack RSS generator tag. Results are cached per-domain for 1 hour.
+
 ### GitHub Adapters
 
 Two adapters handle different URL types on `github.com`, working together via priority dispatch:
