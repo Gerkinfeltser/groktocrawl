@@ -151,11 +151,31 @@ async def run_extract(
         await llm.close()
 
 
-async def _scrape_urls(urls: list[str], scraper: ScraperClient) -> tuple[list[str], list[dict]]:
-    """Scrape URLs and return (documents, source_details)."""
-    documents = []
-    source_details = []
-    for url in urls[:5]:
+async def _scrape_urls(
+    urls: list[str],
+    scraper: ScraperClient,
+    min_sources: int = 3,
+    max_attempts: int | None = None,
+) -> tuple[list[str], list[dict]]:
+    """Scrape URLs and return (documents, source_details).
+
+    Tries URLs in order until ``min_sources`` are successfully scraped
+    or the list is exhausted (whichever comes first).
+    ``max_attempts`` sets an upper bound on how many URLs are tried
+    (default: try all provided URLs).
+    """
+    documents: list[str] = []
+    source_details: list[dict] = []
+    max_attempts = max_attempts or len(urls)
+    attempts = 0
+
+    for url in urls:
+        if len(documents) >= min_sources:
+            break
+        if attempts >= max_attempts:
+            break
+
+        attempts += 1
         logger.info("Scraping: %s", url)
         result = await scraper.scrape(url)
         if result.get("success") and result.get("data", {}).get("markdown"):
@@ -222,13 +242,13 @@ async def run_answer(
     llm = LLMClient(llm_base_url, llm_api_key, effective_model)
 
     try:
-        # Step 1: Search
+        # Step 1: Search (fetch extra results to allow for scrape failures)
         logger.info("Answer: searching for: %s", query)
-        search_results, _health = await searxng.search(query, limit=num_sources)
+        search_results, _health = await searxng.search(query, limit=num_sources * 2)
         target_urls = [r["url"] for r in search_results if r.get("url")]
 
-        # Step 2: Scrape
-        documents, source_details = await _scrape_urls(target_urls, scraper)
+        # Step 2: Scrape (keep trying until we have num_sources or exhaust the pool)
+        documents, source_details = await _scrape_urls(target_urls, scraper, min_sources=num_sources, max_attempts=num_sources * 2)
 
         # Step 3: Build context with source markers
         context_parts = []
@@ -324,13 +344,13 @@ async def run_answer_stream(
     llm = LLMClient(llm_base_url, llm_api_key, effective_model)
 
     try:
-        # Step 1: Search
+        # Step 1: Search (fetch extra results to allow for scrape failures)
         logger.info("Answer (stream): searching for: %s", query)
-        search_results, _health = await searxng.search(query, limit=num_sources)
+        search_results, _health = await searxng.search(query, limit=num_sources * 2)
         target_urls = [r["url"] for r in search_results if r.get("url")]
 
-        # Step 2: Scrape
-        documents, source_details = await _scrape_urls(target_urls, scraper)
+        # Step 2: Scrape (keep trying until we have num_sources or exhaust the pool)
+        documents, source_details = await _scrape_urls(target_urls, scraper, min_sources=num_sources, max_attempts=num_sources * 2)
 
         # Step 3: Build context
         context_parts = []
