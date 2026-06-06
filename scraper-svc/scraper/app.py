@@ -83,7 +83,8 @@ async def scrape(request: ScrapeRequest):
             "markdown": result.get("markdown", ""),
             "source": result.get("source", "unknown"),
             "url": request.url,
-            "quality": result.get("quality"),
+            'quality': result.get('quality'),
+            'politeness': result.get('politeness'),
         }
         if result.get("download"):
             data["download"] = result["download"]

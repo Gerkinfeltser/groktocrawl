@@ -5,6 +5,7 @@ Tier 2: Accept: text/markdown — per-page markdown via content negotiation.
 Tier 3: Playwright render + readability extraction (heavyweight).
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -967,11 +968,75 @@ async def _maybe_degrade(result: dict, tier_label: str, best_effort: list) -> di
     return None
 
 
+async def _politeness_check_and_delay(url: str) -> tuple[bool, dict | None]:
+    """Check politeness policy for a URL.
+
+    Returns (proceed, error_dict):
+        (True, None) — proceed with the request
+        (False, error_dict) — blocked by robots.txt, caller should return error_dict
+
+    When action is "delay", sleeps the required time before returning.
+    No-op when politeness is disabled.
+    """
+    from .politeness import get_manager
+
+    manager = get_manager()
+    if not manager.enabled:
+        return True, None
+
+    result = await manager.check(url)
+    if result.action == "blocked":
+        logger.info("Politeness blocked %s: %s", url, result.reason)
+        metadata = manager.get_politeness_metadata(url)
+        return False, {
+            "error": f"Blocked by politeness: {result.reason}",
+            "markdown": "",
+            "source": "politeness",
+            "url": url,
+            "politeness": metadata,
+        }
+
+    if result.action == "delay" and result.delay_seconds > 0:
+        logger.info(
+            "Politeness delaying %s: sleeping %.1fs (domain=%s)",
+            url, result.delay_seconds, result.domain,
+        )
+        await asyncio.sleep(result.delay_seconds)
+
+    return True, None
+
+
+async def _enrich_with_politeness(result: dict, url: str) -> dict:
+    """Add politeness metadata to a scrape result if politeness is enabled.
+
+    Also records the request for rate-limiting purposes.
+    """
+    from .politeness import get_manager
+
+    manager = get_manager()
+    if manager.enabled:
+        manager.record_request(url)
+        result["politeness"] = manager.get_politeness_metadata(url)
+    return result
+
+
+async def _politeness_check_for_tier(url: str, tier_label: str) -> dict | None:
+    """Check politeness before a tier. Returns None to proceed, error dict to return."""
+    proceed, blocked = await _politeness_check_and_delay(url)
+    if blocked:
+        logger.info("Politeness blocked %s at %s", url, tier_label)
+        return blocked
+    return None
+
+
 async def smart_scrape(url: str) -> dict:
     """Try each tier in order. Return the first successful result with acceptable quality.
 
     Degrades through tiers when quality is below QA_MIN_QUALITY_THRESHOLD.
     Returns the best-effort result if all tiers produce low quality.
+
+    When SCRAPER_POLITENESS_ENABLED=true, checks robots.txt and enforces
+    per-domain rate limits before each tier.
 
     Returns a dict with keys: markdown, source, url, quality, error (optional).
     """
@@ -1000,6 +1065,11 @@ async def smart_scrape(url: str) -> dict:
                 logger.info("Adapter hit: %s for %s", adapter_result.source, url)
                 return adapter_result.to_dict()
 
+        # Politeness check: robots.txt + rate limit (before any HTTP)
+        proceed, blocked = await _politeness_check_and_delay(url)
+        if blocked:
+            return blocked
+
         # Cache check (after adapter, before tier pipeline)
         cached = await _check_cache(url)
         if cached:
@@ -1009,22 +1079,31 @@ async def smart_scrape(url: str) -> dict:
             logger.info("Cache hit below quality threshold, re-fetching %s", url)
 
         # Tier 1: /llms.txt
+        proceed, blocked = await _politeness_check_and_delay(url)
+        if blocked:
+            return blocked
         result = await fetch_via_llms_txt(url, client)
         if result:
             accepted = await _maybe_degrade(result, "tier1-llms-txt", best_effort)
             if accepted:
                 await _set_cache(url, accepted)
-                return accepted
+                return await _enrich_with_politeness(accepted, url)
 
         # Tier 2: Accept: text/markdown
+        proceed, blocked = await _politeness_check_and_delay(url)
+        if blocked:
+            return blocked
         result = await fetch_via_content_negotiation(url, client)
         if result:
             accepted = await _maybe_degrade(result, "tier2-content-negotiation", best_effort)
             if accepted:
                 await _set_cache(url, accepted)
-                return accepted
+                return await _enrich_with_politeness(accepted, url)
 
     # Tier 3: Playwright render + readability (no shared client needed)
+    proceed, blocked = await _politeness_check_and_delay(url)
+    if blocked:
+        return blocked
     result = await fetch_via_playwright(url)
     if result:
         # Barrier detection — if page IS a challenge/error, skip remaining tiers
@@ -1042,7 +1121,7 @@ async def smart_scrape(url: str) -> dict:
             accepted = await _maybe_degrade(result, "tier3-playwright", best_effort)
             if accepted:
                 await _set_cache(url, accepted)
-                return accepted
+                return await _enrich_with_politeness(accepted, url)
             # Low quality — degrade through remaining tiers
             logger.info("Tier 3 content quality below threshold, degrading for %s", url)
         else:
@@ -1051,6 +1130,9 @@ async def smart_scrape(url: str) -> dict:
 
     # Tier 3.5: FlareSolverr for hard Cloudflare challenges
     if result:
+        proceed, blocked = await _politeness_check_and_delay(url)
+        if blocked:
+            return blocked
         fs_result = await fetch_via_flaresolverr(url)
         if fs_result:
             if "barrier" in fs_result:
@@ -1059,7 +1141,7 @@ async def smart_scrape(url: str) -> dict:
             accepted = await _maybe_degrade(fs_result, "tier35-flaresolverr", best_effort)
             if accepted:
                 await _set_cache(url, accepted)
-                return accepted
+                return await _enrich_with_politeness(accepted, url)
 
     # Tier 4: LLM-assisted recovery when content looks suspicious
     if result:
@@ -1072,7 +1154,7 @@ async def smart_scrape(url: str) -> dict:
             accepted = await _maybe_degrade(recovery_result, "tier4-llm-recovery", best_effort)
             if accepted:
                 await _set_cache(url, accepted)
-                return accepted
+                return await _enrich_with_politeness(accepted, url)
 
     # Browser-svc fallback for Substack (last resort before error)
     if result:
@@ -1091,19 +1173,23 @@ async def smart_scrape(url: str) -> dict:
                 accepted = await _maybe_degrade(browser_result, "browser-svc", best_effort)
                 if accepted:
                     await _set_cache(url, accepted)
-                    return accepted
-            return {
-                "error": (
-                    f"Could not extract content from {url}{redirected_url}. "
-                    f"Substack blocked the headless browser. "
-                    f"Try: groktocrawl browser exec <id> navigate --url <url> "
-                    f"then browser exec <id> executeScript "
-                    f"--script \"document.querySelector('article').innerText\""
-                ),
-                "markdown": "",
-                "source": "none",
-                "url": url,
-            }
+                    return await _enrich_with_politeness(accepted, url)
+                return await _enrich_with_politeness(
+                    {
+                        "error": (
+                            f"Could not extract content from {url}{redirected_url}. "
+                            f"Substack blocked the headless browser. "
+                            f"Try: groktocrawl browser exec <id> navigate --url <url> "
+                            f"then browser exec <id> executeScript "
+                            f"--script \"document.querySelector('article').innerText\""
+                        ),
+                        "markdown": "",
+                        "source": "none",
+                        "url": url,
+                    },
+                    url,
+                )
+
 
     # All tiers exhausted — return best effort if any tier produced content
     if best_effort:
@@ -1116,11 +1202,13 @@ async def smart_scrape(url: str) -> dict:
         )
         best["warning"] = f"Suboptimal content — quality ({bs:.2f}) below threshold ({QA_MIN_QUALITY_THRESHOLD:.2f})"
         await _set_cache(url, best)
-        return best
+        return await _enrich_with_politeness(best, url)
 
-    return {
+    return await _enrich_with_politeness({
         "error": f"Could not extract content from {url}",
         "markdown": "",
         "source": "none",
         "url": url,
-    }
+    },
+    url,
+)
