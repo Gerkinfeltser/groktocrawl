@@ -182,7 +182,7 @@ def create_app() -> FastAPI:
         probe results with status, latency_ms, and detail.
         """
         result = await check_all(
-            valkey_url=app.state.redis_url,
+            valkey_url=app.state.valkey_url,
             searxng_url=app.state.searxng_url,
             scraper_url=app.state.scraper_url,
             browser_url="http://browser-svc:8012",
