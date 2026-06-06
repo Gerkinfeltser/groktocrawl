@@ -7,3 +7,5 @@ dist/
 venv/
 __pypackages__/
 .hermes/
+.opencode/
+.planning/
