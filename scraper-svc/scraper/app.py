@@ -85,6 +85,7 @@ async def scrape(request: ScrapeRequest):
             "url": request.url,
             'quality': result.get('quality'),
             'politeness': result.get('politeness'),
+            'metadata': result.get('metadata'),
         }
         if result.get("download"):
             data["download"] = result["download"]

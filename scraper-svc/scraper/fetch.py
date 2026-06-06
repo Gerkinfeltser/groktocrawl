@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 import httpx
 
 from .extract import assess_quality
+from .metadata import extract_all_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -928,6 +929,28 @@ def _add_quality(result: dict, html: str = "", title: str = "") -> dict:
     return result
 
 
+def _enrich_with_metadata(result: dict, html: str = "") -> dict:
+    """Extract structured metadata (JSON-LD, OG, Twitter, meta) from raw HTML.
+
+    Pure parsing — no additional fetches. Runs after each tier that produces
+    raw HTML. Results without available HTML get empty metadata fields.
+
+    Metadata is best-effort: JSON-LD may be absent, OG tags may be minimal.
+    Consumers should treat all fields as optional.
+    """
+    if not html and not result.get("raw_html_start"):
+        result["metadata"] = {"json_ld": [], "og": {}, "twitter": {}, "meta": {}}
+        return result
+
+    source_html = html or result.get("raw_html_start", "")
+    metadata = extract_all_metadata(source_html)
+
+    # If the full HTML is not available, raw_html_start may be truncated.
+    # That's fine — JSON-LD blocks and meta tags are usually in <head>.
+    result["metadata"] = metadata
+    return result
+
+
 QA_MIN_QUALITY_THRESHOLD = float(os.getenv("QA_MIN_QUALITY_THRESHOLD", "0.3"))
 
 
@@ -1009,7 +1032,9 @@ async def _politeness_check_and_delay(url: str) -> tuple[bool, dict | None]:
 async def _enrich_with_politeness(result: dict, url: str) -> dict:
     """Add politeness metadata to a scrape result if politeness is enabled.
 
-    Also records the request for rate-limiting purposes.
+    Also records the request for rate-limiting purposes and enriches
+    with structured metadata (JSON-LD, OG, meta tags) when raw HTML
+    is available in the result.
     """
     from .politeness import get_manager
 
@@ -1017,6 +1042,10 @@ async def _enrich_with_politeness(result: dict, url: str) -> dict:
     if manager.enabled:
         manager.record_request(url)
         result["politeness"] = manager.get_politeness_metadata(url)
+
+    # Structured metadata enrichment — runs when raw_html_start exists
+    _enrich_with_metadata(result)
+
     return result
 
 
