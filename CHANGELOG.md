@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Intelligent scrape cache — freshness-aware revalidation with ETag/Last-Modified support (ADR-0019)** — the existing Valkey-backed scrape cache now stores HTTP ETag and Last-Modified headers from Tier 1-2 (llms.txt, content-negotiation) responses and uses conditional GETs (If-None-Match / If-Modified-Since) for blocking revalidation of cached content from slow tiers (playwright, flare-solverr, browser-svc). On 304 Not Modified, extends the cached entry's TTL without re-downloading. On 200, replaces the cache entry with fresh content.
+- **Content-change detection** — SHA-256 content hashing enables stale-content detection even when no ETag/Last-Modified headers are available. When content hashes match on re-fetch, the TTL is multiplied by `SCRAPE_CACHE_STABLE_MULTIPLIER` (default 2.0). When content changes repeatedly, the TTL is progressively reduced.
+- **Per-domain cache TTLs** — new `SCRAPE_CACHE_DOMAIN_TTLS` env var accepts a JSON dict mapping domain suffixes to TTLs (e.g., `{"news.ycombinator.com": 300, "docs.python.org": 86400}`). Longest suffix match wins. Falls back to the global `SCRAPE_CACHE_TTL`.
+- **Freshness tracking fields** — each cache entry now carries `fetch_count`, `first_fetched_at`, `last_checked_at`, `change_count`, `content_hash`, and `source_tier` metadata for observability and volatility-aware TTL adjustment.
+- **Configurable TTL bounds** — `SCRAPE_CACHE_MIN_TTL` (default: 60s), `SCRAPE_CACHE_MAX_TTL` (default: 86400s), and `SCRAPE_CACHE_VOLATILE_CAP` (default: 300s) prevent pathological TTL values.
+
 - **Observability infrastructure** — `/health` endpoint now returns per-dependency probe results (valkey, searxng, scraper, browser) with status, latency, and detail. New `/metrics` endpoint exports counters, histograms, and gauges in OpenMetrics text format for Prometheus consumption — no external dependencies. Structured JSON logging replaces ad-hoc prints with request_id correlation, timestamp, level, duration_ms, and status_code fields. Metrics tracked: scrape latency by tier (`scrape_duration_seconds`), job duration by type/status, job counters (submitted, completed, failed), queue depth, and dependency health. New `agent-svc/agent/metrics.py` and `agent-svc/agent/health.py` modules. ADR-0018. (closes #108)
 
 ### Fixed

@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import socket
+import time
 from dataclasses import dataclass
 from ipaddress import ip_address, ip_network
 from urllib.parse import urlparse
@@ -24,6 +25,14 @@ from .metadata import extract_all_metadata
 logger = logging.getLogger(__name__)
 
 FLARE_SOLVERR_URL = os.getenv("FLARE_SOLVERR_URL", "http://flare-solverr:8191/v1")
+
+# ── Intelligent scrape cache (ADR-0019) ─────────────────────────
+# Cache freshness revalidation settings
+SCRAPE_CACHE_TTL = int(os.getenv("SCRAPE_CACHE_TTL", "3600"))
+SCRAPE_CACHE_MIN_TTL = int(os.getenv("SCRAPE_CACHE_MIN_TTL", "60"))
+SCRAPE_CACHE_MAX_TTL = int(os.getenv("SCRAPE_CACHE_MAX_TTL", "86400"))
+SCRAPE_CACHE_STABLE_MULTIPLIER = float(os.getenv("SCRAPE_CACHE_STABLE_MULTIPLIER", "2.0"))
+SCRAPE_CACHE_VOLATILE_CAP = int(os.getenv("SCRAPE_CACHE_VOLATILE_CAP", "300"))
 
 # ── Valkey scrape result cache ──────────────────────────────────
 
@@ -93,46 +102,308 @@ async def _get_cache_client():
 
 
 async def _check_cache(url: str) -> dict | None:
-    """Check Valkey for a cached scrape result for the given URL.
+    """Check Valkey for a cached scrape result with freshness revalidation.
 
-    Returns the cached result dict if found and within TTL, or None
-    on cache miss or Valkey unavailability.
+    For content from slow-scraping tiers (playwright, flare-solverr, browser-svc)
+    that has ETag or Last-Modified headers stored, performs a blocking conditional
+    revalidation (HEAD/GET with If-None-Match / If-Modified-Since). On 304 Not
+    Modified, extends the cache TTL and returns the cached content. On 200,
+    updates the cache and returns fresh content.
+
+    For fast-tier content (llms.txt, content-negotiation), returns cached content
+    immediately — background revalidation is handled by the caller.
+
+    Returns the cached/validated result dict, or None on cache miss.
     """
     client = await _get_cache_client()
     if not client:
         return None
     try:
         key = _scrape_cache_key(url)
-        cached = await client.get(key)
-        if cached:
-            logger.info("Cache hit for %s (key=%s)", url, key)
-            return json.loads(cached)
+        cached_raw = await client.get(key)
+        if not cached_raw:
+            return None
+
+        cached = json.loads(cached_raw)
+        logger.info("Cache hit for %s (key=%s)", url, key)
+
+        # Determine source tier for revalidation strategy
+        source_tier = cached.get("source_tier") or cached.get("source", "")
+        etag = cached.get("etag")
+        last_modified = cached.get("last_modified")
+
+        # Slow tiers with ETag/LM → blocking revalidation
+        if (source_tier in ("playwright", "flare-solverr", "browser-svc")
+                and (etag or last_modified)):
+            fresh, result = await _conditional_revalidate(url, etag, last_modified)
+            if fresh:
+                # 304 — extend TTL and return cached content
+                new_ttl = _resolve_cache_ttl(url)
+                cached["last_checked_at"] = time.time()
+                await _set_cache_raw(key, cached, new_ttl)
+                logger.info("Cache revalidated (304) for %s, extended TTL to %ds", url, new_ttl)
+                return cached
+            elif result:
+                # 200 — content changed, return fresh and update cache
+                logger.info("Cache stale (200) for %s, fetching fresh content", url)
+                result = _merge_cache_metadata(result, cached)
+                await _set_cache_raw(key, result, _resolve_cache_ttl(url))
+                return result
+            else:
+                # Connection error — serve stale with warning
+                logger.warning("Revalidation failed for %s, serving stale cache", url)
+                return cached
+
+        # Fast tiers or no ETag/LM — return cached, caller handles revalidation
+        return cached
     except Exception as e:
         logger.debug("Cache read failed for %s: %s", url, e)
     return None
 
 
-async def _set_cache(url: str, result: dict) -> None:
-    """Store a scrape result in Valkey cache.
+def _compute_content_hash(text: str) -> str:
+    """Compute SHA-256 of content for change detection.
+
+    Uses the markdown content if available, falling back to the raw text.
+    Returns a hex digest suitable for comparison.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _parse_domain_ttls() -> dict[str, int]:
+    """Parse the SCRAPE_CACHE_DOMAIN_TTLS env var.
+
+    Format: JSON dict mapping domain suffixes to TTLs in seconds.
+    Example: {"news.ycombinator.com": 300, "docs.python.org": 86400}
+    Returns empty dict on parse failure.
+    """
+    raw = os.getenv("SCRAPE_CACHE_DOMAIN_TTLS", "{}")
+    if not raw or raw == "{}":
+        return {}
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("Invalid SCRAPE_CACHE_DOMAIN_TTLS value, using empty")
+        return {}
+
+
+def _resolve_cache_ttl(url: str, stability_multiplier: float = 1.0) -> int:
+    """Resolve the cache TTL for a URL based on per-domain policies.
+
+    Matches the URL's hostname against domain suffix patterns
+    (longest match wins). Falls back to the global SCRAPE_CACHE_TTL.
+    Applies the stability multiplier and clamps to min/max bounds.
+    """
+    domain_ttls = _parse_domain_ttls()
+    parsed = urlparse(url)
+    hostname = parsed.hostname or ""
+
+    # Longest suffix match
+    matched_ttl: int | None = None
+    matched_len = 0
+    for pattern, ttl in domain_ttls.items():
+        if hostname == pattern or hostname.endswith("." + pattern):
+            if len(pattern) > matched_len:
+                matched_ttl = ttl
+                matched_len = len(pattern)
+
+    base_ttl = matched_ttl if matched_ttl is not None else SCRAPE_CACHE_TTL
+    adjusted = int(base_ttl * stability_multiplier)
+    return max(SCRAPE_CACHE_MIN_TTL, min(adjusted, SCRAPE_CACHE_MAX_TTL))
+
+
+def _merge_cache_metadata(fresh_result: dict, cached: dict) -> dict:
+    """Merge metadata from a previous cache entry into a fresh result.
+
+    Preserves cross-session tracking fields (fetch_count, first_fetched_at,
+    change_count) across cache generations.
+    """
+    fresh_result["fetch_count"] = cached.get("fetch_count", 0) + 1
+    fresh_result["first_fetched_at"] = cached.get(
+        "first_fetched_at", time.time()
+    )
+    fresh_result["last_checked_at"] = time.time()
+    fresh_result["change_count"] = cached.get("change_count", 0)
+    return fresh_result
+
+
+def _enrich_cache_entry(result: dict, url: str, etag: str | None = None,
+                        last_modified: str | None = None,
+                        prior_entry: dict | None = None) -> dict:
+    """Add freshness metadata to a result dict before caching.
+
+    Enriches the result with content_hash, ETag, Last-Modified, source_tier,
+    and tracking fields (fetch_count, first_fetched_at, change_count).
+
+    When a prior_entry is provided, computes content-change detection by
+    comparing content hashes and updates change_count accordingly.
+    """
+    # Copy through http headers if provided
+    if etag:
+        result["etag"] = etag
+    if last_modified:
+        result["last_modified"] = last_modified
+
+    # Source tier for revalidation strategy resolution
+    result["source_tier"] = result.get("source", "")
+
+    # Content hash for change detection
+    markdown = result.get("markdown", "")
+    new_hash = _compute_content_hash(markdown)
+    result["content_hash"] = new_hash
+
+    # Tracking fields
+    now = time.time()
+    result["last_checked_at"] = now
+
+    if prior_entry:
+        result["fetch_count"] = prior_entry.get("fetch_count", 0) + 1
+        result["first_fetched_at"] = prior_entry.get("first_fetched_at", now)
+
+        # Content-change detection
+        old_hash = prior_entry.get("content_hash", "")
+        if old_hash and new_hash != old_hash:
+            result["change_count"] = prior_entry.get("change_count", 0) + 1
+        else:
+            result["change_count"] = prior_entry.get("change_count", 0)
+    else:
+        result["fetch_count"] = 1
+        result["first_fetched_at"] = now
+        result["change_count"] = 0
+
+    return result
+
+
+async def _set_cache_raw(key: str, payload: dict, ttl: int) -> None:
+    """Low-level Valkey cache write. Assumes client is connected."""
+    client = await _get_cache_client()
+    if not client:
+        return
+    try:
+        await client.setex(key, ttl, json.dumps(payload))
+    except Exception as e:
+        logger.debug("Cache write failed for key=%s: %s", key, e)
+
+
+async def _set_cache(url: str, result: dict,
+                     prior_entry: dict | None = None) -> None:
+    """Store a scrape result with intelligent cache metadata.
+
+    Enriches the result with freshness tracking fields (content_hash, ETag,
+    Last-Modified, source_tier, fetch_count, change_count) and applies
+    per-domain TTL resolution. Adapter results are excluded from caching.
+
+    Extracts ETag and Last-Modified from the result dict itself (set by
+    tier functions from HTTP response headers).
 
     Safe to call even if Valkey is unavailable — silently no-ops.
-    Uses SETEX with TTL from SCRAPE_CACHE_TTL env var (default: 3600).
     """
     client = await _get_cache_client()
     if not client:
         return
+
     # Skip caching adapter results (they use external APIs with their own state)
     source = result.get("source", "")
     if source == "adapter":
         return
+
     try:
         key = _scrape_cache_key(url)
-        ttl = int(os.getenv("SCRAPE_CACHE_TTL", "3600"))
-        payload = json.dumps(result)
-        await client.setex(key, ttl, payload)
-        logger.info("Cached scrape result for %s (key=%s, ttl=%ds)", url, key, ttl)
+
+        # Extract ETag/Last-Modified from result dict (set by tier functions)
+        etag = result.pop("etag", None)
+        last_modified = result.pop("last_modified", None)
+
+        # Enrich with freshness metadata
+        enriched = _enrich_cache_entry(
+            result, url,
+            etag=etag, last_modified=last_modified,
+            prior_entry=prior_entry,
+        )
+
+        # Determine stability multiplier for TTL
+        change_count = enriched.get("change_count", 0)
+        if change_count == 0 and prior_entry is not None:
+            # Content unchanged since prior fetch → stable bonus
+            stability = SCRAPE_CACHE_STABLE_MULTIPLIER
+        elif change_count >= 3:
+            # Volatile content → cap TTL
+            stability = 0.5
+        else:
+            stability = 1.0
+
+        ttl = _resolve_cache_ttl(url, stability_multiplier=stability)
+
+        # Apply volatile cap if content is frequently changing
+        if change_count >= 5:
+            ttl = min(ttl, SCRAPE_CACHE_VOLATILE_CAP)
+
+        await client.setex(key, ttl, json.dumps(enriched))
+        logger.info(
+            "Cached scrape result for %s (key=%s, ttl=%ds, fetch_count=%d, change_count=%d)",
+            url, key, ttl, enriched.get("fetch_count", 0), enriched.get("change_count", 0),
+        )
     except Exception as e:
         logger.debug("Cache write failed for %s: %s", url, e)
+
+
+async def _conditional_revalidate(url: str, etag: str | None,
+                                  last_modified: str | None) -> tuple[bool, dict | None]:
+    """Send a conditional GET to check whether cached content is still fresh.
+
+    Uses If-None-Match and If-Modified-Since headers. Returns a (fresh, result)
+    tuple:
+        (True, None)      — 304 Not Modified, cache is fresh
+        (False, result)   — 200 OK, content changed, result carries new content
+        (False, None)     — connection/timeout error, can't determine freshness
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
+    }
+    if etag:
+        headers["If-None-Match"] = etag if etag.startswith('"') else f'"{etag}"'
+    if last_modified:
+        headers["If-Modified-Since"] = last_modified
+
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True, timeout=15, headers=headers,
+        ) as client:
+            resp = await client.get(url)
+            if resp.status_code == 304:
+                return (True, None)
+            elif resp.status_code == 200:
+                # Extract content, prefer markdown-like output
+                ct = resp.headers.get("content-type", "")
+                if _is_binary_content_type(ct):
+                    result = _make_download_payload(url, resp.content, ct)
+                else:
+                    result = {
+                        "markdown": resp.text,
+                        "source": "revalidation",
+                        "url": url,
+                    }
+                # Store response headers for next revalidation round
+                new_etag = resp.headers.get("etag")
+                new_lm = resp.headers.get("last-modified")
+                if new_etag:
+                    result["etag"] = new_etag
+                if new_lm:
+                    result["last_modified"] = new_lm
+                return (False, result)
+            else:
+                logger.debug(
+                    "Unexpected revalidation status %d for %s",
+                    resp.status_code, url,
+                )
+                return (False, None)
+    except Exception as e:
+        logger.debug("Revalidation failed for %s: %s", url, e)
+        return (False, None)
 
 from .adapters.base import AdapterContext, get_registry
 
@@ -451,7 +722,15 @@ async def fetch_via_llms_txt(url: str, client: httpx.AsyncClient) -> dict | None
             # llms.txt files should start with # or be plain markdown
             if _looks_like_markdown(resp.text) or resp.text.strip().startswith("#"):
                 logger.info("Tier 1 hit: /llms.txt at %s", llms_url)
-                return {"markdown": resp.text, "source": "llms.txt", "url": llms_url}
+                result = {"markdown": resp.text, "source": "llms.txt", "url": llms_url}
+                # Pass through ETag/Last-Modified for intelligent caching
+                etag = resp.headers.get("etag")
+                lm = resp.headers.get("last-modified")
+                if etag:
+                    result["etag"] = etag
+                if lm:
+                    result["last_modified"] = lm
+                return result
     except Exception as e:
         logger.debug("Tier 1 miss for %s: %s", llms_url, e)
     return None
@@ -478,7 +757,15 @@ async def fetch_via_content_negotiation(url: str, client: httpx.AsyncClient) -> 
             # Standard markdown detection
             if _looks_like_markdown(resp.text):
                 logger.info("Tier 2 hit: content negotiation for %s", url)
-                return {"markdown": resp.text, "source": "content-negotiation", "url": url}
+                result = {"markdown": resp.text, "source": "content-negotiation", "url": url}
+                # Pass through ETag/Last-Modified for intelligent caching
+                etag = resp.headers.get("etag")
+                lm = resp.headers.get("last-modified")
+                if etag:
+                    result["etag"] = etag
+                if lm:
+                    result["last_modified"] = lm
+                return result
     except Exception as e:
         logger.debug("Tier 2 miss for %s: %s", url, e)
     return None
@@ -1117,7 +1404,7 @@ async def smart_scrape(url: str) -> dict:
             accepted = await _maybe_degrade(result, "tier1-llms-txt", best_effort)
             if accepted:
                 accepted = await _enrich_with_politeness(accepted, url)
-                await _set_cache(url, accepted)
+                await _set_cache(url, accepted, prior_entry=cached)
                 return accepted
 
         # Tier 2: Accept: text/markdown
@@ -1129,7 +1416,7 @@ async def smart_scrape(url: str) -> dict:
             accepted = await _maybe_degrade(result, "tier2-content-negotiation", best_effort)
             if accepted:
                 accepted = await _enrich_with_politeness(accepted, url)
-                await _set_cache(url, accepted)
+                await _set_cache(url, accepted, prior_entry=cached)
                 return accepted
 
     # Tier 3: Playwright render + readability (no shared client needed)
@@ -1153,7 +1440,7 @@ async def smart_scrape(url: str) -> dict:
             accepted = await _maybe_degrade(result, "tier3-playwright", best_effort)
             if accepted:
                 accepted = await _enrich_with_politeness(accepted, url)
-                await _set_cache(url, accepted)
+                await _set_cache(url, accepted, prior_entry=cached)
                 return accepted
             # Low quality — degrade through remaining tiers
             logger.info("Tier 3 content quality below threshold, degrading for %s", url)
@@ -1174,7 +1461,7 @@ async def smart_scrape(url: str) -> dict:
             accepted = await _maybe_degrade(fs_result, "tier35-flaresolverr", best_effort)
             if accepted:
                 accepted = await _enrich_with_politeness(accepted, url)
-                await _set_cache(url, accepted)
+                await _set_cache(url, accepted, prior_entry=cached)
                 return accepted
 
     # Tier 4: LLM-assisted recovery when content looks suspicious
@@ -1188,7 +1475,7 @@ async def smart_scrape(url: str) -> dict:
             accepted = await _maybe_degrade(recovery_result, "tier4-llm-recovery", best_effort)
             if accepted:
                 accepted = await _enrich_with_politeness(accepted, url)
-                await _set_cache(url, accepted)
+                await _set_cache(url, accepted, prior_entry=cached)
                 return accepted
 
     # Browser-svc fallback for Substack (last resort before error)
@@ -1208,7 +1495,7 @@ async def smart_scrape(url: str) -> dict:
                 accepted = await _maybe_degrade(browser_result, "browser-svc", best_effort)
                 if accepted:
                     accepted = await _enrich_with_politeness(accepted, url)
-                    await _set_cache(url, accepted)
+                    await _set_cache(url, accepted, prior_entry=cached)
                     return accepted
                 return await _enrich_with_politeness(
                     {
@@ -1237,7 +1524,7 @@ async def smart_scrape(url: str) -> dict:
             url, bs, best.get("source", "unknown"),
         )
         best["warning"] = f"Suboptimal content — quality ({bs:.2f}) below threshold ({QA_MIN_QUALITY_THRESHOLD:.2f})"
-        await _set_cache(url, best)
+        await _set_cache(url, best, prior_entry=cached)
         return await _enrich_with_politeness(best, url)
 
     return await _enrich_with_politeness({
