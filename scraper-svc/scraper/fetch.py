@@ -34,6 +34,52 @@ SCRAPE_CACHE_MAX_TTL = int(os.getenv("SCRAPE_CACHE_MAX_TTL", "86400"))
 SCRAPE_CACHE_STABLE_MULTIPLIER = float(os.getenv("SCRAPE_CACHE_STABLE_MULTIPLIER", "2.0"))
 SCRAPE_CACHE_VOLATILE_CAP = int(os.getenv("SCRAPE_CACHE_VOLATILE_CAP", "300"))
 
+# ── Proxy configuration ─────────────────────────────────────────
+# SCRAPER_PROXY_URL is an opt-in env var for residential/mobile IP rotation.
+# When set, httpx requests (Tiers 1-2) and Playwright browser contexts (Tier 3)
+# route through the proxy. Playwright uses context-level proxy assignment
+# (browser.new_context(proxy=...)) for job isolation.
+# If the proxy is unreachable, the scrape retries without proxy and logs a WARN.
+# Format: http://user:pass@host:port
+# Unset or empty = no proxy (default).
+SCRAPER_PROXY_URL = os.getenv("SCRAPER_PROXY_URL", "")
+
+
+def _get_httpx_proxies() -> str | None:
+    """Get httpx-compatible proxy URL from env var.
+
+    httpx 'proxy' parameter expects a single URL string.
+    """
+    return SCRAPER_PROXY_URL or None
+
+
+def _get_playwright_proxy() -> dict | None:
+    """Get Playwright-compatible proxy config from env var.
+
+    Parses http://user:pass@host:port into Playwright's format.
+    Uses context-level proxy (browser.new_context(proxy=...)) for job isolation.
+    """
+    if not SCRAPER_PROXY_URL:
+        return None
+    parsed = urlparse(SCRAPER_PROXY_URL)
+    config = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"}
+    if parsed.username:
+        config["username"] = parsed.username
+    if parsed.password:
+        config["password"] = parsed.password
+    return config
+
+
+def _redact_proxy_url(url: str) -> str:
+    """Redact password from a proxy URL for safe logging."""
+    if "@" in url:
+        user_part = url.split("@")[0]
+        host_part = url.split("@")[1]
+        username = user_part.split(":")[0] if ":" in user_part else user_part
+        return f"{username}:***@{host_part}"
+    return url
+
+
 # ── Valkey scrape result cache ──────────────────────────────────
 
 _cache_client = None  # Module-level lazy singleton
@@ -851,118 +897,148 @@ def _is_private_url(url: str) -> tuple[bool, str]:
     return False, ""
 
 
+async def _playwright_fetch_with_proxy(
+    url: str,
+    proxy: dict | None,
+) -> dict | None:
+    """Inner playwright fetch, called with or without proxy.
+
+    Returns the scrape result dict or None. Does NOT wrap in try/except
+    for the outer browser lifecycle — callers handle that.
+    """
+    from playwright.async_api import async_playwright, TimeoutError
+    from .cookie_store import inject_cookies, store_cookies
+    from .stealth import create_stealth_browser, create_stealth_context
+
+    proxy_label = proxy.get("server", "none") if proxy else "none"
+    logger.info("Playwright proxy: %s", proxy_label)
+
+    context_kwargs = {}
+    if proxy:
+        context_kwargs["proxy"] = proxy  # context-level, not launch-level
+
+    async with async_playwright() as p:
+        browser = await create_stealth_browser(p)
+        context = await create_stealth_context(browser, **context_kwargs)
+        page = await context.new_page()
+        try:
+            # Security: reject private/internal destination URLs
+            is_private, reason = _is_private_url(url)
+            if is_private:
+                logger.warning("Blocked navigation to private URL %s: %s", url, reason)
+                return None
+
+            # Inject cached Cloudflare clearance cookies before navigation
+            await inject_cookies(url, context)
+
+            # Navigate with networkidle — same strategy as browser-svc
+            await page.goto(url, wait_until="networkidle", timeout=45000)
+
+            # Check for bot challenges (Cloudflare / DDoS-Guard)
+            title = await page.title()
+            current_url = page.url
+            if _is_bot_challenge(title, current_url):
+                logger.info("Bot challenge detected on %s, waiting for resolution...", url)
+                await page.wait_for_timeout(8000)
+                title = await page.title()
+                current_url = page.url
+                if _is_bot_challenge(title, current_url):
+                    logger.warning("Bot challenge persisted after wait for %s", url)
+
+            # Check for Substack session/channel frame redirect
+            if _is_substack_redirect(current_url):
+                logger.info("Substack redirect detected on %s (-> %s), waiting for content...", url, current_url)
+                await page.wait_for_timeout(5000)
+                current_url = page.url
+                if _is_substack_redirect(current_url):
+                    logger.warning("Substack redirect persisted for %s", url)
+
+            # SPA content retry
+            html = await page.content()
+            markdown = html_to_markdown(html) if html else ""
+
+            if not markdown or len(markdown) < 500 or _classify_barrier(title, url, markdown, html).detected:
+                for attempt in range(2):
+                    logger.info(
+                        "SPA retry %d for %s (markdown: %d chars)",
+                        attempt + 1, url, len(markdown),
+                    )
+                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    await page.wait_for_timeout(3000)
+
+                    html = await page.content()
+                    markdown = html_to_markdown(html) if html else ""
+                    if markdown and len(markdown) >= 500 and not _classify_barrier(title, url, markdown, html).detected:
+                        logger.info(
+                            "SPA retry %d succeeded for %s (%d chars)",
+                            attempt + 1, url, len(markdown),
+                        )
+                        break
+
+        finally:
+            await browser.close()
+
+    if html:
+        markdown = html_to_markdown(html)
+        if markdown and len(markdown) > 50:
+            barrier = _classify_barrier(title, url, markdown, html)
+            if barrier.detected and barrier.confidence > 0.7:
+                logger.warning(
+                    "Barrier detected in playwright result for %s: %s (confidence: %.2f)",
+                    url, barrier.barrier_type, barrier.confidence,
+                )
+                return {
+                    "error": f"Barrier detected: {barrier.barrier_type} (confidence: {barrier.confidence:.2f})",
+                    "barrier": {"detected": True, "type": barrier.barrier_type, "confidence": barrier.confidence, "detail": barrier.detail},
+                    "markdown": "",
+                    "source": "barrier-detection",
+                    "url": url,
+                }
+
+            logger.info("Tier 3 hit: playwright render for %s", url)
+            await store_cookies(url, context)
+            return {
+                "markdown": markdown,
+                "source": "playwright",
+                "url": url,
+                "raw_html_start": html,
+            }
+    return None
+
+
 async def fetch_via_playwright(url: str) -> dict | None:
     """Tier 3: Render with stealth Playwright, then extract main content.
 
     Uses the same stealth configuration as browser-svc to avoid headless
     detection by Substack, Cloudflare JS challenges, and similar mechanisms.
 
+    Implements fail-open proxy retry: if proxy is configured and unreachable,
+    retries without proxy and logs a WARN. Proxy identity is logged per-scrape
+    so operators can distinguish "proxy returned garbage" from "site changed".
+
     This requires playwright and chromium to be installed.
     Falls back gracefully if playwright is not available.
     """
     try:
-        from playwright.async_api import async_playwright, TimeoutError
-        from .cookie_store import inject_cookies, store_cookies
-        from .stealth import create_stealth_browser, create_stealth_context
+        pw_proxy = _get_playwright_proxy()
 
-        async with async_playwright() as p:
-            browser = await create_stealth_browser(p)
-            context = await create_stealth_context(browser)
-            page = await context.new_page()
-            try:
-                # Security: reject private/internal destination URLs
-                is_private, reason = _is_private_url(url)
-                if is_private:
-                    logger.warning("Blocked navigation to private URL %s: %s", url, reason)
-                    return None
+        # Try with proxy first
+        result = await _playwright_fetch_with_proxy(url, pw_proxy)
+        if result is not None:
+            return result
 
-                # Inject cached Cloudflare clearance cookies before navigation
-                await inject_cookies(url, context)
-
-                # Navigate with networkidle — same strategy as browser-svc
-                await page.goto(url, wait_until="networkidle", timeout=45000)
-
-                # Check for bot challenges (Cloudflare / DDoS-Guard)
-                title = await page.title()
-                current_url = page.url
-                if _is_bot_challenge(title, current_url):
-                    logger.info("Bot challenge detected on %s, waiting for resolution...", url)
-                    await page.wait_for_timeout(8000)
-                    title = await page.title()
-                    current_url = page.url
-                    if _is_bot_challenge(title, current_url):
-                        logger.warning("Bot challenge persisted after wait for %s", url)
-
-                # Check for Substack session/channel frame redirect
-                if _is_substack_redirect(current_url):
-                    logger.info("Substack redirect detected on %s (-> %s), waiting for content...", url, current_url)
-                    # Substack sometimes resolves after a longer wait
-                    await page.wait_for_timeout(5000)
-                    current_url = page.url
-                    if _is_substack_redirect(current_url):
-                        logger.warning("Substack redirect persisted for %s", url)
-
-                # SPA content retry: if the page loaded but content is short
-                # or suspicious, it may be a JS-rendered page that needs more
-                # time or a scroll to trigger lazy loading
-                html = await page.content()
-                markdown = html_to_markdown(html) if html else ""
-
-                if not markdown or len(markdown) < 500 or _classify_barrier(title, url, markdown, html).detected:
-                    for attempt in range(2):
-                        logger.info(
-                            "SPA retry %d for %s (markdown: %d chars)",
-                            attempt + 1, url, len(markdown),
-                        )
-                        # Scroll to trigger lazy-loaded content
-                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                        await page.wait_for_timeout(3000)
-
-                        html = await page.content()
-                        markdown = html_to_markdown(html) if html else ""
-                        if markdown and len(markdown) >= 500 and not _classify_barrier(title, url, markdown, html).detected:
-                            logger.info(
-                                "SPA retry %d succeeded for %s (%d chars)",
-                                attempt + 1, url, len(markdown),
-                            )
-                            break
-
-                # html and markdown now hold the best result from the retry loop
-            finally:
-                await browser.close()
-
-        if html:
-            markdown = html_to_markdown(html)
-            if markdown and len(markdown) > 50:
-                # ── Barrier check before returning ─────────────
-                barrier = _classify_barrier(title, url, markdown, html)
-                if barrier.detected and barrier.confidence > 0.7:
-                    logger.warning(
-                        "Barrier detected in playwright result for %s: %s (confidence: %.2f)",
-                        url, barrier.barrier_type, barrier.confidence,
-                    )
-                    return {
-                        "error": f"Barrier detected: {barrier.barrier_type} (confidence: {barrier.confidence:.2f})",
-                        "barrier": {
-                            "detected": True,
-                            "type": barrier.barrier_type,
-                            "confidence": barrier.confidence,
-                            "detail": barrier.detail,
-                        },
-                        "markdown": "",
-                        "source": "barrier-detection",
-                        "url": url,
-                    }
-
-                logger.info("Tier 3 hit: playwright render for %s", url)
-                # Store any new cf_clearance cookies for future scrapes
-                await store_cookies(url, context)
-                return {
-                    "markdown": markdown,
-                    "source": "playwright",
-                    "url": url,
-                    "raw_html_start": html,
-                }
+        # Fail-open: if proxy was configured, retry without it
+        if pw_proxy:
+            proxy_identity = pw_proxy.get("server", "unknown")
+            logger.warning(
+                "Proxy (%s) unreachable or failed for %s — retrying without proxy (fail-open)",
+                proxy_identity, url,
+            )
+            result = await _playwright_fetch_with_proxy(url, None)
+            if result is not None:
+                result["_proxy_failover"] = True
+                result["_proxy_identity"] = proxy_identity
+                return result
     except ImportError:
         logger.warning("Playwright not installed; skipping Tier 3")
     except Exception as e:
@@ -1358,6 +1434,13 @@ async def smart_scrape(url: str) -> dict:
     """
     best_effort: list[dict] = []
 
+    # Log proxy status for debugging (per-scrape proxy identity logging)
+    proxy_url = SCRAPER_PROXY_URL
+    if proxy_url:
+        logger.info("Proxy configured: %s", _redact_proxy_url(proxy_url))
+    else:
+        logger.info("No proxy configured")
+
     async with httpx.AsyncClient(
         follow_redirects=True,
         timeout=30,
@@ -1368,6 +1451,7 @@ async def smart_scrape(url: str) -> dict:
                 "Chrome/131.0.0.0 Safari/537.36"
             ),
         },
+        proxy=_get_httpx_proxies(),
     ) as client:
         # Adapter registry check (pre-pipeline, before any HTTP)
         registry = get_registry()
