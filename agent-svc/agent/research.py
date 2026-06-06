@@ -183,3 +183,211 @@ def _validate_json_if_schema(answer: str, schema: dict | None) -> None:
         json.loads(cleaned)
     except (json.JSONDecodeError, Exception) as e:
         logger.warning("LLM response not valid JSON despite schema: %s", e)
+
+
+ANSWER_SYSTEM_PROMPT = """You are GroktoCrawl, a helpful Q&A agent. Your job is to answer
+the user's question using ONLY the web search results provided below.
+
+RULES:
+- Base your answer ONLY on the context provided. Do not use your pre-training knowledge.
+- Cite sources using inline markers like [1], [2], etc. Each marker corresponds to a source URL listed below.
+- If the context doesn't contain enough information to answer fully, say so clearly.
+- Be concise but thorough. Lead with the direct answer, then add supporting detail.
+- Use clean markdown formatting.
+- Do not fabricate information or invent sources."""
+
+
+async def run_answer(
+    query: str,
+    num_sources: int = 5,
+    search_type: str = "auto",
+    searxng_url: str = "http://searxng:8080",
+    scraper_url: str = "http://scraper-svc:8001",
+    llm_base_url: str = "https://api.openai.com/v1",
+    llm_api_key: str = "",
+    llm_model: str = "gpt-4o-mini",
+    requested_model: str | None = None,
+) -> dict:
+    """Run a grounded Q&A pipeline: search → scrape → LLM → citations.
+
+    Returns a dict with keys: answer, sources (list of dicts), citations (list of dicts),
+    search_type, latency_ms.
+    """
+    import time
+    start = time.monotonic()
+
+    searxng = SearXNGClient(searxng_url)
+    scraper = ScraperClient(scraper_url)
+    effective_model = requested_model if requested_model and requested_model != "default" else llm_model
+    llm = LLMClient(llm_base_url, llm_api_key, effective_model)
+
+    try:
+        # Step 1: Search
+        logger.info("Answer: searching for: %s", query)
+        search_results, _health = await searxng.search(query, limit=num_sources)
+        target_urls = [r["url"] for r in search_results if r.get("url")]
+
+        # Step 2: Scrape
+        documents, source_details = await _scrape_urls(target_urls, scraper)
+
+        # Step 3: Build context with source markers
+        context_parts = []
+        for i, (doc, detail) in enumerate(zip(documents, source_details), start=1):
+            url = detail["url"]
+            title = next((r.get("title", "") for r in search_results if r.get("url") == url), "")
+            context_parts.append(f"[{i}] Source: {url}\nTitle: {title}\n\n{doc}")
+
+        context = "\n\n---\n\n".join(context_parts) if context_parts else ""
+
+        if not context:
+            elapsed = int((time.monotonic() - start) * 1000)
+            return {
+                "answer": "I was unable to find or scrape any relevant web pages to answer your question.",
+                "sources": [],
+                "citations": [],
+                "search_type": search_type,
+                "latency_ms": elapsed,
+            }
+
+        # Step 4: Build source_map for citation resolution
+        source_map: list[dict[str, str]] = []
+        for r in search_results:
+            if r.get("url") in [s["url"] for s in source_details]:
+                source_map.append({
+                    "url": r["url"],
+                    "title": r.get("title", ""),
+                    "relevance": r.get("description", ""),
+                })
+
+        # Step 5: Call LLM
+        user_prompt = (
+            f"Answer the following question using ONLY the sources provided above.\n\n"
+            f"Question: {query}\n\n"
+            f"Cite sources using [1], [2], etc. corresponding to the source numbers above."
+        )
+        answer = await llm.generate(
+            system_prompt=ANSWER_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            context=context,
+        )
+
+        # Step 6: Parse citations [N] from the answer
+        citations: list[dict] = []
+        seen_indices: set[int] = set()
+        import re
+        for match in re.finditer(r'\[(\d+)\]', answer):
+            idx = int(match.group(1))
+            if idx not in seen_indices and 1 <= idx <= len(source_map):
+                seen_indices.add(idx)
+                citations.append({"index": idx, "url": source_map[idx - 1]["url"]})
+
+        elapsed = int((time.monotonic() - start) * 1000)
+
+        return {
+            "answer": answer,
+            "sources": source_map,
+            "citations": citations,
+            "search_type": search_type,
+            "latency_ms": elapsed,
+        }
+    finally:
+        await searxng.close()
+        await scraper.close()
+        await llm.close()
+
+
+async def run_answer_stream(
+    query: str,
+    num_sources: int = 5,
+    search_type: str = "auto",
+    searxng_url: str = "http://searxng:8080",
+    scraper_url: str = "http://scraper-svc:8001",
+    llm_base_url: str = "https://api.openai.com/v1",
+    llm_api_key: str = "",
+    llm_model: str = "gpt-4o-mini",
+    requested_model: str | None = None,
+):
+    """Streaming version of run_answer. Yields SSE-suitable dicts.
+
+    Yields:
+      {"type": "sources", "sources": [...]} — source list (sent once before tokens)
+      {"type": "token", "content": "..."} — individual tokens from the LLM
+      {"type": "done", "answer": "...", "citations": [...], "latency_ms": N} — final
+      {"type": "error", "content": "..."} — error
+    """
+    import time
+    start = time.monotonic()
+
+    searxng = SearXNGClient(searxng_url)
+    scraper = ScraperClient(scraper_url)
+    effective_model = requested_model if requested_model and requested_model != "default" else llm_model
+    llm = LLMClient(llm_base_url, llm_api_key, effective_model)
+
+    try:
+        # Step 1: Search
+        logger.info("Answer (stream): searching for: %s", query)
+        search_results, _health = await searxng.search(query, limit=num_sources)
+        target_urls = [r["url"] for r in search_results if r.get("url")]
+
+        # Step 2: Scrape
+        documents, source_details = await _scrape_urls(target_urls, scraper)
+
+        # Step 3: Build context
+        context_parts = []
+        source_map: list[dict[str, str]] = []
+        for i, (doc, detail) in enumerate(zip(documents, source_details), start=1):
+            url = detail["url"]
+            title = next((r.get("title", "") for r in search_results if r.get("url") == url), "")
+            context_parts.append(f"[{i}] Source: {url}\nTitle: {title}\n\n{doc}")
+            source_map.append({"url": url, "title": title, "relevance": next(
+                (r.get("description", "") for r in search_results if r.get("url") == url), ""
+            )})
+
+        context = "\n\n---\n\n".join(context_parts) if context_parts else ""
+
+        if not context:
+            yield {"type": "sources", "sources": []}
+            yield {"type": "done", "answer": "No relevant web pages found.", "citations": [], "latency_ms": int((time.monotonic() - start) * 1000)}
+            return
+
+        # Yield sources before streaming tokens
+        yield {"type": "sources", "sources": source_map}
+
+        # Step 4: Stream LLM response
+        user_prompt = (
+            f"Answer the following question using ONLY the sources provided above.\n\n"
+            f"Question: {query}\n\n"
+            f"Cite sources using [1], [2], etc. corresponding to the source numbers above."
+        )
+        full_answer = ""
+        async for event in llm.generate_stream(
+            system_prompt=ANSWER_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            context=context,
+        ):
+            if event["type"] == "token":
+                full_answer += event["content"]
+                yield {"type": "token", "content": event["content"]}
+            elif event["type"] == "error":
+                yield {"type": "error", "content": event["content"]}
+                return
+            elif event["type"] == "done":
+                full_answer = event["full_content"]
+
+        # Step 5: Parse citations
+        import re
+        citations: list[dict] = []
+        seen_indices: set[int] = set()
+        for match in re.finditer(r'\[(\d+)\]', full_answer):
+            idx = int(match.group(1))
+            if idx not in seen_indices and 1 <= idx <= len(source_map):
+                seen_indices.add(idx)
+                citations.append({"index": idx, "url": source_map[idx - 1]["url"]})
+
+        elapsed = int((time.monotonic() - start) * 1000)
+        yield {"type": "done", "answer": full_answer, "citations": citations, "latency_ms": elapsed}
+
+    finally:
+        await searxng.close()
+        await scraper.close()
+        await llm.close()

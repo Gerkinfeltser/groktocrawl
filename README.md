@@ -127,6 +127,7 @@ python3 -m pip install requests
 | POST | `/v2/agent` | Start an autonomous research agent |
 | GET | `/v2/agent/:jobId` | Get agent job status and results |
 | DELETE | `/v2/agent/:jobId` | Cancel an agent job |
+| POST | `/v2/answer` | Grounded Q&A — search, synthesize, cite in one round-trip |
 | POST | `/v2/extract` | Extract structured data from URLs (with schema) |
 | GET | `/v2/extract/:jobId` | Get extract status and results |
 | POST | `/v2/crawl` | Crawl a website |

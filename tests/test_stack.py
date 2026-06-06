@@ -312,3 +312,70 @@ def test_github_adapter_social_fallback():
     # Frontmatter should indicate social adapter
     assert "github-social" in md or "github-discussion" in md or "issue" in md.lower()
 
+
+def test_answer_endpoint_returns_valid_structure():
+    """POST /v2/answer returns a grounded answer with sources and citations."""
+    r = httpx.post(AGENT + "/v2/answer", json={
+        "query": "What is the pricing on the fixture site?",
+        "num_sources": 3,
+    }, timeout=120)
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["success"] is True
+    assert isinstance(payload["answer"], str)
+    assert len(payload["answer"]) > 10
+    assert isinstance(payload["sources"], list)
+    assert isinstance(payload["citations"], list)
+    assert payload["latency_ms"] > 0
+    assert payload["search_type"] == "auto"
+
+
+def test_answer_endpoint_returns_citations_when_available():
+    """If sources exist, citations list should be populated."""
+    r = httpx.post(AGENT + "/v2/answer", json={
+        "query": "What services does the fixture site describe?",
+        "num_sources": 3,
+    }, timeout=120)
+    assert r.status_code == 200
+    payload = r.json()
+    # The LLM should cite sources; if it doesn't, citations may be empty
+    # but the structure should be valid
+    assert payload["success"] is True
+    if payload["sources"]:
+        for c in payload["citations"]:
+            assert "index" in c
+            assert "url" in c
+
+
+def test_answer_streaming_returns_sse_events():
+    """POST /v2/answer with stream:true returns SSE events."""
+    r = httpx.post(AGENT + "/v2/answer", json={
+        "query": "What is the pricing on the fixture site?",
+        "num_sources": 1,
+        "stream": True,
+    }, timeout=180)
+    assert r.status_code == 200
+    assert r.headers.get("content-type", "").startswith("text/event-stream")
+    body = r.text
+
+    # Should have at least a sources event and a done event
+    assert "data:" in body
+    assert "[DONE]" in body
+
+    # Parse events and verify structure
+    events = []
+    for line in body.split("\n"):
+        if line.startswith("data: ") and line[6:] != "[DONE]":
+            import json
+            events.append(json.loads(line[6:]))
+
+    event_types = {e.get("type") for e in events}
+    # Should have at least: sources (maybe), token(s), done
+    assert "done" in event_types, f"Missing 'done' event. Types found: {event_types}"
+
+    # Find the done event
+    done_event = next(e for e in events if e.get("type") == "done")
+    assert "answer" in done_event
+    assert isinstance(done_event.get("answer"), str)
+    assert done_event["latency_ms"] > 0
+
