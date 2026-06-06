@@ -50,12 +50,12 @@ LLM_MODEL=llama3.2
 ```mermaid
 flowchart TD
     subgraph compose["docker-compose.yml"]
-        valkey[("valkey (queue + storage)")]
-        searxng["searxng (web search)"]
-        scraper("scraper-svc (smart fetch)")
-        browser["browser-svc (Playwright sessions)"]
-        agent("agent-svc (FastAPI + workers)")
-        ofelia["ofelia (cron scheduler)"]
+        valkey[("valkey<br/>(queue + storage)")]
+        searxng["searxng<br/>(web search)"]
+        scraper("scraper-svc<br/>(smart fetch)")
+        browser["browser-svc<br/>(Playwright sessions)"]
+        agent("agent-svc<br/>(FastAPI + workers)")
+        ofelia["ofelia<br/>(cron scheduler)"]
 
         valkey --- agent
         searxng --- agent
@@ -63,7 +63,7 @@ flowchart TD
         browser --- agent
         ofelia -.->|docker exec| agent
     end
-    llm_provider("LLM Provider (DeepSeek / OpenAI / Ollama)")
+    llm_provider("LLM Provider<br/>(DeepSeek / OpenAI / Ollama)")
     llm_provider -.->|LLM_BASE_URL| agent
 
     style valkey fill:#ffe0b0
