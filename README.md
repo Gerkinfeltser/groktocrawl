@@ -407,24 +407,6 @@ The `GITHUB_TOKEN` environment variable enables authenticated access:
 
 A token with `public_repo` scope is sufficient for public repositories. For private repos, use `repo` scope. Without a token, the file adapter works fully and the social adapter falls back to REST (60 req/hr) then HTML scrape — every URL type returns useful content.
 
-### Reddit Adapter
-
-`scrape <reddit-url>` returns a markdown document with:
-
-- **YAML frontmatter:** title, author, subreddit, score, upvote_ratio, num_comments, created_utc, permalink, domain, over_18, spoiler, stickied
-- **Markdown body:** post self-text + threaded comments with nesting and "more replies" indicators
-
-**URL patterns:** `www.reddit.com`, `old.reddit.com`, `sh.reddit.com`
-
-| Variable | Default | Description |
-|---|---|---|
-| `ADAPTER_REDDIT_CLIENT_ID` | *(none)* | Reddit API client ID for higher rate limits |
-| `ADAPTER_REDDIT_CLIENT_SECRET` | *(none)* | Reddit API client secret for app-only OAuth |
-
-**Fallback chain:** Reddit JSON API (append `.json`, ~60 req/min unauth) → browser render via old.reddit.com
-
-The adapter works without any credentials for public content. With app-only OAuth (`ADAPTER_REDDIT_CLIENT_ID` + `ADAPTER_REDDIT_CLIENT_SECRET`), rate limits increase to ~600 req/min.
-
 ### Adding a New Adapter
 
 1. Create `scraper-svc/scraper/adapters/<site>.py`

@@ -32,11 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **GitHub social adapter** (`scraper-svc/scraper/adapters/github_social.py`) — issues, pull requests, discussions, releases (single + list), and commits via GitHub GraphQL API (v4). Three-tier fallback chain per resource: GraphQL → REST API → HTML page scrape (readability-lxml + markdownify). Works without a token at 60 req/hr (REST fallback) or without any auth (HTML scrape). Priority 190.
 - **`GITHUB_TOKEN` environment variable** — enables 5,000 API req/hr and GraphQL access for richer metadata (reviews, diff stats, threaded comments, discussion answers, release assets). `public_repo` scope for public repos, `repo` scope for private repos.
 - **CI tests for GitHub adapters** — 5 integration tests (raw file, blob→raw rewrite, repo root README, tree listing, social issue fallback) in `tests/test_stack.py`.
-|- **Reddit adapter** (`scraper-svc/scraper/adapters/reddit.py`) — extracts posts and comment threads from Reddit URLs via the official JSON API (append `.json`). Returns YAML frontmatter (title, author, subreddit, score, upvote_ratio, num_comments, created_utc) + self-text + threaded comments with nesting and "more replies" indicators. No auth required for public content. Optional `ADAPTER_REDDIT_CLIENT_ID`/`ADAPTER_REDDIT_CLIENT_SECRET` for higher rate limits via app-only OAuth. Browser fallback via old.reddit.com. Priority 200.
-|- **Unit tests for Reddit adapter** — 25 tests covering URL parsing, JSON API response parsing, markdown formatting, comment threading, NSFW/spoiler handling, and browser fallback.
 
 ### Changed
-- Updated `.env.sample` with Reddit adapter configuration guide (`ADAPTER_REDDIT_CLIENT_ID`, `ADAPTER_REDDIT_CLIENT_SECRET`).
 
 - Updated README with full GitHub adapter documentation covering 10 URL types and configuration.
 - Updated `.env.sample` with `GITHUB_TOKEN` configuration guide.
