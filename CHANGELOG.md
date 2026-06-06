@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Observability infrastructure** — `/health` endpoint now returns per-dependency probe results (valkey, searxng, scraper, browser) with status, latency, and detail. New `/metrics` endpoint exports counters, histograms, and gauges in OpenMetrics text format for Prometheus consumption — no external dependencies. Structured JSON logging replaces ad-hoc prints with request_id correlation, timestamp, level, duration_ms, and status_code fields. Metrics tracked: scrape latency by tier (`scrape_duration_seconds`), job duration by type/status, job counters (submitted, completed, failed), queue depth, and dependency health. New `agent-svc/agent/metrics.py` and `agent-svc/agent/health.py` modules. ADR-0018. (closes #108)
+
 ### Fixed
 
 - **`POST /v2/answer` retries more search results when scraping fails** — `_scrape_urls()` now loops through search results until enough sources are successfully scraped, bounded by 2x the requested count. Prevents empty responses when the top results are from sites that block scraping (BBC, Facebook, etc.) but usable sources exist further down.

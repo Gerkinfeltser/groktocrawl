@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import time
 from typing import Any
 
 from .research import run_research, run_extract
@@ -10,6 +11,7 @@ from .scraper_client import ScraperClient
 from .store import JobStore
 from .webhook import deliver_webhook
 from .llmstxt import generate_llmstxt as run_llmstxt
+from .metrics import METRICS
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,8 @@ async def _process_agent_async(
     requested_model: str | None = None,
 ) -> None:
     store = JobStore(get_env("VALKEY_URL", "redis://valkey:6379/0"))
+    start = time.monotonic()
+    METRICS.counter("jobs_submitted_total", "Total jobs submitted", ["type"]).inc({"type": "agent"})
     try:
         result = await run_research(
             prompt=prompt, urls=urls, schema=schema_,
@@ -41,10 +45,17 @@ async def _process_agent_async(
         )
         store.complete_job(job_id, result)
         await deliver_webhook(webhook_config, "completed", job_id, result)
+        elapsed = time.monotonic() - start
+        METRICS.histogram("job_duration_seconds", "Job processing duration", ["type", "status"]).observe({"type": "agent", "status": "completed"}, elapsed)
+        METRICS.counter("jobs_completed_total", "Total completed jobs", ["type"]).inc({"type": "agent"})
+        logger.info("Agent job %s completed in %.2fs", job_id, elapsed)
     except Exception as e:
         logger.exception("Agent job %s failed", job_id)
         store.fail_job(job_id, str(e))
         await deliver_webhook(webhook_config, "failed", job_id, {"error": str(e)})
+        elapsed = time.monotonic() - start
+        METRICS.histogram("job_duration_seconds", "Job processing duration", ["type", "status"]).observe({"type": "agent", "status": "failed"}, elapsed)
+        METRICS.counter("jobs_failed_total", "Total failed jobs", ["type"]).inc({"type": "agent"})
 
 
 async def _process_crawl_async(
@@ -57,6 +68,8 @@ async def _process_crawl_async(
 ) -> None:
     store = JobStore(get_env("VALKEY_URL", "redis://valkey:6379/0"))
     scraper = ScraperClient(scraper_url)
+    start = time.monotonic()
+    METRICS.counter("jobs_submitted_total", "Total jobs submitted", ["type"]).inc({"type": "crawl"})
     try:
         result = await scraper.scrape(url)
         pages = []
@@ -65,10 +78,16 @@ async def _process_crawl_async(
         payload = {"completed": len(pages), "total": 1, "pages": pages}
         store.complete_job(job_id, payload)
         await deliver_webhook(webhook_config, "completed", job_id, payload)
+        elapsed = time.monotonic() - start
+        METRICS.histogram("job_duration_seconds", "Job processing duration", ["type", "status"]).observe({"type": "crawl", "status": "completed"}, elapsed)
+        METRICS.counter("jobs_completed_total", "Total completed jobs", ["type"]).inc({"type": "crawl"})
     except Exception as e:
         logger.exception("Crawl job %s failed", job_id)
         store.fail_job(job_id, str(e))
         await deliver_webhook(webhook_config, "failed", job_id, {"error": str(e)})
+        elapsed = time.monotonic() - start
+        METRICS.histogram("job_duration_seconds", "Job processing duration", ["type", "status"]).observe({"type": "crawl", "status": "failed"}, elapsed)
+        METRICS.counter("jobs_failed_total", "Total failed jobs", ["type"]).inc({"type": "crawl"})
     finally:
         await scraper.close()
 
@@ -81,6 +100,8 @@ async def _process_batch_scrape_async(
 ) -> None:
     store = JobStore(get_env("VALKEY_URL", "redis://valkey:6379/0"))
     scraper = ScraperClient(scraper_url)
+    start = time.monotonic()
+    METRICS.counter("jobs_submitted_total", "Total jobs submitted", ["type"]).inc({"type": "batch_scrape"})
     try:
         pages = []
         for url in urls:
@@ -90,10 +111,16 @@ async def _process_batch_scrape_async(
         payload = {"completed": len(pages), "total": len(urls), "pages": pages}
         store.complete_job(job_id, payload)
         await deliver_webhook(webhook_config, "completed", job_id, payload)
+        elapsed = time.monotonic() - start
+        METRICS.histogram("job_duration_seconds", "Job processing duration", ["type", "status"]).observe({"type": "batch_scrape", "status": "completed"}, elapsed)
+        METRICS.counter("jobs_completed_total", "Total completed jobs", ["type"]).inc({"type": "batch_scrape"})
     except Exception as e:
         logger.exception("Batch scrape job %s failed", job_id)
         store.fail_job(job_id, str(e))
         await deliver_webhook(webhook_config, "failed", job_id, {"error": str(e)})
+        elapsed = time.monotonic() - start
+        METRICS.histogram("job_duration_seconds", "Job processing duration", ["type", "status"]).observe({"type": "batch_scrape", "status": "failed"}, elapsed)
+        METRICS.counter("jobs_failed_total", "Total failed jobs", ["type"]).inc({"type": "batch_scrape"})
     finally:
         await scraper.close()
 
@@ -110,6 +137,8 @@ async def _process_extract_async(
     webhook_config: dict[str, Any] | None = None,
 ) -> None:
     store = JobStore(get_env("VALKEY_URL", "redis://valkey:6379/0"))
+    start = time.monotonic()
+    METRICS.counter("jobs_submitted_total", "Total jobs submitted", ["type"]).inc({"type": "extract"})
     try:
         result = await run_extract(
             urls=urls, prompt=prompt, schema=schema_,
@@ -118,10 +147,16 @@ async def _process_extract_async(
         )
         store.complete_job(job_id, result)
         await deliver_webhook(webhook_config, "completed", job_id, result)
+        elapsed = time.monotonic() - start
+        METRICS.histogram("job_duration_seconds", "Job processing duration", ["type", "status"]).observe({"type": "extract", "status": "completed"}, elapsed)
+        METRICS.counter("jobs_completed_total", "Total completed jobs", ["type"]).inc({"type": "extract"})
     except Exception as e:
         logger.exception("Extract job %s failed", job_id)
         store.fail_job(job_id, str(e))
         await deliver_webhook(webhook_config, "failed", job_id, {"error": str(e)})
+        elapsed = time.monotonic() - start
+        METRICS.histogram("job_duration_seconds", "Job processing duration", ["type", "status"]).observe({"type": "extract", "status": "failed"}, elapsed)
+        METRICS.counter("jobs_failed_total", "Total failed jobs", ["type"]).inc({"type": "extract"})
 
 
 async def _process_llmstxt_async(
@@ -132,12 +167,20 @@ async def _process_llmstxt_async(
     webhook_config: dict[str, Any] | None = None,
 ) -> None:
     store = JobStore(get_env("VALKEY_URL", "redis://valkey:6379/0"))
+    start = time.monotonic()
+    METRICS.counter("jobs_submitted_total", "Total jobs submitted", ["type"]).inc({"type": "llmstxt"})
     try:
         from .llmstxt import generate_llmstxt
         result = await generate_llmstxt(url, max_pages, scraper_url)
         store.complete_job(job_id, result)
         await deliver_webhook(webhook_config, "completed", job_id, result)
+        elapsed = time.monotonic() - start
+        METRICS.histogram("job_duration_seconds", "Job processing duration", ["type", "status"]).observe({"type": "llmstxt", "status": "completed"}, elapsed)
+        METRICS.counter("jobs_completed_total", "Total completed jobs", ["type"]).inc({"type": "llmstxt"})
     except Exception as e:
         logger.exception("LLMs.txt job %s failed", job_id)
         store.fail_job(job_id, str(e))
         await deliver_webhook(webhook_config, "failed", job_id, {"error": str(e)})
+        elapsed = time.monotonic() - start
+        METRICS.histogram("job_duration_seconds", "Job processing duration", ["type", "status"]).observe({"type": "llmstxt", "status": "failed"}, elapsed)
+        METRICS.counter("jobs_failed_total", "Total failed jobs", ["type"]).inc({"type": "llmstxt"})
