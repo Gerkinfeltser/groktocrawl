@@ -36,5 +36,6 @@ An Architecture Decision Record captures an important architectural decision mad
 | 0015 | [Barrier Classification Phase 1](0015-barrier-classification.md) | accepted |
 | 0016 | [Extraction Quality Gates](0016-extraction-quality-gates.md) | accepted |
 | 0017 | [Grounded Q&A Endpoint](0017-grounded-qa-endpoint.md) | accepted |
+| 0018 | [Observability Infrastructure](0018-observability-infrastructure.md) | accepted |
 
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full ADR workflow: when to write an ADR, how to number it, and how to get it reviewed in a PR.

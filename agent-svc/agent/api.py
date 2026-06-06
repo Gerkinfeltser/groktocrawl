@@ -43,11 +43,6 @@ def _enqueue(queue: Queue, func: str, **kwargs: Any) -> None:
     queue.enqueue(func, **kwargs)
 
 
-@router.get("/health")
-async def health():
-    return {"status": "ok"}
-
-
 @router.get("/v2/activity", response_model=ActivityResponse)
 async def list_activity(request: Request):
     """List all active/processing jobs across all job types.

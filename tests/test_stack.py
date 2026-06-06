@@ -32,6 +32,37 @@ def test_services_health():
     assert wait_for(TEST_SITE).json()["status"] == "ok"
 
 
+def test_health_endpoint_returns_per_dependency_checks():
+    """GET /health returns per-dependency probe results in the ``checks`` field."""
+    r = httpx.get(AGENT + "/health", timeout=30)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "ok"
+    assert "checks" in data
+    # Should probe all expected dependencies
+    for dep in ("valkey", "searxng", "scraper", "browser"):
+        assert dep in data["checks"], f"Missing check for {dep}"
+        assert "status" in data["checks"][dep], f"Missing status in {dep} check"
+        assert "latency_ms" in data["checks"][dep], f"Missing latency_ms in {dep} check"
+
+
+def test_metrics_endpoint_returns_openmetrics():
+    """GET /metrics returns OpenMetrics-formatted text with expected metric names."""
+    r = httpx.get(AGENT + "/metrics", timeout=30)
+    assert r.status_code == 200
+    content_type = r.headers.get("content-type", "")
+    assert "openmetrics" in content_type or "text/plain" in content_type
+    body = r.text
+    # Should contain expected metric type headers
+    assert "# HELP" in body
+    assert "# TYPE" in body
+    assert "# EOF" in body
+    # Should include the info metric
+    assert "groktocrawl_info" in body
+    # Should include queue depth gauge
+    assert "queue_depth" in body
+
+
 def test_scraper_uses_llms_txt():
     r = httpx.post(SCRAPER + "/scrape", json={"url": TEST_SITE + "/anything"}, timeout=120)
     payload = r.json()
