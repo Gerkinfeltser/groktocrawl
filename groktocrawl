@@ -16,6 +16,7 @@ Commands:
   monitor          Manage change monitors
   parse            Parse a document file (PDF, EPUB, DOCX, etc.) to markdown
   generate-llmstxt Generate an llms.txt for a website
+  answer           Answer a question with grounded citations
 Global flags:
   --server <url>   API URL (default: GROKTOCRAWL_API_URL env or http://localhost:8080)
   --json           Machine-readable JSON output
@@ -29,6 +30,8 @@ Examples:
   groktocrawl map https://docs.example.com --limit 50
   groktocrawl crawl https://docs.example.com --max-depth 2 --limit 20
   groktocrawl agent "What are the key announcements from Google I/O 2025?"
+  groktocrawl answer "What is the current Fed interest rate?"
+  groktocrawl answer "How tall is the Burj Khalifa?" --stream
 """
 
 import argparse
