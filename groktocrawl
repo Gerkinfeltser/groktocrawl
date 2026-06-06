@@ -16,6 +16,7 @@ Commands:
   monitor          Manage change monitors
   parse            Parse a document file (PDF, EPUB, DOCX, etc.) to markdown
   generate-llmstxt Generate an llms.txt for a website
+  answer           Answer a question with grounded citations
 Global flags:
   --server <url>   API URL (default: GROKTOCRAWL_API_URL env or http://localhost:8080)
   --json           Machine-readable JSON output
@@ -29,6 +30,8 @@ Examples:
   groktocrawl map https://docs.example.com --limit 50
   groktocrawl crawl https://docs.example.com --max-depth 2 --limit 20
   groktocrawl agent "What are the key announcements from Google I/O 2025?"
+  groktocrawl answer "What is the current Fed interest rate?"
+  groktocrawl answer "How tall is the Burj Khalifa?" --stream
 """
 
 import argparse
@@ -278,6 +281,23 @@ class Client:
 
     def cancel_agent(self, job_id: str) -> Dict[str, Any]:
         return self._request("DELETE", f"/agent/{job_id}")
+
+    def answer(
+        self,
+        query: str,
+        num_sources: int = 5,
+        stream: bool = False,
+    ) -> Dict[str, Any]:
+        """Grounded Q&A: synchronous, cited answer."""
+        data: Dict[str, Any] = {"query": query, "num_sources": num_sources, "stream": stream}
+        if stream:
+            import requests
+            url = self._url("/answer")
+            resp = requests.post(url, json=data, timeout=120, stream=True)
+            if resp.status_code >= 400:
+                raise ApiError(f"API error ({resp.status_code}): {resp.text[:500]}")
+            return {"_stream": resp}
+        return self._request("POST", "/answer", json_data=data)
 
     def create_extract(self, urls, prompt=None, schema=None):
         data = {"urls": urls}
@@ -551,6 +571,72 @@ def cmd_agent(client: Client, args: argparse.Namespace) -> None:
 
 
 
+
+
+def cmd_answer(client: Client, args: argparse.Namespace) -> None:
+    """Grounded Q&A: one call, cited answer."""
+    if client.dry_run:
+        emit(f"[dry-run] Would answer: {args.query}", {"dry_run": True, "command": "answer"})
+        return
+
+    try:
+        result = client.answer(query=args.query, num_sources=args.num_sources, stream=args.stream)
+    except ApiError as e:
+        die(str(e))
+
+    if args.stream:
+        resp = result["_stream"]
+        sources_shown = False
+        full_answer = ""
+        citations = []
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data: "):
+                continue
+            data_str = line[6:].strip()
+            if data_str == "[DONE]":
+                break
+            try:
+                event = json.loads(data_str)
+                if event["type"] == "sources" and not sources_shown:
+                    if event.get("sources"):
+                        log("Sources:")
+                        for s in event["sources"]:
+                            log("  " + s["url"])
+                    sources_shown = True
+                elif event["type"] == "token":
+                    full_answer += event["content"]
+                    print(event["content"], end="", flush=True)
+                elif event["type"] == "done":
+                    full_answer = event.get("answer", full_answer)
+                    citations = event.get("citations", [])
+                    print()
+                elif event["type"] == "error":
+                    die("Error: " + event["content"])
+            except json.JSONDecodeError:
+                continue
+        if citations and not JSON_OUTPUT:
+            print("\nCitations:")
+            for c in citations:
+                print("  [{}] {}".format(c["index"], c["url"]))
+        if JSON_OUTPUT:
+            emit("", {"answer": full_answer, "citations": citations})
+        return
+
+    if JSON_OUTPUT:
+        emit("", {"answer": result.get("answer", ""), "sources": result.get("sources", []), "citations": result.get("citations", [])})
+    else:
+        answer = result.get("answer", "")
+        sources = result.get("sources", [])
+        citations = result.get("citations", [])
+        print("\n" + answer + "\n")
+        if sources:
+            print("Sources:")
+            for s in sources:
+                print("  {} — {}".format(s.get("title", ""), s["url"]))
+        if citations:
+            print("\nCitations:")
+            for c in citations:
+                print("  [{}] {}".format(c["index"], c["url"]))
 
 def cmd_download(client: Client, args: argparse.Namespace) -> None:
     """Download binary content (PDF, EPUB, image, etc.) from a URL."""
@@ -1088,6 +1174,11 @@ def make_parser() -> argparse.ArgumentParser:
     p_parse.add_argument("-o", "--output", help="Write output to file instead of stdout")
 
     # --- Generate llms.txt ---
+    # --- Answer ---
+    p_answer = subparsers.add_parser("answer", help="Grounded Q&A with citations")
+    p_answer.add_argument("query", help="Natural language question")
+    p_answer.add_argument("-n", "--num-sources", type=int, default=5, help="Number of sources (1-20, default: 5)")
+    p_answer.add_argument("--stream", action="store_true", help="SSE streaming mode")
     p_llmstxt = subparsers.add_parser("generate-llmstxt", help="Generate an llms.txt for a website")
     p_llmstxt.add_argument("url", help="Site URL to generate llms.txt for")
     p_llmstxt.add_argument("--max-pages", type=int, default=50, help="Max pages to scan (default: 50)")
@@ -1154,6 +1245,7 @@ def main() -> None:
         "monitor": cmd_monitor,
         "parse": cmd_parse,
         "generate-llmstxt": cmd_generate_llmstxt,
+        "answer": cmd_answer,
     }
 
     handler = dispatch.get(args.command)
