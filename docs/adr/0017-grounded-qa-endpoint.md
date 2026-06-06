@@ -129,6 +129,48 @@ A new async generator method on `LLMClient` that supports SSE-style token-by-tok
 * Search + scrape + LLM latency is additive — if SearXNG is slow (<500ms) and the LLM is slow (>3s), the total exceeds the 1-3s target. The endpoint degrades gracefully but cannot guarantee latency.
 * No webhook/retry — callers must handle failures themselves.
 
+## Quality Attributes (arc42 §1.2)
+
+Three quality goals drive the answer endpoint design, distinct from the research agent's quality goals:
+
+| Quality Goal | Scenario | Measure | Priority |
+|---|---|---|---|
+| **Latency** | A caller submits a factual question ("What is the current Fed rate?"). The endpoint returns a cited answer within 3 seconds end-to-end. | P95 response time <3s for single-source questions; <5s for multi-source synthesis | High |
+| **Citation Accuracy** | Every factual claim in the answer maps to a source URL the LLM actually used. No hallucinated sources or claims unsupported by context. | Precision of cited sources against provided context >95% | High |
+| **Graceful Degradation** | Search returns no results, or scraping fails on all sources. The endpoint returns a clear "no information found" message rather than hallucinating. | Zero hallucinated answers when context is empty | Critical |
+
+**Tradeoff:** Citation accuracy (using regex `[N]` extraction) is less robust than structured JSON output from the LLM, but avoids requiring every LLM backend to support `response_format`. If citation quality becomes a problem, the endpoint can be extended with a two-pass approach (LLM writes answer with markers → second LLM call extracts structured citations).
+
+## Constraints (arc42 §2)
+
+| Constraint | Source | Impact |
+|---|---|---|
+| Reuse existing SearXNG instance | Infrastructure decision (ADR-0013) | Answer latency includes SearXNG search time. If SearXNG is degraded (<50% engines responding), answer latency exceeds targets. |
+| Reuse existing scraper-svc | Infrastructure decision | Answer quality depends on scraper extracting usable markdown. Block pages, JS-rendered content, and paywalled sources produce empty context → graceful degradation path. |
+| LLM backend is user-configured | Product decision | Citation format compliance varies by model. Models fine-tuned for instruction-following (DeepSeek, GPT-4o, Claude) reliably produce `[N]` citations. Smaller/quantized models may not. |
+| No new dependencies | Project policy | The endpoint must not add packages or services. Search, scrape, and LLM calls use existing clients. |
+| Synchronous HTTP timeout | Platform constraint | Long-running answer requests (>30s) may hit reverse proxy or load balancer timeouts. The 1-3s target is designed to stay well within typical 30s-60s gateway timeouts. |
+
+## Risks and Mitigations (arc42 §9)
+
+| Risk | Likelihood | Impact | Mitigation |
+|---|---|---|---|
+| LLM produces citations in wrong format (footnotes, parenthetical URLs, no markers) | Medium | Answer returned with empty citations list | Sources list is always returned independently of citation parsing. The consumer can cross-reference by position. Logged at WARNING level for monitoring. |
+| Latency exceeds 5s due to slow LLM backend | Medium | Caller timeout or poor UX | The endpoint does not hard-fail on slow LLM responses. Streaming mode mitigates perceived latency. Recommendation: configure a fast LLM model for the answer endpoint vs a deep reasoning model for the agent. |
+| Empty context after search + scrape | Low-Medium | No sources to ground answer | Graceful: returns "No relevant web pages found" with empty sources/citations and a `latency_ms` value. |
+| Citation regex matches `[N]` in the source content itself (e.g., a Wikipedia footnote) | Low | Spurious citation entry in the citations list | The regex parses the LLM's *output*, not the source content. The LLM generates `[N]` markers only when instructed. Low false-positive risk. |
+| SSE connection drops mid-stream | Low | Partial answer delivered | The SSE path does not support resumption. Callers must handle incomplete streams by retrying with `stream: false` (sync mode). The latency field in the `done` event indicates whether the full pipeline completed. |
+
+## Glossary (arc42 §10)
+
+| Term | Definition |
+|---|---|
+| **Grounded Q&A** | Question answering where every claim in the answer is supported by a specific source URL provided in the context, not by the LLM's parametric knowledge. |
+| **Citation index** | A numeric marker `[N]` in the answer text that maps to the N-th source in the `sources` array. |
+| **SSE (Server-Sent Events)** | HTTP protocol where the server pushes a stream of events as `data:` lines. Used here for real-time token delivery. |
+| **Search → Scrape → LLM → Cite** | The four-stage answer pipeline: search the web, scrape top results, synthesize via LLM, extract citation markers. |
+| **Graceful degradation** | The endpoint returns a clear "no information" response when search or scraping produces no usable content, rather than hallucinating or erroring. |
+
 ## Links
 
 * Issue #61 — Feature request: POST /v2/answer
