@@ -336,6 +336,32 @@ route through the agent API.
 See [SECURITY.md](SECURITY.md) for our disclosure policy and how to
 privately report security issues.
 
+## Proxy Configuration
+
+GroktoCrawl supports outbound proxy routing via the `SCRAPER_PROXY_URL` environment variable. When set, all scrape requests route through the specified proxy before reaching their target.
+
+```env
+SCRAPER_PROXY_URL=http://user:pass@residential-proxy:8080
+```
+
+**Supported schemes:** `http://`, `https://`, `socks5://`, `socks5h://`
+
+**Behavior:**
+- The proxy is applied at the transport layer across the full scrape pipeline — httpx clients (Tiers 1-2) and Playwright browser context (Tier 3)
+- If the proxy is unreachable, Groktocrawl **fails open**: it retries the request without a proxy and logs the fallback at WARN level
+- Every proxied scrape records `proxy_host=<host:port>` in its structured log for operational debugging
+
+**Guardrails:**
+- **Opt-in only** — users who don't set this variable see zero behavioral change
+- **Single static proxy** — one URL only. For proxy rotation or pool management, front Groktocrawl with a rotating proxy orchestrator (HAProxy, Scrapoxy, etc.)
+- **Credentials never logged** — only the host and port are recorded in scrape logs; the full URL (including auth) is redacted at the logging boundary
+
+**Notes:**
+- Proxy credentials embedded in the URL use standard HTTP Basic Auth encoding. Avoid special characters (@, #, %) in passwords — they can conflict with URL parsing.
+- The Playwright proxy uses **context-level assignment** (`browser.new_context(proxy=...)`) for per-job isolation, not launch-level args (`--proxy-server`).
+
+See [ADR-0020](docs/adr/0020-proxy-support-with-guardrails.md) for the full architecture decision.
+
 ## Adapters
 
 GroktoCrawl supports **site-specific content handlers** that extract richer content from JavaScript-heavy sites. When `scrape <url>` is called, the adapter registry checks if a handler matches the URL before running the generic pipeline. If it matches, the adapter handles extraction with its own fallback chain. If it fails, the generic pipeline runs as normal.
@@ -429,6 +455,8 @@ A token with `public_repo` scope is sufficient for public repositories. For priv
 5. Add `.env` variables to `.env.sample` and document them in this section
 
 See `docs/adr/` for the architecture decision records behind the adapter pattern, and `CONTRIBUTING.md` for the ADR convention.
+
+> **External anti-detection browser hook:** For sites that require advanced browser fingerprinting evasion (Turnstile challenges, DDoS-Guard), the adapter framework supports routing scrape requests to a self-hosted anti-detection browser service. The `AdapterContext.config` provides access to environment variables for configuring the external service endpoint. This is an **advanced operator pattern** — the external browser service is self-managed and outside the project's scope. Groktocrawl provides the dispatch interface; the external service's behavior, compatibility, and reliability are the operator's responsibility.
 
 ## Project Status
 
