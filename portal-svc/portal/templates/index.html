@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>GroktoCrawl</title>
+<script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -150,6 +151,28 @@
   .answer-area a:hover { text-decoration: underline; }
   .answer-area ul, .answer-area ol { margin: 0.4em 0; padding-left: 1.5em; }
   .answer-area li { margin-bottom: 0.2em; }
+  .answer-area table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 0.6em 0;
+    font-size: 0.85rem;
+  }
+  .answer-area th, .answer-area td {
+    border: 1px solid #333;
+    padding: 6px 10px;
+    text-align: left;
+  }
+  .answer-area th {
+    background: #2a2a2a;
+    color: #fff;
+    font-weight: 600;
+  }
+  .answer-area td {
+    background: #1a1a1a;
+  }
+  .answer-area tr:nth-child(even) td {
+    background: #222;
+  }
   .answer-area .cursor { animation: blink 1s step-end infinite; }
   @keyframes blink { 50% { opacity: 0; } }
   .answer-area .citation { color: #6b8cff; font-size: 0.8rem; cursor: pointer; text-decoration: none; }
@@ -272,63 +295,17 @@
   let currentCitations = {};
   let fullAnswerText = '';
 
-  // ── Mini markdown renderer ──
+  // ── Markdown renderer (uses marked library) ──
   function renderMarkdown(text) {
-    // Escape HTML entities first
-    let html = text
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
+    // Render full markdown to HTML
+    let html = marked.parse(text, { breaks: true, gfm: true });
 
-    // Inline code (must come before bold/italic so ** inside `` is safe)
-    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-
-    // Bold
-    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-
-    // Italic
-    html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-
-    // Citation markers [N] — link to sources
+    // Citation markers [N] — link to sources (post-marked so they survive parsing)
     html = html.replace(/\[(\d+)\]/g, (match, idx) => {
       const url = currentCitations[idx];
       if (url) return `<a href="${url}" class="citation" target="_blank">[${idx}]</a>`;
       return match;
     });
-
-    // Markdown links [text](url)
-    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
-
-    // Bare URLs (http/https) — avoid double-linking
-    html = html.replace(/(?<!href=")https?:\/\/[^\s<]+/g, function(url) {
-      return `<a href="${url}" target="_blank">${url}</a>`;
-    });
-
-    // Wrap paragraphs (double newlines)
-    const blocks = html.split(/\n\n+/);
-    html = blocks.map(block => {
-      block = block.trim();
-      if (!block) return '';
-      // Unordered lists
-      if (block.match(/^[\s]*[-*]\s/m)) {
-        const items = block.split('\n').map(l => {
-          const trimmed = l.replace(/^\s*[-*]\s+/, '');
-          return `<li>${trimmed}</li>`;
-        }).join('');
-        return `<ul>${items}</ul>`;
-      }
-      // Ordered lists
-      if (block.match(/^[\s]*\d+\.\s/m)) {
-        const items = block.split('\n').map(l => {
-          const trimmed = l.replace(/^\s*\d+\.\s+/, '');
-          return `<li>${trimmed}</li>`;
-        }).join('');
-        return `<ol>${items}</ol>`;
-      }
-      // Single newlines within a paragraph become line breaks
-      block = block.replace(/\n/g, '<br>');
-      return `<p>${block}</p>`;
-    }).join('');
 
     return html;
   }
