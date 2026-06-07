@@ -415,7 +415,7 @@
       el.id = `src-${i}`;
       el.innerHTML = `
         <span class="status loading"></span>
-        <span>${s.title || s.url}</span>
+        <a href="${s.url}" target="_blank" rel="noopener">${s.title || s.url}</a>
       `;
       sourcesList.appendChild(el);
     });
