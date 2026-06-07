@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Web portal — single-search-bar UI for human users (ADR-0020)** — new `portal-svc` container in the Docker Compose stack. A lightweight FastAPI + Jinja2 web interface with a Google-inspired search bar. Routes queries to `POST /v2/answer` with SSE streaming, displaying real-time token output with source citations and a recent queries sidebar in localStorage. One-button v0.1 (answer endpoint); deep research button placeholder reserved for v0.2 (agent SSE, issue #130). Port 8081. See `docs/adr/0020-web-portal.md`.
+
 - **Intelligent scrape cache — freshness-aware revalidation with ETag/Last-Modified support (ADR-0019)** — the existing Valkey-backed scrape cache now stores HTTP ETag and Last-Modified headers from Tier 1-2 (llms.txt, content-negotiation) responses and uses conditional GETs (If-None-Match / If-Modified-Since) for blocking revalidation of cached content from slow tiers (playwright, flare-solverr, browser-svc). On 304 Not Modified, extends the cached entry's TTL without re-downloading. On 200, replaces the cache entry with fresh content.
 - **Content-change detection** — SHA-256 content hashing enables stale-content detection even when no ETag/Last-Modified headers are available. When content hashes match on re-fetch, the TTL is multiplied by `SCRAPE_CACHE_STABLE_MULTIPLIER` (default 2.0). When content changes repeatedly, the TTL is progressively reduced.
 - **Per-domain cache TTLs** — new `SCRAPE_CACHE_DOMAIN_TTLS` env var accepts a JSON dict mapping domain suffixes to TTLs (e.g., `{"news.ycombinator.com": 300, "docs.python.org": 86400}`). Longest suffix match wins. Falls back to the global `SCRAPE_CACHE_TTL`.
