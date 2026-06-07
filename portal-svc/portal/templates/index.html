@@ -128,8 +128,35 @@
   .results { display: none; width: 100%; margin-top: 16px; }
   .results.active { display: block; }
 
+  .answer-area {
+    background: #1a1a1a;
+    border-radius: 8px;
+    padding: 16px;
+    min-height: 60px;
+    line-height: 1.7;
+    font-size: 0.95rem;
+  }
+  .answer-area p { margin-bottom: 0.6em; }
+  .answer-area p:last-child { margin-bottom: 0; }
+  .answer-area strong { color: #fff; font-weight: 600; }
+  .answer-area code {
+    background: #2a2a2a;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 0.85em;
+    color: #c9a0ff;
+  }
+  .answer-area a { color: #6b8cff; text-decoration: none; }
+  .answer-area a:hover { text-decoration: underline; }
+  .answer-area ul, .answer-area ol { margin: 0.4em 0; padding-left: 1.5em; }
+  .answer-area li { margin-bottom: 0.2em; }
+  .answer-area .cursor { animation: blink 1s step-end infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .answer-area .citation { color: #6b8cff; font-size: 0.8rem; cursor: pointer; text-decoration: none; }
+  .answer-area .citation:hover { text-decoration: underline; }
+
   .sources-panel {
-    margin-bottom: 16px;
+    margin-top: 8px;
   }
   .sources-panel h3 {
     font-size: 0.8rem;
@@ -152,23 +179,8 @@
   .source-item .status.loading { background: #555; }
   .source-item .status.done { background: #4caf50; }
   .source-item .status.error { background: #f44336; }
-  .source-item .src-url { color: #888; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .source-item .src-title { color: #ccc; }
   .source-item a { color: #6b8cff; text-decoration: none; }
   .source-item a:hover { text-decoration: underline; }
-
-  .answer-area {
-    background: #1a1a1a;
-    border-radius: 8px;
-    padding: 16px;
-    min-height: 60px;
-    line-height: 1.6;
-    font-size: 0.95rem;
-  }
-  .answer-area .cursor { animation: blink 1s step-end infinite; }
-  @keyframes blink { 50% { opacity: 0; } }
-  .answer-area .citation { color: #6b8cff; font-size: 0.8rem; cursor: pointer; text-decoration: none; }
-  .answer-area .citation:hover { text-decoration: underline; }
 
   .recent-queries {
     margin-top: 20px;
@@ -225,12 +237,12 @@
   </div>
 
   <div class="results" id="results">
+    <div class="answer-area" id="answerArea">
+      <span class="cursor">|</span>
+    </div>
     <div class="sources-panel" id="sourcesPanel">
       <h3>Sources</h3>
       <div id="sourcesList"></div>
-    </div>
-    <div class="answer-area" id="answerArea">
-      <span class="cursor">|</span>
     </div>
   </div>
 
@@ -245,12 +257,12 @@
   const LS_KEY = 'groktocrawl_recent';
   const MAX_RECENT = 10;
 
-  const hero = document.getElementById('hero');
   const form = document.getElementById('searchForm');
   const input = document.getElementById('queryInput');
   const askBtn = document.getElementById('askBtn');
   const askBtnText = document.getElementById('askBtnText');
   const spinner = document.getElementById('spinner');
+  const hero = document.getElementById('hero');
   const results = document.getElementById('results');
   const sourcesList = document.getElementById('sourcesList');
   const answerArea = document.getElementById('answerArea');
@@ -258,12 +270,73 @@
   const recentList = document.getElementById('recentList');
 
   let currentCitations = {};
+  let fullAnswerText = '';
+
+  // ── Mini markdown renderer ──
+  function renderMarkdown(text) {
+    // Escape HTML entities first
+    let html = text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+
+    // Inline code (must come before bold/italic so ** inside `` is safe)
+    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+    // Bold
+    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+
+    // Italic
+    html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+
+    // Citation markers [N] — link to sources
+    html = html.replace(/\[(\d+)\]/g, (match, idx) => {
+      const url = currentCitations[idx];
+      if (url) return `<a href="${url}" class="citation" target="_blank">[${idx}]</a>`;
+      return match;
+    });
+
+    // Markdown links [text](url)
+    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+
+    // Bare URLs (http/https) — avoid double-linking
+    html = html.replace(/(?<!href=")https?:\/\/[^\s<]+/g, function(url) {
+      return `<a href="${url}" target="_blank">${url}</a>`;
+    });
+
+    // Wrap paragraphs (double newlines)
+    const blocks = html.split(/\n\n+/);
+    html = blocks.map(block => {
+      block = block.trim();
+      if (!block) return '';
+      // Unordered lists
+      if (block.match(/^[\s]*[-*]\s/m)) {
+        const items = block.split('\n').map(l => {
+          const trimmed = l.replace(/^\s*[-*]\s+/, '');
+          return `<li>${trimmed}</li>`;
+        }).join('');
+        return `<ul>${items}</ul>`;
+      }
+      // Ordered lists
+      if (block.match(/^[\s]*\d+\.\s/m)) {
+        const items = block.split('\n').map(l => {
+          const trimmed = l.replace(/^\s*\d+\.\s+/, '');
+          return `<li>${trimmed}</li>`;
+        }).join('');
+        return `<ol>${items}</ol>`;
+      }
+      // Single newlines within a paragraph become line breaks
+      block = block.replace(/\n/g, '<br>');
+      return `<p>${block}</p>`;
+    }).join('');
+
+    return html;
+  }
 
   // ── Recent queries ──
   function loadRecent() {
-    try {
-      return JSON.parse(localStorage.getItem(LS_KEY) || '[]');
-    } catch { return []; }
+    try { return JSON.parse(localStorage.getItem(LS_KEY) || '[]'); }
+    catch { return []; }
   }
 
   function saveRecent(query) {
@@ -299,9 +372,8 @@
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
-      // Parse complete SSE events
       const lines = buffer.split('\n');
-      buffer = lines.pop(); // keep incomplete line
+      buffer = lines.pop();
 
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
@@ -312,7 +384,6 @@
           const event = JSON.parse(raw);
           handleEvent(event);
         } catch (e) {
-          // partial JSON across chunk boundary — put it back
           buffer = line + '\n' + buffer;
         }
       }
@@ -344,14 +415,14 @@
       el.id = `src-${i}`;
       el.innerHTML = `
         <span class="status loading"></span>
-        <span class="src-title">${s.title || 'Loading...'}</span>
-        <span class="src-url"><a href="${s.url}" target="_blank">${s.url}</a></span>
+        <span>${s.title || s.url}</span>
       `;
       sourcesList.appendChild(el);
     });
   }
 
   function appendToken(content) {
+    fullAnswerText += content;
     const cursorSpan = answerArea.querySelector('.cursor');
     if (cursorSpan) {
       cursorSpan.insertAdjacentText('beforebegin', content);
@@ -361,30 +432,24 @@
   }
 
   function finishAnswer(event) {
-    // Remove cursor
-    const cursorSpan = answerArea.querySelector('.cursor');
-    if (cursorSpan) cursorSpan.remove();
+    // If we have the full answer in the done event, use that
+    if (event.answer) {
+      fullAnswerText = event.answer;
+    }
+
+    // Build citation lookup
+    currentCitations = {};
+    if (event.citations) {
+      event.citations.forEach(c => { currentCitations[c.index] = c.url; });
+    }
+
+    // Render markdown to HTML
+    answerArea.innerHTML = renderMarkdown(fullAnswerText);
 
     // Mark sources as done
     const items = sourcesList.querySelectorAll('.status');
     items.forEach(el => { el.className = 'status done'; });
 
-    // Build citation links
-    if (event.citations) {
-      currentCitations = {};
-      event.citations.forEach(c => { currentCitations[c.index] = c.url; });
-    }
-
-    // Replace citation markers [N] with links
-    let html = answerArea.innerHTML;
-    html = html.replace(/\[(\d+)\]/g, (match, idx) => {
-      const url = currentCitations[idx];
-      if (url) return `<a href="${url}" class="citation" target="_blank">[${idx}]</a>`;
-      return match;
-    });
-    answerArea.innerHTML = html;
-
-    // Enable button
     setLoading(false);
   }
 
@@ -411,10 +476,10 @@
     const query = input.value.trim();
     if (!query) return;
 
-    // Collapse hero, show results
     hero.classList.add('has-results');
     results.classList.add('active');
     sourcesList.innerHTML = '';
+    fullAnswerText = '';
     answerArea.innerHTML = '<span class="cursor">|</span>';
     setLoading(true);
 
