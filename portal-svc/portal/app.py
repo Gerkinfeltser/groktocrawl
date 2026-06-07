@@ -38,7 +38,7 @@ async def ask(query: str = Form(...), num_sources: int = Form(5)):
     """Proxy a grounded Q&A query to agent-svc, streaming SSE results back."""
 
     async def proxy_stream():
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream(
                 "POST",
                 ANSWER_URL,
