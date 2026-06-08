@@ -1,6 +1,6 @@
 # ADR-0029: Service-Level Metrics for semantic-svc
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Deciders:** Magnus Hedemark, Jasper (AI Agent)
 
