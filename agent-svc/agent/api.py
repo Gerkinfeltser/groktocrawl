@@ -258,7 +258,25 @@ async def search(request: Request, body: SearchRequest):
                     data[src] = search_results
         else:
             data["web"] = search_results
-        return SearchResponse(data=data)
+
+        # Rich mode: scrape results and synthesize enriched content
+        output = None
+        if body.search_type == "rich" and results:
+            from .research import run_rich_search
+
+            output = await run_rich_search(
+                search_results=results,
+                query=body.query,
+                limit=body.limit,
+                output_schema=body.output_schema,
+                system_prompt=body.system_prompt,
+                scraper_url=request.app.state.scraper_url,
+                llm_base_url=request.app.state.llm_base_url,
+                llm_api_key=request.app.state.llm_api_key,
+                llm_model=request.app.state.llm_model,
+            )
+
+        return SearchResponse(data=data, output=output)
     finally:
         await searxng.close()
 

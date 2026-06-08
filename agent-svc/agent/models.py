@@ -98,8 +98,11 @@ class BatchScrapeRequest(BaseModel):
 class SearchRequest(BaseModel):
     query: str
     limit: int = 5
+    search_type: str = "fast"  # "fast" | "rich"
     categories: list[str] | None = None
     sources: list[str] | None = None
+    output_schema: dict[str, Any] | None = None  # JSON Schema for structured extraction
+    system_prompt: str | None = None  # Guidance for synthesis
 
 
 class SearchResult(BaseModel):
@@ -111,6 +114,7 @@ class SearchResult(BaseModel):
 class SearchResponse(BaseModel):
     success: bool = True
     data: dict = Field(default_factory=lambda: {"web": [], "images": [], "news": []})
+    output: dict[str, Any] | None = None  # Present only when output_schema provided
 
 
 class MapRequest(BaseModel):

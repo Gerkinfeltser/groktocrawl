@@ -5,6 +5,7 @@ Also provides the extract endpoint: scrape given URLs → LLM → structured dat
 
 import json
 import logging
+from typing import Any
 
 from .llm import LLMClient
 from .searxng_client import SearXNGClient
@@ -684,5 +685,158 @@ async def run_answer_stream(
 
     finally:
         await searxng.close()
+        await scraper.close()
+        await llm.close()
+
+
+RICH_SEARCH_SYSTEM_PROMPT = """You are a search result enrichment engine. Your job is to take raw web search results
+and produce improved output without inventing information.
+
+Given a list of search results (each with url, title, and full page content), produce
+enriched results by:
+
+1. Writing a longer, more informative description for each result — 2-3 sentences that
+   capture the key information from the page content relevant to the search query.
+
+2. If an output_schema is provided, extract structured data from the page content
+   matching the schema. Each extracted field must be grounded in the source content.
+   Include a grounding field mapping each output field to the source URL.
+
+Do NOT:
+- Change URLs or titles
+- Invent information not present in the page content
+- Omit results — every result gets a description
+- Return markdown formatting in descriptions (plain text only)
+
+When system_prompt is provided, use it to guide your preferences (source selection,
+recency, strictness)."""
+
+
+async def run_rich_search(
+    search_results: list[dict],
+    query: str,
+    limit: int = 5,
+    output_schema: dict[str, Any] | None = None,
+    system_prompt: str | None = None,
+    scraper_url: str = "http://scraper-svc:8001",
+    llm_base_url: str = "https://api.openai.com/v1",
+    llm_api_key: str = "",
+    llm_model: str = "gpt-4o-mini",
+) -> dict[str, Any] | None:
+    """Enrich search results with scraped content and optional structured extraction.
+
+    Returns dict with keys: content (structured data) and grounding (citations),
+    or None if no results could be enriched.
+    """
+    import time
+
+    start = time.monotonic()
+    scraper = ScraperClient(scraper_url)
+    llm = LLMClient(llm_base_url, llm_api_key, llm_model)
+
+    try:
+        top_results = search_results[:limit]
+
+        # Scrape top results
+        enriched = []
+        for r in top_results:
+            url = r.get("url", "")
+            if not url:
+                continue
+            try:
+                resp = await scraper.scrape(url)
+                if resp.get("success") and resp.get("data", {}).get("markdown"):
+                    content = resp["data"]["markdown"][:3000]  # Trim to 3K chars
+                    enriched.append({
+                        "url": url,
+                        "title": r.get("title", ""),
+                        "content": content,
+                    })
+                else:
+                    enriched.append({
+                        "url": url,
+                        "title": r.get("title", ""),
+                        "content": r.get("description", ""),
+                    })
+            except Exception:
+                enriched.append({
+                    "url": url,
+                    "title": r.get("title", ""),
+                    "content": r.get("description", ""),
+                })
+
+        if not enriched:
+            return None
+
+        # Build context for LLM
+        context_parts = []
+        for i, item in enumerate(enriched, start=1):
+            context_parts.append(
+                f"[{i}] URL: {item['url']}\nTitle: {item['title']}\nContent: {item['content']}"
+            )
+
+        context = "\n\n---\n\n".join(context_parts)
+
+        # Build prompt
+        prompt_parts = [
+            f"Search query: {query}",
+            f"\nSearch results with full content:\n\n{context}",
+        ]
+
+        if output_schema:
+            schema_json = json.dumps(output_schema, indent=2)
+            prompt_parts.append(
+                f"\nExtract structured data matching this JSON Schema:\n```json\n{schema_json}\n```"
+            )
+
+        prompt = "\n".join(prompt_parts)
+
+        # LLM call for enrichment or structured extraction
+        effective_system = system_prompt or RICH_SEARCH_SYSTEM_PROMPT
+        content = await llm.generate(
+            system_prompt=effective_system,
+            user_prompt=prompt,
+        )
+
+        result: dict[str, Any] = {}
+
+        if output_schema:
+            # Try to parse structured JSON from the response
+            try:
+                parsed = json.loads(content)
+                result["content"] = parsed
+            except json.JSONDecodeError:
+                # Extract JSON block if wrapped in markdown
+                if "```json" in content:
+                    block = content.split("```json")[1].split("```")[0].strip()
+                    try:
+                        result["content"] = json.loads(block)
+                    except json.JSONDecodeError:
+                        result["content"] = content
+                else:
+                    result["content"] = content
+
+            # Build grounding citations
+            grounding = []
+            for item in enriched:
+                grounding.append({
+                    "url": item["url"],
+                    "title": item["title"],
+                })
+            result["grounding"] = grounding
+        else:
+            # Enrichment mode: parse the improved descriptions
+            result["content"] = content
+            result["grounding"] = [
+                {"url": item["url"], "title": item["title"]}
+                for item in enriched
+            ]
+
+        elapsed = int((time.monotonic() - start) * 1000)
+        logger.info("Rich search completed in %dms for query: %s", elapsed, query)
+
+        return result
+
+    finally:
         await scraper.close()
         await llm.close()

@@ -214,14 +214,21 @@ class Client:
         scrape: bool = False,
         categories: Optional[list[str]] = None,
         sources: Optional[list[str]] = None,
+        search_type: str = "fast",
+        output_schema: Optional[dict] = None,
+        system_prompt: Optional[str] = None,
     ) -> Dict[str, Any]:
-        data: Dict[str, Any] = {"query": query, "limit": limit}
+        data: Dict[str, Any] = {"query": query, "limit": limit, "search_type": search_type}
         if scrape:
             data["scrapeOptions"] = {"formats": ["markdown"]}
         if categories:
             data["categories"] = categories
         if sources:
             data["sources"] = sources
+        if output_schema:
+            data["output_schema"] = output_schema
+        if system_prompt:
+            data["system_prompt"] = system_prompt
         return self._request("POST", "/search", json_data=data)
 
     def map_urls(
@@ -428,17 +435,36 @@ def cmd_search(client: Client, args: argparse.Namespace) -> None:
         return
 
     try:
+        # Parse output_schema from JSON string or file
+        output_schema = None
+        if args.output_schema:
+            try:
+                if args.output_schema.startswith("@"):
+                    with open(args.output_schema[1:]) as f:
+                        output_schema = json.loads(f.read())
+                else:
+                    output_schema = json.loads(args.output_schema)
+            except (json.JSONDecodeError, FileNotFoundError) as e:
+                die(f"Invalid output_schema: {e}")
+
         result = client.search(
             query=args.query, limit=args.limit, scrape=args.scrape_results,
             categories=args.categories, sources=args.sources,
+            search_type=args.search_type,
+            output_schema=output_schema,
+            system_prompt=args.system_prompt,
         )
     except ApiError as e:
         die(str(e))
 
     data = result.get("data", {}).get("web", [])
 
+    # Show structured output if present
     if JSON_OUTPUT:
-        emit("", {"results": data, "query": args.query})
+        output_data = {"results": data, "query": args.query}
+        if result.get("output"):
+            output_data["output"] = result["output"]
+        emit("", output_data)
         return
 
     if not data:
@@ -1162,6 +1188,9 @@ def make_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--scrape-results", action="store_true", help="Also scrape each result for full content")
     p_search.add_argument("--sources", nargs="+", choices=["web", "news", "images", "video", "social"], help="Source types to search (Firecrawl v2)")
     p_search.add_argument("--categories", nargs="+", help="Content categories: research, github, pdf, news, science, it (mapped to SearXNG equivalents)")
+    p_search.add_argument("--search-type", default="fast", choices=["fast", "rich"], help="Search mode: fast (default, <1s) or rich (scraped excerpts + synthesis, 1-3s)")
+    p_search.add_argument("--output-schema", help="JSON Schema for structured extraction (JSON string or @file.json)")
+    p_search.add_argument("--system-prompt", help="Guidance for synthesis (e.g., 'Prefer official sources')")
 
     p_map = subparsers.add_parser("map", help="Discover URLs on a site")
     p_map.add_argument("url", help="Site URL to map")
