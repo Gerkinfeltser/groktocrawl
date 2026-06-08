@@ -19,6 +19,62 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "agent-svc"))
 
 from agent.research import _scrape_urls
 
+# ── Video-platform filtering ─────────────────────────────────────
+
+
+def test_is_video_platform_url_youtube() -> None:
+    """Standard YouTube watch URLs are correctly identified."""
+    from agent.research import _is_video_platform_url
+
+    assert _is_video_platform_url("https://www.youtube.com/watch?v=abc12345678") is True
+    assert _is_video_platform_url("https://youtube.com/watch?v=abc12345678") is True
+    assert _is_video_platform_url("https://youtu.be/abc12345678") is True
+    assert _is_video_platform_url("https://m.youtube.com/watch?v=abc12345678") is True
+    assert _is_video_platform_url("https://youtube.com/shorts/abc12345678") is True
+
+
+def test_is_video_platform_url_non_video() -> None:
+    """Non-video domains are not flagged."""
+    from agent.research import _is_video_platform_url
+
+    assert _is_video_platform_url("https://en.wikipedia.org/wiki/Paris") is False
+    assert _is_video_platform_url("https://github.com/groktopus/groktocrawl") is False
+    assert _is_video_platform_url("https://example.com/article") is False
+
+
+def test_is_video_platform_url_tiktok_instagram() -> None:
+    """TikTok and Instagram URLs are also video-first platforms."""
+    from agent.research import _is_video_platform_url
+
+    assert _is_video_platform_url("https://www.tiktok.com/@user/video/123") is True
+    assert _is_video_platform_url("https://tiktok.com/@user/video/123") is True
+    assert _is_video_platform_url("https://vm.tiktok.com/abcde/") is True
+    assert _is_video_platform_url("https://www.instagram.com/p/abc123/") is True
+    assert _is_video_platform_url("https://instagram.com/reel/abc123/") is True
+
+
+def test_url_splitting_preserves_ordering() -> None:
+    """Preferred URLs keep their order; deprioritized go to the fallback list."""
+    from agent.research import _is_video_platform_url
+
+    urls = [
+        "https://en.wikipedia.org/wiki/A",
+        "https://www.youtube.com/watch?v=abc12345678",
+        "https://en.wikipedia.org/wiki/B",
+        "https://youtu.be/abc12345678",
+    ]
+    preferred = [u for u in urls if not _is_video_platform_url(u)]
+    deprioritized = [u for u in urls if _is_video_platform_url(u)]
+
+    assert preferred == [
+        "https://en.wikipedia.org/wiki/A",
+        "https://en.wikipedia.org/wiki/B",
+    ]
+    assert deprioritized == [
+        "https://www.youtube.com/watch?v=abc12345678",
+        "https://youtu.be/abc12345678",
+    ]
+
 
 class MockScraper:
     """Mock scraper client that simulates scrape results at configurable speeds.
