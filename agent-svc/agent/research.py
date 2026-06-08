@@ -122,6 +122,156 @@ async def run_research(
         await llm.close()
 
 
+async def run_research_stream(
+    prompt: str,
+    urls: list[str] | None = None,
+    schema: dict | None = None,
+    searxng_url: str = "http://searxng:8080",
+    scraper_url: str = "http://scraper-svc:8001",
+    llm_base_url: str = "https://api.openai.com/v1",
+    llm_api_key: str = "",
+    llm_model: str = "gpt-4o-mini",
+    requested_model: str | None = None,
+):
+    """Streaming version of run_research. Yields SSE-suitable dicts.
+
+    Phase 1 - Discovery: search + scrape, yielding progress events.
+    Phase 2 - Synthesis: LLM token stream (or full response for schema-based output).
+
+    Yields:
+      {"type": "sources_pending", "sources": [...]} — search results (before scrape)
+      {"type": "source_scraped", "url": "...", "title": "...", "chars": N} — each scraped page
+      {"type": "token", "content": "..."} — individual tokens from the LLM (no schema)
+      {"type": "done", "result": "...", "sources": [...], "latency_ms": N} — final
+      {"type": "error", "content": "..."} — error
+    """
+    import time
+    start = time.monotonic()
+
+    searxng = SearXNGClient(searxng_url)
+    scraper = ScraperClient(scraper_url)
+    effective_model = requested_model if requested_model and requested_model != "default" else llm_model
+    llm = LLMClient(llm_base_url, llm_api_key, effective_model)
+
+    try:
+        target_urls = list(urls) if urls else []
+        search_results = []
+        if not target_urls:
+            logger.info("Research stream: searching for: %s", prompt)
+            search_results, _health = await searxng.search(prompt, limit=10)
+            target_urls = [r["url"] for r in search_results if r.get("url")]
+
+        # Yield pending sources for progress visibility
+        pending_sources = [
+            {"url": r["url"], "title": r.get("title", ""), "relevance": r.get("description", "")}
+            for r in search_results if r.get("url")
+        ] if not urls else [{"url": u, "title": "", "relevance": ""} for u in urls]
+        yield {"type": "sources_pending", "sources": pending_sources}
+
+        # Phase 1: Scrape with progress events
+        logger.info("Research stream: scraping URLs")
+        documents: list[str] = []
+        source_details: list[dict] = []
+        import asyncio
+        semaphore = asyncio.Semaphore(2)
+        url_timeout = 20
+
+        async def _scrape_one(url: str) -> tuple[str | None, dict | None]:
+            async with semaphore:
+                try:
+                    result = await asyncio.wait_for(scraper.scrape(url), timeout=url_timeout)
+                    if result.get("success") and result.get("data", {}).get("markdown"):
+                        md = result["data"]["markdown"]
+                        domain = urlparse(url).netloc
+                        doc = f"Source: {url} (domain: {domain})\n\n{md[:8000]}"
+                        src = {"url": url, "source": result["data"].get("source", "unknown"), "char_count": len(md)}
+                        return doc, src
+                    else:
+                        logger.warning("Failed to scrape %s: %s", url, result.get("error"))
+                        return None, None
+                except asyncio.TimeoutError:
+                    logger.warning("Timeout scraping %s after %ss", url, url_timeout)
+                    return None, None
+                except Exception as e:
+                    logger.warning("Error scraping %s: %s", url, e)
+                    return None, None
+
+        pending = list(target_urls)
+        tasks: set[asyncio.Task] = set()
+        task_to_url: dict[asyncio.Task, str] = {}
+
+        while pending or tasks:
+            while len(tasks) < 2 and pending:
+                url = pending.pop(0)
+                task = asyncio.create_task(_scrape_one(url))
+                task_to_url[task] = url
+                tasks.add(task)
+
+            if not tasks:
+                break
+
+            done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+            for task in done:
+                doc, src = task.result()
+                url = task_to_url.pop(task, "")
+                if doc and src:
+                    documents.append(doc)
+                    source_details.append(src)
+                    yield {"type": "source_scraped", "url": src["url"], "source": src["source"], "chars": src["char_count"]}
+
+        context = "\n\n---\n\n".join(documents) if documents else ""
+
+        if not context:
+            elapsed = int((time.monotonic() - start) * 1000)
+            yield {"type": "sources", "sources": []}
+            yield {"type": "done", "result": "I was unable to find or scrape any relevant web pages.", "sources": [], "latency_ms": elapsed}
+            return
+
+        # Phase 2: Synthesis
+        # If schema is provided, use synchronous generation (structured JSON output)
+        if schema:
+            answer = await llm.generate(
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=prompt,
+                context=context,
+                schema=schema,
+            )
+            _validate_json_if_schema(answer, schema)
+            source_list = [s["url"] for s in source_details]
+            elapsed = int((time.monotonic() - start) * 1000)
+            yield {"type": "sources", "sources": source_list}
+            yield {"type": "done", "result": answer, "sources": source_list, "latency_ms": elapsed}
+            return
+
+        # No schema — stream tokens from the LLM
+        yield {"type": "sources", "sources": [s["url"] for s in source_details]}
+
+        full_answer = ""
+        async for event in llm.generate_stream(
+            system_prompt=SYSTEM_PROMPT,
+            user_prompt=prompt,
+            context=context,
+        ):
+            if event["type"] == "token":
+                full_answer += event["content"]
+                yield {"type": "token", "content": event["content"]}
+            elif event["type"] == "error":
+                yield {"type": "error", "content": event["content"]}
+                return
+            elif event["type"] == "done":
+                full_answer = event["full_content"]
+
+        source_list = [s["url"] for s in source_details]
+        elapsed = int((time.monotonic() - start) * 1000)
+        yield {"type": "done", "result": full_answer, "sources": source_list, "latency_ms": elapsed}
+
+    finally:
+        await searxng.close()
+        await scraper.close()
+        await llm.close()
+
+
 async def run_extract(
     urls: list[str],
     prompt: str | None = None,

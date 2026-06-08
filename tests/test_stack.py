@@ -410,3 +410,36 @@ def test_answer_streaming_returns_sse_events():
     assert isinstance(done_event.get("answer"), str)
     assert done_event["latency_ms"] > 0
 
+
+def test_agent_streaming_returns_sse_events():
+    """POST /v2/agent with stream:true returns SSE events."""
+    r = httpx.post(AGENT + "/v2/agent", json={
+        "prompt": "What is the pricing on the fixture site?",
+        "stream": True,
+    }, timeout=180)
+    assert r.status_code == 200
+    assert r.headers.get("content-type", "").startswith("text/event-stream")
+    body = r.text
+
+    # Should have at least a done event
+    assert "data:" in body
+    assert "[DONE]" in body
+
+    # Parse events and verify structure
+    events = []
+    for line in body.split("\n"):
+        if line.startswith("data: ") and line[6:] != "[DONE]":
+            import json
+            events.append(json.loads(line[6:]))
+
+    event_types = {e.get("type") for e in events}
+
+    # Should have: sources_pending (maybe), source_scraped events (maybe),
+    # token events (maybe), and done
+    assert "done" in event_types, f"Missing 'done' event. Types found: {event_types}"
+
+    done_event = next(e for e in events if e.get("type") == "done")
+    assert "result" in done_event
+    assert isinstance(done_event.get("result"), str)
+    assert done_event["latency_ms"] > 0
+

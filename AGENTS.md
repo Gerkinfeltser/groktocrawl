@@ -61,6 +61,15 @@ The agent service uses an OpenAI-compatible client. Swap the provider by changin
 
 **Search parameters:** `POST /v2/search` accepts Firecrawl v2 `sources` and `categories` dimensions alongside `query` and `limit`. These are translated to SearXNG categories — see `searxng_client.py` for the translation maps and `docs/adr/0013-search-architecture-with-vertical-categories.md` for the architecture. The CLI exposes `--sources` (web, news, images, video, social) and `--categories` (research, github, pdf, etc.) flags.
 
+### Agent Endpoint with SSE Streaming
+
+`POST /v2/agent` now supports SSE streaming via `stream: true`. Two-phase protocol:
+- **Discovery:** `sources_pending` (search results found), `source_scraped` (URL fetched) — shown as they happen
+- **Synthesis:** `token` events stream the LLM's output token by token
+- **Final:** `done` event with full `result`, `sources` list, and `latency_ms`
+
+When `stream` is omitted, the existing create→poll pattern is used. The CLI defaults to streaming with `--sync` to opt out.
+
 ### Grounded Q&A (`POST /v2/answer`)
 
 A synchronous single-turn Q&A endpoint that bridges `/v2/search` and `/v2/agent`: search → scrape top results → LLM synthesis with inline citations. Designed for 1-3s latency. Request fields: `query` (required), `num_sources` (1-20, default 5), `model` (per-request LLM override), `stream` (boolean, SSE streaming). Returns `answer` (markdown with `[N]` citation markers), `sources` (list of `{url, title, relevance}`), `citations` (index→URL mapping), `search_type`, and `latency_ms`. When `stream: true`, delivers SSE events: `sources`, `token` (individual tokens), `done` (final), and `error`.
