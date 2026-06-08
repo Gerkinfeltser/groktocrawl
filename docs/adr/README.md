@@ -47,5 +47,6 @@ An Architecture Decision Record captures an important architectural decision mad
 | 0026 | [Phase 2 Semantic Search — Persistent Vector Index](0026-phase2-vector-index.md) | accepted |
 | 0027 | [Smarter Index Retention — Domain TTLs, Frequency Weighting, Access Boosting](0027-smarter-index-retention.md) | proposed |
 | 0028 | [Embedding Model Migration Path for Index Rebuilds](0028-embedding-model-migration-path.md) | proposed |
+| 0029 | [Service-Level Metrics for semantic-svc](0029-service-level-metrics-for-semantic-svc.md) | proposed |
 
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full ADR workflow: when to write an ADR, how to number it, and how to get it reviewed in a PR.

@@ -18,7 +18,10 @@ Phase 4 endpoints (this file):
 - POST /index/migrate/start — start embedding model migration
 - GET /index/migrate/status — migration progress
 - POST /index/migrate/cutover — switch to new model
-- Named vector support for multi-model coexistence (see ADR-0028)
+|- Named vector support for multi-model coexistence (see ADR-0028)
+|
+|Observability (ADR-0029):
+|- GET /metrics — Prometheus-compatible OpenMetrics endpoint (stdlib, no deps)
 """
 
 import asyncio
@@ -31,11 +34,13 @@ import os
 import time
 import urllib.parse
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
 from qdrant_client import QdrantClient, models
 from sentence_transformers import SentenceTransformer, CrossEncoder
 import numpy as np
+
+from metrics import METRICS
 
 logger = logging.getLogger(__name__)
 
@@ -345,6 +350,10 @@ async def _evict_if_needed(qdrant: QdrantClient):
             points_selector=models.PointIdsList(points=to_delete),
         )
         new_count = qdrant.count(COLLECTION_NAME).count
+        METRICS.counter(
+            "groktocrawl_index_evictions_total",
+            "Cumulative evictions from the vector index",
+        ).inc(value=len(to_delete))
         logger.info(
             "Scored eviction: removed %d documents (score range: %.4f – %.4f). "
             "Index at %d / %d",
@@ -597,6 +606,33 @@ def _build_index_payload(url: str, title: str, existing_payload: dict | None) ->
     return payload
 
 
+# ── Metrics middleware ──────────────────────────────────────────────
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    """Record request count and duration for all endpoints except /metrics."""
+    path = request.url.path
+    if path == "/metrics":
+        return await call_next(request)
+
+    start = time.time()
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        duration = time.time() - start
+        METRICS.counter(
+            "groktocrawl_search_requests_total",
+            "Total requests by endpoint",
+            ["endpoint"],
+        ).inc({"endpoint": path})
+        METRICS.histogram(
+            "groktocrawl_index_query_duration_seconds",
+            "Request latency by endpoint",
+            ["endpoint"],
+        ).observe({"endpoint": path}, duration)
+
+
 # ── Endpoints ────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -608,7 +644,13 @@ async def health():
 async def embed(body: EmbedRequest):
     """Embed one or more texts into normalized vectors."""
     model = _get_embed_model()
+    embed_start = time.time()
     embeddings = model.encode(body.input, normalize_embeddings=True)
+    embed_duration = time.time() - embed_start
+    METRICS.histogram(
+        "groktocrawl_index_embeddings_duration_seconds",
+        "Embedding model inference latency",
+    ).observe({}, embed_duration)
     return EmbedResponse(embeddings=embeddings.tolist())
 
 
@@ -778,6 +820,7 @@ async def index_stats():
     """Return index size and configuration."""
     qdrant = await _ensure_qdrant()
     count = qdrant.count(COLLECTION_NAME).count
+    METRICS.gauge("groktocrawl_index_docs_total", "Current document count in the vector index").set(value=float(count))
     return IndexStatsResponse(total_docs=count, max_docs=MAX_DOCS)
 
 
@@ -893,3 +936,20 @@ async def migrate_cutover():
         "message": f"Queries now using '{target_nv}'. "
                    f"Update ACTIVE_EMBED_MODEL env var and restart to persist.",
     }
+
+
+# ── Metrics endpoint ──────────────────────────────────────────────
+
+
+@app.get("/metrics")
+async def metrics():
+    """Expose OpenMetrics-formatted metrics for Prometheus scraping.
+
+    Uses the same stdlib-based metrics collector from agent-svc (see
+    ADR-0018 / ADR-0029) — no external metrics library required.
+    """
+    text = METRICS.generate_openmetrics()
+    return Response(
+        content=text,
+        media_type="application/openmetrics-text; version=1.0.0",
+    )
