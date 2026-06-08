@@ -57,12 +57,24 @@ def _get_playwright_proxy() -> dict | None:
     """Get Playwright-compatible proxy config from env var.
 
     Parses http://user:pass@host:port into Playwright's format.
+    Handles URLs with no explicit port and IPv6 addresses (restores brackets).
     Uses context-level proxy (browser.new_context(proxy=...)) for job isolation.
     """
     if not SCRAPER_PROXY_URL:
         return None
     parsed = urlparse(SCRAPER_PROXY_URL)
-    config = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"}
+
+    # Re-bracket IPv6 hostnames (urlparse strips them)
+    hostname = parsed.hostname or "localhost"
+    host = f"[{hostname}]" if ":" in hostname else hostname
+
+    # Only include port when explicitly present
+    if parsed.port is not None:
+        server = f"{parsed.scheme}://{host}:{parsed.port}"
+    else:
+        server = f"{parsed.scheme}://{host}"
+
+    config = {"server": server}
     if parsed.username:
         config["username"] = parsed.username
     if parsed.password:
@@ -71,12 +83,18 @@ def _get_playwright_proxy() -> dict | None:
 
 
 def _redact_proxy_url(url: str) -> str:
-    """Redact password from a proxy URL for safe logging."""
-    if "@" in url:
-        user_part = url.split("@")[0]
-        host_part = url.split("@")[1]
-        username = user_part.split(":")[0] if ":" in user_part else user_part
-        return f"{username}:***@{host_part}"
+    """Redact password from a proxy URL for safe logging.
+
+    Uses urlparse to extract the username, preserving the host:port structure
+    while masking the password.
+    """
+    if not url:
+        return url
+    parsed = urlparse(url)
+    if parsed.username:
+        hostname = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port is not None else ""
+        return f"{parsed.username}:***@{hostname}{port}"
     return url
 
 
@@ -1022,8 +1040,15 @@ async def fetch_via_playwright(url: str) -> dict | None:
     try:
         pw_proxy = _get_playwright_proxy()
 
-        # Try with proxy first
-        result = await _playwright_fetch_with_proxy(url, pw_proxy)
+        # Try with proxy first — wrap in its own try/except so exceptions
+        # from unreachable proxies trigger the fail-open retry rather than
+        # falling through to the generic "Tier 3 miss" handler
+        try:
+            result = await _playwright_fetch_with_proxy(url, pw_proxy)
+        except Exception as e:
+            logger.warning("Proxy (%s) failed for %s: %s", pw_proxy.get("server", "unknown") if pw_proxy else "none", url, e)
+            result = None
+
         if result is not None:
             return result
 

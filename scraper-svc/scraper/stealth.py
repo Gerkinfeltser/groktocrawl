@@ -66,16 +66,19 @@ async def create_stealth_browser(playwright):
     )
 
 
-async def create_stealth_context(browser):
+async def create_stealth_context(browser, **kwargs):
     """Create a browser context with stealth settings.
 
     Args:
         browser: A Browser instance from create_stealth_browser.
+        **kwargs: Additional keyword arguments forwarded to browser.new_context()
+            (e.g., proxy config for context-level proxy assignment).
 
     Returns:
         A BrowserContext with realistic fingerprint settings.
     """
     logger.debug("Creating stealth browser context")
-    context = await browser.new_context(**STEALTH_CONTEXT_KWARGS)
+    context_kwargs = {**STEALTH_CONTEXT_KWARGS, **kwargs}
+    context = await browser.new_context(**context_kwargs)
     await context.add_init_script(STEALTH_INIT_SCRIPT)
     return context
