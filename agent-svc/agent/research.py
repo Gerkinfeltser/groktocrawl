@@ -398,6 +398,35 @@ def _validate_json_if_schema(answer: str, schema: dict | None) -> None:
         logger.warning("LLM response not valid JSON despite schema: %s", e)
 
 
+# ── Video-platform URL filtering ────────────────────────────────
+# Domains whose primary content is audio-visual (video, audio,
+# short-form) rather than text.  Transcripts extracted from these
+# platforms are low-signal for factual text queries and pollute the
+# LLM context.  They are deprioritised — only used as a fallback
+# when text sources can't fill the ``min_sources`` quota.
+_VIDEO_PLATFORM_DOMAINS: frozenset[str] = frozenset({
+    "youtube.com",
+    "youtu.be",
+    "m.youtube.com",
+    "tiktok.com",
+    "www.tiktok.com",
+    "vm.tiktok.com",
+    "instagram.com",
+    "www.instagram.com",
+})
+
+
+def _is_video_platform_url(url: str) -> bool:
+    """Return True when *url* belongs to a video-first platform."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    # Strip leading "www." for comparison (the frozenset includes
+    # both canonicalised and www-prefixed variants).
+    return hostname in _VIDEO_PLATFORM_DOMAINS or hostname.removeprefix("www.") in _VIDEO_PLATFORM_DOMAINS
+
+
 ANSWER_SYSTEM_PROMPT = """You are GroktoCrawl, a helpful Q&A agent. Your job is to answer
 the user's question using ONLY the web search results provided below.
 
@@ -440,8 +469,31 @@ async def run_answer(
         search_results, _health = await searxng.search(query, limit=num_sources * 2)
         target_urls = [r["url"] for r in search_results if r.get("url")]
 
-        # Step 2: Scrape (keep trying until we have num_sources or exhaust the pool)
-        documents, source_details = await _scrape_urls(target_urls, scraper, min_sources=num_sources, max_attempts=num_sources * 2)
+        # Step 2: Scrape (prefer text sources, use video platforms as fallback)
+        preferred = [u for u in target_urls if not _is_video_platform_url(u)]
+        deprioritized = [u for u in target_urls if _is_video_platform_url(u)]
+
+        if deprioritized:
+            logger.info(
+                "Answer: %d preferred + %d video-platform URLs (deprioritized)",
+                len(preferred), len(deprioritized),
+            )
+
+        documents, source_details = await _scrape_urls(
+            preferred, scraper, min_sources=num_sources, max_attempts=num_sources * 2,
+        )
+
+        if len(documents) < num_sources and deprioritized:
+            logger.info(
+                "Answer: %d/%d from preferred sources, falling back to video-platform URLs",
+                len(documents), num_sources,
+            )
+            remaining = num_sources - len(documents)
+            more_docs, more_details = await _scrape_urls(
+                deprioritized, scraper, min_sources=remaining, max_attempts=remaining * 2,
+            )
+            documents.extend(more_docs)
+            source_details.extend(more_details)
 
         # Step 3: Build context with source markers
         context_parts = []
@@ -549,8 +601,31 @@ async def run_answer_stream(
         ]
         yield {"type": "sources_pending", "sources": pending_sources}
 
-        # Step 2: Scrape (keep trying until we have num_sources or exhaust the pool)
-        documents, source_details = await _scrape_urls(target_urls, scraper, min_sources=num_sources, max_attempts=num_sources * 2)
+        # Step 2: Scrape (prefer text sources, use video platforms as fallback)
+        preferred = [u for u in target_urls if not _is_video_platform_url(u)]
+        deprioritized = [u for u in target_urls if _is_video_platform_url(u)]
+
+        if deprioritized:
+            logger.info(
+                "Answer (stream): %d preferred + %d video-platform URLs (deprioritized)",
+                len(preferred), len(deprioritized),
+            )
+
+        documents, source_details = await _scrape_urls(
+            preferred, scraper, min_sources=num_sources, max_attempts=num_sources * 2,
+        )
+
+        if len(documents) < num_sources and deprioritized:
+            logger.info(
+                "Answer (stream): %d/%d from preferred sources, falling back to video-platform URLs",
+                len(documents), num_sources,
+            )
+            remaining = num_sources - len(documents)
+            more_docs, more_details = await _scrape_urls(
+                deprioritized, scraper, min_sources=remaining, max_attempts=remaining * 2,
+            )
+            documents.extend(more_docs)
+            source_details.extend(more_details)
 
         # Step 3: Build context
         context_parts = []
