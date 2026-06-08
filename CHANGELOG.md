@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Smarter index retention — domain TTLs, frequency weighting, access boosting (ADR-0027)** — replaces the simple LRU eviction in the Qdrant vector index with a scoring function that considers content type, crawl frequency, and access patterns. New payload fields: `domain_category`, `crawl_count`, `access_count`, `first_indexed_at`, `last_indexed_at`, `last_accessed_at`, `retention_score`. Domain classification maps URLs to categories (news/social/blog/api/unknown/reference/docs) with multipliers from 0.3–1.2. Access tracking fires after search result retrieval. News and social content evicts first; reference and docs content persists longest. See `docs/adr/0027-smarter-index-retention.md`. (closes #152)
+- **Domain classification for indexed pages** — heuristic-based URL categorization without external dependencies. Covers news, social, blog, API, reference, and docs domains with known-domain lists and prefix patterns. Unknown domains default to a conservative 0.8 multiplier.
+- **Search access tracking** — `POST /search/vector` now fire-and-forgets `access_count` and `last_accessed_at` updates for returned results. Accessed pages get a retention boost at eviction time.
+- **Crawl frequency tracking** — re-indexing the same URL increments `crawl_count` in the payload, giving frequently re-crawled pages (monitors, recurring jobs) a retention boost.
+- **Title extraction in indexing hook** — `_index_page_async()` now extracts titles from scrape response metadata (og:title → meta:title → fallback) instead of sending empty strings.
+
+### Changed
+
+- **`_evict_if_needed()` — LRU to scoring-based eviction** — instead of scrolling and deleting the first N points, the function now scrolls all points with payloads, computes a composite retention score for each, and deletes the lowest-scoring documents. Score components: domain multiplier × recency factor + access boost + crawl boost. Eviction includes a 2% buffer to avoid thrashing.
+- **Index payload enriched** — each Qdrant point now carries domain metadata, crawl count, access count, and retention score alongside existing `url` and `title` fields.
+
 - **Search type spectrum — fast and rich search modes (ADR-0023)** — `POST /v2/search` now accepts `search_type` (default: `fast`). `fast` mode is identical to current behavior (<1s). `rich` mode scrapes top results and enriches with LLM synthesis (1-3s). Optional `output_schema` enables structured data extraction from search results in a single call. Optional `system_prompt` guides synthesis behavior. CLI exposes `--search-type` (fast/rich), `--output-schema` (JSON or @file.json), and `--system-prompt` flags. See `docs/adr/0023-search-type-spectrum-fast-and-rich.md`.
 
 - **Agent SSE streaming — live progress and token streaming for deep research (ADR-0022)** — `POST /v2/agent` now accepts `stream: true` for Server-Sent Events. Two-phase streaming: discovery events (`sources_pending`, `source_scraped`) show sources as they're found and scraped, followed by token-by-token LLM output (`token` events). Falls back to create→poll pattern when `stream` is omitted. Reuses the SSE event protocol from `POST /v2/answer` (ADR-0017). CLI defaults to streaming with `--sync` to opt out. See `docs/adr/0022-agent-sse-streaming.md`.

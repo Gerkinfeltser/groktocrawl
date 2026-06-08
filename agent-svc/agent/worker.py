@@ -74,9 +74,15 @@ async def _process_crawl_async(
         result = await scraper.scrape(url)
         pages = []
         if result.get("success"):
-            pages.append({"url": url, "markdown": result["data"].get("markdown", "")})
+            data = result["data"]
+            pages.append({"url": url, "markdown": data.get("markdown", "")})
+            # Extract title from metadata if available
+            metadata = data.get("metadata") or {}
+            og = metadata.get("og") or {}
+            meta = metadata.get("meta") or {}
+            title = og.get("title") or meta.get("title") or data.get("title", "")
             asyncio.create_task(_index_page_async(
-                url, "", result["data"].get("markdown", "")[:2000]
+                url, title, data.get("markdown", "")[:2000]
             ))
         payload = {"completed": len(pages), "total": 1, "pages": pages}
         store.complete_job(job_id, payload)
@@ -110,9 +116,14 @@ async def _process_batch_scrape_async(
         for url in urls:
             result = await scraper.scrape(url)
             if result.get("success"):
-                pages.append({"url": url, "markdown": result["data"].get("markdown", "")})
+                data = result["data"]
+                pages.append({"url": url, "markdown": data.get("markdown", "")})
+                metadata = data.get("metadata") or {}
+                og = metadata.get("og") or {}
+                meta = metadata.get("meta") or {}
+                title = og.get("title") or meta.get("title") or data.get("title", "")
                 asyncio.create_task(_index_page_async(
-                    url, "", result["data"].get("markdown", "")[:2000]
+                    url, title, data.get("markdown", "")[:2000]
                 ))
         payload = {"completed": len(pages), "total": len(urls), "pages": pages}
         store.complete_job(job_id, payload)

@@ -44,6 +44,7 @@ An Architecture Decision Record captures an important architectural decision mad
 | 0023 | [Search Type Spectrum — Fast and Rich](0023-search-type-spectrum-fast-and-rich.md) | proposed |
 | 0024 | [Artifact Pyramid CLI Output](0024-artifact-pyramid-cli-output.md) | proposed |
 | 0025 | [Semantic Search Pipeline — Embedding-Based Retrieval](0025-semantic-search-pipeline.md) | proposed |
-| 0026 | [Phase 2 Semantic Search — Persistent Vector Index](0026-phase2-vector-index.md) | proposed |
+| 0026 | [Phase 2 Semantic Search — Persistent Vector Index](0026-phase2-vector-index.md) | accepted |
+| 0027 | [Smarter Index Retention — Domain TTLs, Frequency Weighting, Access Boosting](0027-smarter-index-retention.md) | proposed |
 
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full ADR workflow: when to write an ADR, how to number it, and how to get it reviewed in a PR.
