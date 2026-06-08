@@ -30,8 +30,8 @@ Examples:
   groktocrawl map https://docs.example.com --limit 50
   groktocrawl crawl https://docs.example.com --max-depth 2 --limit 20
   groktocrawl agent "What are the key announcements from Google I/O 2025?"
-  groktocrawl answer "What is the current Fed interest rate?"
-  groktocrawl answer "How tall is the Burj Khalifa?" --stream
+  groktocrawl answer "What is the current Fed interest rate?"  (streaming, default)
+  groktocrawl answer "How many moons does Jupiter have?" --sync  (wait for full answer)
 """
 
 import argparse
@@ -580,11 +580,11 @@ def cmd_answer(client: Client, args: argparse.Namespace) -> None:
         return
 
     try:
-        result = client.answer(query=args.query, num_sources=args.num_sources, stream=args.stream)
+        result = client.answer(query=args.query, num_sources=args.num_sources, stream=not args.sync)
     except ApiError as e:
         die(str(e))
 
-    if args.stream:
+    if not args.sync:
         resp = result["_stream"]
         sources_shown = False
         full_answer = ""
@@ -1178,7 +1178,7 @@ def make_parser() -> argparse.ArgumentParser:
     p_answer = subparsers.add_parser("answer", help="Grounded Q&A with citations")
     p_answer.add_argument("query", help="Natural language question")
     p_answer.add_argument("-n", "--num-sources", type=int, default=5, help="Number of sources (1-20, default: 5)")
-    p_answer.add_argument("--stream", action="store_true", help="SSE streaming mode")
+    p_answer.add_argument("--sync", action="store_true", help="Non-streaming mode (wait for full answer)")
     p_llmstxt = subparsers.add_parser("generate-llmstxt", help="Generate an llms.txt for a website")
     p_llmstxt.add_argument("url", help="Site URL to generate llms.txt for")
     p_llmstxt.add_argument("--max-pages", type=int, default=50, help="Max pages to scan (default: 50)")
