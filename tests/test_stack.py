@@ -116,6 +116,67 @@ def test_crawl_batch_search_and_map_endpoints_exist():
     assert map_resp.json()["links"]
 
 
+def test_search_fast_mode_backward_compatible():
+    """fast mode (default) returns identical response shape to current behavior."""
+    resp = httpx.post(AGENT + "/v2/search", json={
+        "query": "fixture pricing", "limit": 3, "search_type": "fast",
+    }, timeout=120)
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["success"] is True
+    assert "web" in payload["data"]
+    assert payload["output"] is None  # fast mode with no schema → no output
+
+
+def test_search_rich_mode_returns_data_and_output():
+    """rich mode scrapes and enriches results, returns output field."""
+    resp = httpx.post(AGENT + "/v2/search", json={
+        "query": "fixture pricing", "limit": 2, "search_type": "rich",
+    }, timeout=120)
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["success"] is True
+    assert "web" in payload["data"]
+    # rich mode should populate output with enriched content
+    assert payload.get("output") is not None
+    assert "content" in payload["output"]
+
+
+def test_search_rich_with_output_schema():
+    """rich mode with output_schema returns structured data."""
+    resp = httpx.post(AGENT + "/v2/search", json={
+        "query": "fixture pricing",
+        "limit": 2,
+        "search_type": "rich",
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "page_name": {"type": "string"},
+                "summary": {"type": "string"},
+            },
+        },
+    }, timeout=120)
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["success"] is True
+    output = payload.get("output")
+    assert output is not None
+    assert "content" in output
+    assert "grounding" in output
+
+
+def test_search_unknown_type_falls_back_to_fast():
+    """An unrecognized search_type should be treated as fast (default)."""
+    resp = httpx.post(AGENT + "/v2/search", json={
+        "query": "fixture", "limit": 1, "search_type": "deep",
+    }, timeout=120)
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["success"] is True
+    # Should not crash — treated as fast mode
+    assert "web" in payload["data"]
+
+
 def test_activity_endpoint_structure():
     """GET /v2/activity returns a valid response with the expected schema."""
     resp = httpx.get(AGENT + "/v2/activity", timeout=120)

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Search type spectrum — fast and rich search modes (ADR-0023)** — `POST /v2/search` now accepts `search_type` (default: `fast`). `fast` mode is identical to current behavior (<1s). `rich` mode scrapes top results and enriches with LLM synthesis (1-3s). Optional `output_schema` enables structured data extraction from search results in a single call. Optional `system_prompt` guides synthesis behavior. CLI exposes `--search-type` (fast/rich), `--output-schema` (JSON or @file.json), and `--system-prompt` flags. See `docs/adr/0023-search-type-spectrum-fast-and-rich.md`.
+
 - **Agent SSE streaming — live progress and token streaming for deep research (ADR-0022)** — `POST /v2/agent` now accepts `stream: true` for Server-Sent Events. Two-phase streaming: discovery events (`sources_pending`, `source_scraped`) show sources as they're found and scraped, followed by token-by-token LLM output (`token` events). Falls back to create→poll pattern when `stream` is omitted. Reuses the SSE event protocol from `POST /v2/answer` (ADR-0017). CLI defaults to streaming with `--sync` to opt out. See `docs/adr/0022-agent-sse-streaming.md`.
 
 - **Web portal — single-search-bar UI for human users (ADR-0021)** — new `portal-svc` container in the Docker Compose stack. A lightweight FastAPI + Jinja2 web interface with a Google-inspired search bar. Routes queries to `POST /v2/answer` with SSE streaming, displaying real-time token output with source citations and a recent queries sidebar in localStorage. One-button v0.1 (answer endpoint); deep research button placeholder reserved for v0.2 (agent SSE, issue #130). Port 8081. See `docs/adr/0021-web-portal.md`.
