@@ -72,11 +72,13 @@ flowchart LR
     end
 
     subgraph semantic_svc["Semantic Service (FastAPI)"]
-        embed["POST /embed\nBGE-M3"]
+        embed["POST /embed\nBGE-M3 / configurable"]
         rerank["POST /rerank\nCross-Encoder"]
-        index["POST /index\nStore in Qdrant"]
-        search_vector["POST /search/vector\nQuery Qdrant"]
+        index["POST /index\nStore in Qdrant\nNamed vectors"]
+        search_vector["POST /search/vector\nQuery Qdrant\nActive named vector"]
         stats["GET /index/stats"]
+        model_info["GET /index/model\nModel config + migration"]
+        migrate["POST /index/migrate/start\nGET /index/migrate/status\nPOST /index/migrate/cutover"]
     end
 
     smart_scrape --> tier1
@@ -178,3 +180,4 @@ All significant architectural decisions are documented as ADRs in `docs/adr/`. S
 | [ADR-0025](adr/0025-semantic-search-pipeline.md) | Phase 1 semantic reranking |
 | [ADR-0026](adr/0026-phase2-vector-index.md) | Phase 2 persistent vector index |
 | [ADR-0027](adr/0027-smarter-index-retention.md) | Phase 3 smarter index retention |
+| [ADR-0028](adr/0028-embedding-model-migration-path.md) | Phase 4 embedding model migration |

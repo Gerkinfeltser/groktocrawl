@@ -23,11 +23,6 @@ class SemanticClient:
         return self._client
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Embed one or more texts into normalized vectors.
-
-        Returns a list of embedding vectors, each a list of floats.
-        Vectors are L2-normalized — cosine similarity = dot product.
-        """
         client = await self._ensure_client()
         resp = await client.post(
             f"{self.base_url}/embed",
@@ -39,12 +34,6 @@ class SemanticClient:
     async def rerank(
         self, query: str, documents: list[str], top_k: int = 5
     ) -> list[dict]:
-        """Cross-encode a query against documents and return top-k.
-
-        Returns list of {"index": int, "score": float}, sorted by
-        score descending. More accurate than cosine similarity but
-        slower — O(N) cross-encoder calls.
-        """
         client = await self._ensure_client()
         resp = await client.post(
             f"{self.base_url}/rerank",
@@ -61,10 +50,6 @@ class SemanticClient:
     # ── Phase 2: Vector Index ────────────────────────────────────
 
     async def index_page(self, url: str, title: str, content: str) -> dict:
-        """Index a page in the persistent vector index.
-
-        Re-indexing the same URL updates the existing vector.
-        """
         client = await self._ensure_client()
         resp = await client.post(
             f"{self.base_url}/index",
@@ -76,10 +61,6 @@ class SemanticClient:
     async def search_vector(
         self, query: str, limit: int = 5
     ) -> list[dict]:
-        """Search the vector index by semantic similarity.
-
-        Returns list of {"url": str, "title": str, "score": float}.
-        """
         client = await self._ensure_client()
         resp = await client.post(
             f"{self.base_url}/search/vector",
@@ -87,3 +68,38 @@ class SemanticClient:
         )
         resp.raise_for_status()
         return resp.json()["results"]
+
+    # ── Phase 4: Model info and migration ─────────────────────────
+
+    async def get_model(self) -> dict:
+        """Return current embedding model config and migration state."""
+        client = await self._ensure_client()
+        resp = await client.get(f"{self.base_url}/index/model")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def start_migration(
+        self, target_model: str, target_dim: int
+    ) -> dict:
+        """Start an embedding model migration."""
+        client = await self._ensure_client()
+        resp = await client.post(
+            f"{self.base_url}/index/migrate/start",
+            json={"target_model": target_model, "target_dim": target_dim},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def migration_status(self) -> dict:
+        """Return migration progress."""
+        client = await self._ensure_client()
+        resp = await client.get(f"{self.base_url}/index/migrate/status")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def cutover(self) -> dict:
+        """Switch queries to the migrated model."""
+        client = await self._ensure_client()
+        resp = await client.post(f"{self.base_url}/index/migrate/cutover")
+        resp.raise_for_status()
+        return resp.json()

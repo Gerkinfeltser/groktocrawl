@@ -93,6 +93,9 @@ services:
     environment:
       - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
       - VECTOR_INDEX_MAX_DOCS=${VECTOR_INDEX_MAX_DOCS:-250000}
+      - EMBED_MODEL_NAME=${EMBED_MODEL_NAME:-BAAI/bge-m3}
+      - EMBED_DIM=${EMBED_DIM:-1024}
+      - ACTIVE_EMBED_MODEL=${ACTIVE_EMBED_MODEL:-v_bge-m3}
 
   qdrant:
     image: qdrant/qdrant:v1.18.2
