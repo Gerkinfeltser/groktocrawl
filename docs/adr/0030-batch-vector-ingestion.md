@@ -1,6 +1,6 @@
 # Batch Vector Ingestion via Qdrant gRPC
 
-* Status: proposed
+* Status: accepted
 * Deciders: magnus, jasper
 * Date: 2026-06-09
 
