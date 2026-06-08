@@ -675,13 +675,18 @@ async def embed(body: EmbedRequest):
     """Embed one or more texts into normalized vectors."""
     model = _get_embed_model()
     embed_start = time.time()
-    embeddings = model.encode(body.input, normalize_embeddings=True)
+    loop = asyncio.get_event_loop()
+    embeddings = await loop.run_in_executor(
+        None,
+        lambda: model.encode(body.input, normalize_embeddings=True),
+    )
+    embeddings_list = embeddings.tolist()
     embed_duration = time.time() - embed_start
     METRICS.histogram(
         "groktocrawl_index_embeddings_duration_seconds",
         "Embedding model inference latency",
     ).observe({}, embed_duration)
-    return EmbedResponse(embeddings=embeddings.tolist())
+    return EmbedResponse(embeddings=embeddings_list)
 
 
 @app.post("/rerank", response_model=RerankResponse)
@@ -725,9 +730,11 @@ async def index_page(body: IndexRequest):
         pass
 
     # Embed the content
-    embedding = model.encode(
-        body.content[:2000], normalize_embeddings=True
-    ).tolist()
+    loop = asyncio.get_event_loop()
+    embedding = await loop.run_in_executor(
+        None,
+        lambda: model.encode(body.content[:2000], normalize_embeddings=True).tolist(),
+    )
 
     # Build enriched payload
     payload = _build_index_payload(body.url, body.title, existing_payload)
@@ -791,7 +798,11 @@ async def index_batch(body: IndexBatchRequest):
     # Batch embed all content texts in one call
     contents = [p.content[:2000] for p in body.pages]
     embed_start = time.time()
-    embeddings = model.encode(contents, normalize_embeddings=True).tolist()
+    loop = asyncio.get_event_loop()
+    embeddings = await loop.run_in_executor(
+        None,
+        lambda: model.encode(contents, normalize_embeddings=True).tolist(),
+    )
     embed_duration = time.time() - embed_start
     METRICS.histogram(
         "groktocrawl_index_batch_embed_duration_seconds",
@@ -824,10 +835,13 @@ async def index_batch(body: IndexBatchRequest):
             target_name = _migration["target_model"]
             if target_name:
                 try:
-                    target_model = SentenceTransformer(target_name)
-                    target_embedding = target_model.encode(
-                        page.content[:2000], normalize_embeddings=True
-                    ).tolist()
+                    loop = asyncio.get_event_loop()
+                    target_embedding = await loop.run_in_executor(
+                        None,
+                        lambda: SentenceTransformer(target_name).encode(
+                            page.content[:2000], normalize_embeddings=True
+                        ).tolist(),
+                    )
                     target_nv = _named_vector_name(target_name)
                     vectors[target_nv] = target_embedding
                     existing_models = json.loads(payload.get("embedding_models", "[]"))
@@ -868,9 +882,11 @@ async def search_vector(body: VectorSearchRequest):
     qdrant = await _ensure_qdrant()
     model = _get_embed_model()
 
-    query_embedding = model.encode(
-        body.query, normalize_embeddings=True
-    ).tolist()
+    loop = asyncio.get_event_loop()
+    query_embedding = await loop.run_in_executor(
+        None,
+        lambda: model.encode(body.query, normalize_embeddings=True).tolist(),
+    )
 
     active_nv = _get_active_model()
 
