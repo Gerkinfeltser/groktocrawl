@@ -141,8 +141,8 @@ class IndexRequest(BaseModel):
     url: str
     title: str = ""
     content: str
-    near_dup_threshold: float | None = None  # overrides env default per-request
-    near_dup_mode: str | None = None  # "skip" | "update", overrides env default
+    near_dup_threshold: float | None = None  # overrides NEAR_DUP_THRESHOLD per-request
+    near_dup_mode: str | None = None  # "skip" | "update" — overrides NEAR_DUP_MODE per-request
 
 
 class IndexResponse(BaseModel):
