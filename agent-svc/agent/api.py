@@ -254,7 +254,6 @@ async def search(request: Request, body: SearchRequest):
         if body.retrieval_mode in ("semantic", "hybrid") and results:
             from .semantic_client import SemanticClient
             from .scraper_client import ScraperClient
-            import numpy as np
 
             semantic = SemanticClient(request.app.state.semantic_url)
             scraper = ScraperClient(request.app.state.scraper_url)
@@ -273,8 +272,8 @@ async def search(request: Request, body: SearchRequest):
                 # Embed query + document contents
                 texts = [body.query] + contents
                 embeddings = await semantic.embed(texts)
-                query_embedding = np.array(embeddings[0])
-                doc_embeddings = np.array(embeddings[1:])
+                query_embedding = embeddings[0]
+                doc_embeddings = embeddings[1:]
 
                 if body.retrieval_mode == "hybrid":
                     # Cross-encoder reranker for merged keyword+semantic scoring
@@ -287,9 +286,14 @@ async def search(request: Request, body: SearchRequest):
                     new_order = [item["index"] for item in reranked]
                     search_results = [search_results[i] for i in new_order if i < len(search_results)]
                 else:
-                    # Cosine similarity reranking
-                    similarities = np.dot(query_embedding, doc_embeddings.T)
-                    ranked_indices = np.argsort(similarities)[::-1]
+                    # Cosine similarity reranking (vectors are L2-normalized, so cosine = dot product)
+                    similarities = [
+                        sum(a * b for a, b in zip(query_embedding, doc_emb))
+                        for doc_emb in doc_embeddings
+                    ]
+                    ranked_indices = sorted(
+                        range(len(similarities)), key=lambda i: similarities[i], reverse=True
+                    )
                     search_results = [search_results[i] for i in ranked_indices if i < len(search_results)]
 
             finally:
