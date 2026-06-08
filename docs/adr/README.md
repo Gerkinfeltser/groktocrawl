@@ -40,5 +40,6 @@ An Architecture Decision Record captures an important architectural decision mad
 | 0019 | [Intelligent Scrape Cache](0019-intelligent-scrape-cache.md) | accepted |
 | 0020 | [Proxy Support with Guardrails](0020-proxy-support-with-guardrails.md) | accepted |
 | 0021 | [Web Portal](0021-web-portal.md) | accepted |
+| 0022 | [Agent SSE Streaming](0022-agent-sse-streaming.md) | proposed |
 
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full ADR workflow: when to write an ADR, how to number it, and how to get it reviewed in a PR.

@@ -41,6 +41,7 @@ class AgentRequest(BaseModel):
     max_credits: int | None = None
     webhook: dict[str, Any] | None = None
     strict_constrain_to_urls: bool = False
+    stream: bool = Field(default=False, description="SSE streaming response")
 
     model_config = ConfigDict(populate_by_name=True)
 

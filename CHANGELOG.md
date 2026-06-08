@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Agent SSE streaming — live progress and token streaming for deep research (ADR-0022)** — `POST /v2/agent` now accepts `stream: true` for Server-Sent Events. Two-phase streaming: discovery events (`sources_pending`, `source_scraped`) show sources as they're found and scraped, followed by token-by-token LLM output (`token` events). Falls back to create→poll pattern when `stream` is omitted. Reuses the SSE event protocol from `POST /v2/answer` (ADR-0017). CLI defaults to streaming with `--sync` to opt out. See `docs/adr/0022-agent-sse-streaming.md`.
+
 - **Web portal — single-search-bar UI for human users (ADR-0021)** — new `portal-svc` container in the Docker Compose stack. A lightweight FastAPI + Jinja2 web interface with a Google-inspired search bar. Routes queries to `POST /v2/answer` with SSE streaming, displaying real-time token output with source citations and a recent queries sidebar in localStorage. One-button v0.1 (answer endpoint); deep research button placeholder reserved for v0.2 (agent SSE, issue #130). Port 8081. See `docs/adr/0021-web-portal.md`.
 
 - **Intelligent scrape cache — freshness-aware revalidation with ETag/Last-Modified support (ADR-0019)** — the existing Valkey-backed scrape cache now stores HTTP ETag and Last-Modified headers from Tier 1-2 (llms.txt, content-negotiation) responses and uses conditional GETs (If-None-Match / If-Modified-Since) for blocking revalidation of cached content from slow tiers (playwright, flare-solverr, browser-svc). On 304 Not Modified, extends the cached entry's TTL without re-downloading. On 200, replaces the cache entry with fresh content.

@@ -85,6 +85,41 @@ async def scrape(request: Request, body: ScrapeRequest):
 
 @router.post("/v2/agent", response_model=AgentCreateResponse)
 async def create_agent(request: Request, body: AgentRequest):
+    # Streaming path — run inline, return SSE
+    if body.stream:
+        from fastapi.responses import StreamingResponse
+
+        async def event_stream():
+            from .research import run_research_stream
+            async for event in run_research_stream(
+                prompt=body.prompt,
+                urls=body.urls,
+                schema=body.schema_,
+                searxng_url=request.app.state.searxng_url,
+                scraper_url=request.app.state.scraper_url,
+                llm_base_url=request.app.state.llm_base_url,
+                llm_api_key=request.app.state.llm_api_key,
+                llm_model=request.app.state.llm_model,
+                requested_model=body.model if body.model != "default" else None,
+            ):
+                import json
+                if event["type"] == "sources_pending":
+                    yield f"data: {json.dumps({'type': 'sources_pending', 'sources': event['sources']})}\n\n"
+                elif event["type"] == "source_scraped":
+                    yield f"data: {json.dumps({'type': 'source_scraped', 'url': event['url'], 'source': event.get('source', ''), 'chars': event.get('chars', 0)})}\n\n"
+                elif event["type"] == "sources":
+                    yield f"data: {json.dumps({'type': 'sources', 'sources': event['sources']})}\n\n"
+                elif event["type"] == "token":
+                    yield f"data: {json.dumps({'type': 'token', 'content': event['content']})}\n\n"
+                elif event["type"] == "done":
+                    yield f"data: {json.dumps({'type': 'done', 'result': event['result'], 'sources': event['sources'], 'latency_ms': event['latency_ms']})}\n\n"
+                elif event["type"] == "error":
+                    yield f"data: {json.dumps({'type': 'error', 'content': event['content']})}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    # Sync path — create job, process in background
     store: JobStore = request.app.state.job_store
     job_id = store.create_job(kind="agent", payload=body.model_dump(exclude_none=True, by_alias=True))
 

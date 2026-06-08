@@ -29,7 +29,8 @@ Examples:
   groktocrawl search "raspberry pi 5" --limit 5 --json
   groktocrawl map https://docs.example.com --limit 50
   groktocrawl crawl https://docs.example.com --max-depth 2 --limit 20
-  groktocrawl agent "What are the key announcements from Google I/O 2025?"
+  groktocrawl agent "What are the key announcements from Google I/O 2025?"  (streaming, default)
+  groktocrawl agent "Research multimodal models" --sync  (non-streaming, poll for results)
   groktocrawl answer "What is the current Fed interest rate?"  (streaming, default)
   groktocrawl answer "How many moons does Jupiter have?" --sync  (wait for full answer)
 """
@@ -275,6 +276,25 @@ class Client:
         if schema:
             data["schema"] = schema
         return self._request("POST", "/agent", json_data=data)
+
+    def create_agent_stream(
+        self,
+        prompt: str,
+        urls: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Create an agent research job with SSE streaming.
+
+        Returns a dict with ``_stream`` key containing the raw streaming response.
+        """
+        data: Dict[str, Any] = {"prompt": prompt, "stream": True}
+        if urls:
+            data["urls"] = urls
+        import requests
+        url = self._url("/agent")
+        resp = requests.post(url, json=data, timeout=300, stream=True)
+        if resp.status_code >= 400:
+            raise ApiError(f"API error ({resp.status_code}): {resp.text[:500]}")
+        return {"_stream": resp}
 
     def agent_status(self, job_id: str) -> Dict[str, Any]:
         return self._request("GET", f"/agent/{job_id}")
@@ -526,48 +546,95 @@ def cmd_agent(client: Client, args: argparse.Namespace) -> None:
         return
 
     try:
-        result = client.create_agent(prompt=args.prompt, urls=args.urls, schema=None)
+        if args.sync:
+            # Non-streaming path: create job and poll
+            result = client.create_agent(prompt=args.prompt, urls=args.urls, schema=None)
+        else:
+            # Streaming path (default)
+            result = client.create_agent_stream(prompt=args.prompt, urls=args.urls)
     except ApiError as e:
         die(str(e))
 
-    job_id = result.get("id", "")
-    if not job_id:
-        die("No job ID returned")
+    if args.sync:
+        # Poll loop (non-streaming)
+        job_id = result.get("id", "")
+        if not job_id:
+            die("No job ID returned")
 
-    if args.no_poll:
-        if JSON_OUTPUT:
-            emit(f"Agent job: {job_id}", {"job_id": job_id, "status": "started"})
-        else:
-            log(f"Agent job ID: {job_id}")
-        return
-
-    log(f"Agent job {job_id} — researching...")
-    while True:
-        time.sleep(POLL_INTERVAL)
-        try:
-            status = client.agent_status(job_id)
-        except ApiError as e:
-            warn(f"Status check failed: {e}")
-            continue
-
-        s = status.get("status", "unknown")
-        if s == "completed":
-            data = status.get("data", {})
+        if args.no_poll:
             if JSON_OUTPUT:
-                emit("", {"job_id": job_id, "status": "completed", "result": data})
+                emit(f"Agent job: {job_id}", {"job_id": job_id, "status": "started"})
             else:
-                result_text = data.get("result", "(no result)")
-                sources = data.get("sources", [])
-                print(f"\n{result_text}\n")
-                if sources:
-                    print("Sources:")
-                    for src in sources:
-                        print(f"  {src}")
+                log(f"Agent job ID: {job_id}")
             return
-        elif s == "failed":
-            die(f"Agent failed: {status.get('error', 'unknown')}")
-        else:
-            info(f"  Status: {s}")
+
+        log(f"Agent job {job_id} — researching...")
+        while True:
+            time.sleep(POLL_INTERVAL)
+            try:
+                status = client.agent_status(job_id)
+            except ApiError as e:
+                warn(f"Status check failed: {e}")
+                continue
+
+            s = status.get("status", "unknown")
+            if s == "completed":
+                data = status.get("data", {})
+                if JSON_OUTPUT:
+                    emit("", {"job_id": job_id, "status": "completed", "result": data})
+                else:
+                    result_text = data.get("result", "(no result)")
+                    sources = data.get("sources", [])
+                    print(f"\n{result_text}\n")
+                    if sources:
+                        print("Sources:")
+                        for src in sources:
+                            print(f"  {src}")
+                return
+            elif s == "failed":
+                die(f"Agent failed: {status.get('error', 'unknown')}")
+            else:
+                info(f"  Status: {s}")
+    else:
+        # Streaming path: read SSE events from the stream
+        resp = result["_stream"]
+        sources_shown = False
+        full_result = ""
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data: "):
+                continue
+            data_str = line[6:].strip()
+            if data_str == "[DONE]":
+                break
+            try:
+                event = json.loads(data_str)
+                if event["type"] == "sources_pending" and not sources_shown:
+                    if event.get("sources"):
+                        log(f"Found {len(event['sources'])} sources...")
+                elif event["type"] == "source_scraped":
+                    url = event.get("url", "")
+                    chars = event.get("chars", 0)
+                    info(f"  Scraped: {url} ({chars} chars)")
+                elif event["type"] == "sources" and not sources_shown:
+                    if event.get("sources"):
+                        log("Sources:")
+                        for s in event["sources"]:
+                            log("  " + s)
+                    sources_shown = True
+                elif event["type"] == "token":
+                    full_result += event["content"]
+                    print(event["content"], end="", flush=True)
+                elif event["type"] == "done":
+                    full_result = event.get("result", full_result)
+                    print()
+                elif event["type"] == "error":
+                    die("Error: " + event["content"])
+            except json.JSONDecodeError:
+                continue
+        if JSON_OUTPUT:
+            emit("", {"result": full_result})
+        elif not sources_shown and full_result:
+            print(full_result)
 
 
 
@@ -1112,7 +1179,8 @@ def make_parser() -> argparse.ArgumentParser:
     p_agent = subparsers.add_parser("agent", help="Start an autonomous research agent")
     p_agent.add_argument("prompt", help="Research prompt/question")
     p_agent.add_argument("--urls", nargs="+", help="Seed URLs to focus research")
-    p_agent.add_argument("--no-poll", action="store_true", help="Don't poll for results")
+    p_agent.add_argument("--no-poll", action="store_true", help="Don't poll for results (sync mode only)")
+    p_agent.add_argument("--sync", action="store_true", help="Non-streaming mode (poll for results)")
 
     p_download = subparsers.add_parser("download", help="Download binary content (PDF, EPUB, image, etc.) to disk")
     p_download.add_argument("url", help="URL to download")

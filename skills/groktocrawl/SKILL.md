@@ -9,8 +9,9 @@ description: >-
 license: MIT
 metadata:
   author: groktopus
-  version: "1.5.1"
+  version: "1.6.0"
   changelog:
+    "1.6.0": "Agent endpoint SSE streaming; CLI --sync flag; streaming default for agent command"
     "1.5.1": "CLI answer default changed from sync to streaming; --stream flag replaced with --sync (opt-out)"
     "1.4.0": "Add CLI subcommands for monitor (create/list/get/update/delete), parse (file to markdown), and generate-llmstxt (with async polling)"
     "1.3.3": "Add change monitoring section with active job tracking and monitor lifecycle guidance"
@@ -33,7 +34,8 @@ The canonical CLI is on PATH (`groktocrawl`).
 ```bash
 groktocrawl scrape https://example.com
 groktocrawl search "raspberry pi 5" --limit 3 --json
-groktocrawl agent "What were the key Google I/O 2025 announcements?"
+groktocrawl agent "What were the key Google I/O 2025 announcements?"  (streaming, default)
+groktocrawl agent "Research multimodal models" --sync  (non-streaming, poll for results)
 groktocrawl answer "What is the Fed rate?"
 groktocrawl answer "How tall is the Burj Khalifa?" --sync  (non-streaming, wait for full answer)
 ```
@@ -48,7 +50,7 @@ groktocrawl answer "How tall is the Burj Khalifa?" --sync  (non-streaming, wait 
 | extract | Structured data | `groktocrawl extract <url> --prompt "..."` |
 | map | URL discovery | `groktocrawl map <url> --limit 50` |
 | crawl | Site crawling | `groktocrawl crawl <url> --max-depth 3` |
-| agent | Autonomous research | `groktocrawl agent "<prompt>"` |
+| agent | Autonomous research (streaming) | `groktocrawl agent "<prompt>"` |
 | answer | Grounded Q&A (streaming) | `groktocrawl answer "<question>"` |
 | browser | Headless browser | `groktocrawl browser create --ttl 300` |
 | active | List crawl jobs | `groktocrawl active --json` |
