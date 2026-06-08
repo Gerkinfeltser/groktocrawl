@@ -279,21 +279,42 @@ async def _ensure_qdrant() -> QdrantClient:
                 if isinstance(configured_vectors, dict):
                     nv_name = _named_vector_name(EMBED_MODEL_NAME)
                     if nv_name not in configured_vectors:
-                        # Legacy collection (no named vectors) — add the named vector
+                        # Legacy collection (no named vectors) — migrate
                         logger.info(
-                            "Legacy collection detected. Adding named vector '%s' (dim=%d). "
-                            "Existing points without named vectors will get defaults.",
-                            nv_name, EMBED_DIM,
+                            "Legacy collection detected (no named vectors). "
+                            "Migrating... deleting and recreating '%s' with named vector '%s'.",
+                            COLLECTION_NAME, nv_name,
                         )
-                        # Qdrant doesn't support adding named vectors post-creation
-                        # with a different dim. If the collection was created without
-                        # named vectors, we need to work with the default vector.
-                        logger.warning(
-                            "Collection has %s without '%s'. "
-                            "Migration will add named vectors at index time.",
-                            type(configured_vectors).__name__,
-                            nv_name,
+                        # Qdrant cannot add named vectors post-creation. Delete and recreate.
+                        _qdrant.delete_collection(COLLECTION_NAME)
+                        _qdrant.create_collection(
+                            collection_name=COLLECTION_NAME,
+                            vectors_config={
+                                nv_name: models.VectorParams(
+                                    size=EMBED_DIM,
+                                    distance=models.Distance.COSINE,
+                                ),
+                            },
                         )
+                        logger.info("Recreated '%s' with named vector '%s'", COLLECTION_NAME, nv_name)
+                elif not isinstance(configured_vectors, dict):
+                    # Flat vector config — migrate to named vectors
+                    nv_name = _named_vector_name(EMBED_MODEL_NAME)
+                    logger.info(
+                        "Legacy flat-vector collection detected. "
+                        "Migrating to named vector '%s'...", nv_name,
+                    )
+                    _qdrant.delete_collection(COLLECTION_NAME)
+                    _qdrant.create_collection(
+                        collection_name=COLLECTION_NAME,
+                        vectors_config={
+                            nv_name: models.VectorParams(
+                                size=EMBED_DIM,
+                                distance=models.Distance.COSINE,
+                            ),
+                        },
+                    )
+                    logger.info("Recreated '%s' with named vector '%s'", COLLECTION_NAME, nv_name)
             _qdrant_ready = True
         except Exception as e:
             logger.error("Qdrant init failed: %s", e)
@@ -510,6 +531,15 @@ class IndexRequest(BaseModel):
 class IndexResponse(BaseModel):
     status: str
     url_hash: int
+
+
+class IndexBatchRequest(BaseModel):
+    pages: list[IndexRequest]
+
+
+class IndexBatchResponse(BaseModel):
+    status: str
+    count: int
 
 
 class VectorSearchRequest(BaseModel):
@@ -741,6 +771,90 @@ async def index_page(body: IndexRequest):
     await _evict_if_needed(qdrant)
 
     return IndexResponse(status="indexed", url_hash=point_id)
+
+
+@app.post("/index/batch", response_model=IndexBatchResponse, status_code=201)
+async def index_batch(body: IndexBatchRequest):
+    """Embed and store multiple pages in a single batch.
+
+    Ref: ADR-0030. For large crawls, replaces N per-page POST /index
+    calls with a single batch call. Embeds all content in one
+    SentenceTransformer call and upserts via Qdrant gRPC batch.
+    Best-effort: failure is logged but never propagated.
+    """
+    qdrant = await _ensure_qdrant()
+    model = _get_embed_model()
+
+    if not body.pages:
+        return IndexBatchResponse(status="indexed", count=0)
+
+    # Batch embed all content texts in one call
+    contents = [p.content[:2000] for p in body.pages]
+    embed_start = time.time()
+    embeddings = model.encode(contents, normalize_embeddings=True).tolist()
+    embed_duration = time.time() - embed_start
+    METRICS.histogram(
+        "groktocrawl_index_batch_embed_duration_seconds",
+        "Batch embedding inference latency",
+    ).observe({"batch_size": str(len(contents))}, embed_duration)
+
+    # Build points with payloads
+    active_nv = _get_active_model()
+    points = []
+    for page, embedding in zip(body.pages, embeddings):
+        point_id = _url_hash(page.url)
+        existing_payload = None
+        try:
+            existing = qdrant.retrieve(
+                COLLECTION_NAME,
+                ids=[point_id],
+                with_payload=True,
+                with_vectors=False,
+            )
+            if existing and existing[0].payload:
+                existing_payload = existing[0].payload
+        except Exception:
+            pass
+
+        payload = _build_index_payload(page.url, page.title, existing_payload)
+        vectors: dict[str, list[float]] = {active_nv: embedding}
+
+        # Dual-write support: also embed with target model
+        if _migration["status"] == "dual_write":
+            target_name = _migration["target_model"]
+            if target_name:
+                try:
+                    target_model = SentenceTransformer(target_name)
+                    target_embedding = target_model.encode(
+                        page.content[:2000], normalize_embeddings=True
+                    ).tolist()
+                    target_nv = _named_vector_name(target_name)
+                    vectors[target_nv] = target_embedding
+                    existing_models = json.loads(payload.get("embedding_models", "[]"))
+                    for nv in [active_nv, target_nv]:
+                        if nv not in existing_models:
+                            existing_models.append(nv)
+                    payload["embedding_models"] = json.dumps(existing_models)
+                except Exception as e:
+                    logger.warning("Batch dual-write embed failed for target model: %s", e)
+
+        points.append(models.PointStruct(
+            id=point_id,
+            vector=vectors,
+            payload=payload,
+        ))
+
+    # Single batch upsert via Qdrant gRPC
+    qdrant.upsert(collection_name=COLLECTION_NAME, points=points)
+
+    METRICS.counter(
+        "groktocrawl_index_batch_pages_total",
+        "Total pages indexed via batch endpoint",
+    ).inc(value=len(points))
+
+    await _evict_if_needed(qdrant)
+
+    return IndexBatchResponse(status="indexed", count=len(points))
 
 
 @app.post("/search/vector", response_model=VectorSearchResponse)

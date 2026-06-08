@@ -48,5 +48,6 @@ An Architecture Decision Record captures an important architectural decision mad
 | 0027 | [Smarter Index Retention — Domain TTLs, Frequency Weighting, Access Boosting](0027-smarter-index-retention.md) | proposed |
 | 0028 | [Embedding Model Migration Path for Index Rebuilds](0028-embedding-model-migration-path.md) | proposed |
 | 0029 | [Service-Level Metrics for semantic-svc](0029-service-level-metrics-for-semantic-svc.md) | accepted |
+| 0030 | [Batch Vector Ingestion via Qdrant gRPC](0030-batch-vector-ingestion.md) | proposed |
 
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full ADR workflow: when to write an ADR, how to number it, and how to get it reviewed in a PR.

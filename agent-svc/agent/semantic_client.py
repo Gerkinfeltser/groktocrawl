@@ -58,6 +58,20 @@ class SemanticClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def index_batch(self, pages: list[dict]) -> dict:
+        """Batch-index multiple pages in a single call.
+
+        Ref: ADR-0030. For large crawls, this is ~200x faster than
+        calling index_page() per page.
+        """
+        client = await self._ensure_client()
+        resp = await client.post(
+            f"{self.base_url}/index/batch",
+            json={"pages": pages},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     async def search_vector(
         self, query: str, limit: int = 5
     ) -> list[dict]:
