@@ -877,7 +877,7 @@ async def search_vector(body: VectorSearchRequest):
     hits = qdrant.query_points(
         collection_name=COLLECTION_NAME,
         query=query_embedding,
-        query_vector_name=active_nv,
+        using=active_nv,
         limit=body.limit,
     ).points
 
