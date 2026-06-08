@@ -90,8 +90,6 @@ services:
     build:
       context: ./semantic-svc
     restart: unless-stopped
-    ports:
-      - "8003:8003"
 
   agent-svc:
     build:
