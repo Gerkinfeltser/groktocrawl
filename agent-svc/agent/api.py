@@ -69,10 +69,16 @@ async def list_activity(request: Request):
 
 @router.post("/v2/scrape", response_model=ScrapeResponse)
 async def scrape(request: Request, body: ScrapeRequest):
+    import asyncio
     scraper = request.app.state.scraper_client
     result = await scraper.scrape(body.url)
     if result.get("success"):
         scraper_data = result["data"]
+        # Fire-and-forget index the page
+        markdown = scraper_data.get("markdown", "")
+        if markdown:
+            title = scraper_data.get("metadata", {}).get("title", "")
+            asyncio.create_task(_index_scrape(body.url, title, markdown, request))
         return ScrapeResponse(
             success=True,
             data=ScrapeData(
@@ -242,14 +248,65 @@ async def search(request: Request, body: SearchRequest):
 
     searxng = SearXNGClient(request.app.state.searxng_url)
     try:
-        results, _health = await searxng.search(
-            body.query, limit=body.limit,
-            categories=body.categories, sources=body.sources,
-        )
-        search_results = [
-            SearchResult(url=r["url"], title=r["title"], description=r.get("description", ""))
-            for r in results
-        ]
+        # Vector-only mode: query Qdrant, no SearXNG
+        if body.retrieval_mode == "vector":
+            from .semantic_client import SemanticClient
+            semantic = SemanticClient(request.app.state.semantic_url)
+            try:
+                vector_results = await semantic.search_vector(body.query, limit=body.limit)
+                search_results = [
+                    SearchResult(url=r["url"], title=r["title"], description="")
+                    for r in vector_results
+                ]
+            finally:
+                await semantic.close()
+
+        # Hybrid vector mode: SearXNG + Qdrant in parallel, merge, dedup
+        elif body.retrieval_mode == "hybrid_vector":
+            from .semantic_client import SemanticClient
+            semantic = SemanticClient(request.app.state.semantic_url)
+            try:
+                # Fetch SearXNG results first
+                searxng_results, _health = await searxng.search(
+                    body.query, limit=body.limit,
+                    categories=body.categories, sources=body.sources,
+                )
+                # Query vector index in parallel (async would be better, but sequential for now)
+                vector_results = await semantic.search_vector(body.query, limit=body.limit)
+
+                # Convert both to SearchResult lists
+                kw_results = [
+                    SearchResult(url=r["url"], title=r["title"], description=r.get("description", ""))
+                    for r in searxng_results
+                ]
+                vec_results = [
+                    SearchResult(url=r["url"], title=r["title"], description="")
+                    for r in vector_results
+                ]
+
+                # Merge and dedup by URL (keep first occurrence — SearXNG has richer metadata)
+                seen: set[str] = set()
+                merged: list[SearchResult] = []
+                for r in kw_results + vec_results:
+                    if r.url not in seen:
+                        seen.add(r.url)
+                        merged.append(r)
+
+                search_results = merged[:body.limit]
+            finally:
+                await semantic.close()
+
+        else:
+            # Keyword, semantic, hybrid: standard SearXNG path
+            results, _health = await searxng.search(
+                body.query, limit=body.limit,
+                categories=body.categories, sources=body.sources,
+            )
+            search_results = [
+                SearchResult(url=r["url"], title=r["title"], description=r.get("description", ""))
+                for r in results
+            ]
+
         # Semantic/hybrid retrieval: rerank results by embedding similarity
         if body.retrieval_mode in ("semantic", "hybrid") and results:
             from .semantic_client import SemanticClient
@@ -311,7 +368,7 @@ async def search(request: Request, body: SearchRequest):
 
         # Rich mode: scrape results and synthesize enriched content
         output = None
-        if body.search_type == "rich" and results:
+        if body.search_type == "rich" and body.retrieval_mode in ("keyword", "semantic", "hybrid"):
             from .research import run_rich_search
 
             output = await run_rich_search(
@@ -641,3 +698,14 @@ async def get_llmstxt_status(request: Request, job_id: str):
         error=job.get("error"),
         expires_at=job.get("completed_at") or job.get("created_at"),
     )
+
+
+async def _index_scrape(url: str, title: str, content: str, request) -> None:
+    """Fire-and-forget index a scraped page in the vector index."""
+    try:
+        from .semantic_client import SemanticClient
+        semantic = SemanticClient(request.app.state.semantic_url)
+        await semantic.index_page(url, title, content[:2000])
+        await semantic.close()
+    except Exception:
+        pass

@@ -57,3 +57,33 @@ class SemanticClient:
         if self._client:
             await self._client.aclose()
             self._client = None
+
+    # ── Phase 2: Vector Index ────────────────────────────────────
+
+    async def index_page(self, url: str, title: str, content: str) -> dict:
+        """Index a page in the persistent vector index.
+
+        Re-indexing the same URL updates the existing vector.
+        """
+        client = await self._ensure_client()
+        resp = await client.post(
+            f"{self.base_url}/index",
+            json={"url": url, "title": title, "content": content},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def search_vector(
+        self, query: str, limit: int = 5
+    ) -> list[dict]:
+        """Search the vector index by semantic similarity.
+
+        Returns list of {"url": str, "title": str, "score": float}.
+        """
+        client = await self._ensure_client()
+        resp = await client.post(
+            f"{self.base_url}/search/vector",
+            json={"query": query, "limit": limit},
+        )
+        resp.raise_for_status()
+        return resp.json()["results"]

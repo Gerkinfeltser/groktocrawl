@@ -90,6 +90,15 @@ services:
     build:
       context: ./semantic-svc
     restart: unless-stopped
+    environment:
+      - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
+      - VECTOR_INDEX_MAX_DOCS=${VECTOR_INDEX_MAX_DOCS:-250000}
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
 
   agent-svc:
     build:
@@ -141,3 +150,4 @@ services:
 
 volumes:
   valkey_data:
+  qdrant_data:
