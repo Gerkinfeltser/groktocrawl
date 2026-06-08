@@ -588,3 +588,40 @@ def test_near_dup_different_content():
     assert payload["status"] in ("indexed", "updated_duplicate")
     assert isinstance(payload["url_hash"], int)
 
+
+def test_batch_index_endpoint():
+    """POST /index/batch on semantic-svc returns valid structure.
+
+    Batch endpoint should index multiple pages in a single call,
+    returning count of successfully indexed pages.
+    """
+    r = httpx.post(SEMANTIC + "/index/batch", json={
+        "pages": [
+            {
+                "url": "http://example.com/batch-page-a",
+                "title": "Batch Page A",
+                "content": "This is the first page in a batch index test. "
+                           "It contains unique content for testing batch ingestion.",
+            },
+            {
+                "url": "http://example.com/batch-page-b",
+                "title": "Batch Page B",
+                "content": "This is the second page in a batch index test. "
+                           "It also contains unique content for testing.",
+            },
+        ],
+    }, timeout=30)
+    assert r.status_code == 201
+    payload = r.json()
+    assert payload["status"] == "indexed"
+    assert payload["count"] == 2
+
+
+def test_batch_index_empty():
+    """POST /index/batch with no pages should return count=0."""
+    r = httpx.post(SEMANTIC + "/index/batch", json={"pages": []}, timeout=30)
+    assert r.status_code == 201
+    payload = r.json()
+    assert payload["status"] == "indexed"
+    assert payload["count"] == 0
+

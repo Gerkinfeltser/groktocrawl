@@ -113,6 +113,7 @@ async def _process_batch_scrape_async(
     METRICS.counter("jobs_submitted_total", "Total jobs submitted", ["type"]).inc({"type": "batch_scrape"})
     try:
         pages = []
+        _index_batch = []
         for url in urls:
             result = await scraper.scrape(url)
             if result.get("success"):
@@ -122,9 +123,14 @@ async def _process_batch_scrape_async(
                 og = metadata.get("og") or {}
                 meta = metadata.get("meta") or {}
                 title = og.get("title") or meta.get("title") or data.get("title", "")
-                asyncio.create_task(_index_page_async(
-                    url, title, data.get("markdown", "")[:2000]
-                ))
+                # Accumulate for batch indexing (ADR-0030) instead of per-page
+                _index_batch.append({
+                    "url": url,
+                    "title": title,
+                    "content": data.get("markdown", "")[:2000],
+                })
+        if _index_batch:
+            asyncio.create_task(_index_batch_async(_index_batch))
         payload = {"completed": len(pages), "total": len(urls), "pages": pages}
         store.complete_job(job_id, payload)
         await deliver_webhook(webhook_config, "completed", job_id, payload)
@@ -217,3 +223,22 @@ async def _index_page_async(url: str, title: str, content: str) -> None:
         logger.debug("Indexed %s", url)
     except Exception:
         logger.debug("Failed to index %s (vector index unavailable or full)", url)
+
+
+async def _index_batch_async(pages: list[dict]) -> None:
+    """Fire-and-forget batch-index multiple pages.
+
+    Ref: ADR-0030. For large crawls, this is ~200x faster than
+    calling _index_page_async() per page.
+    """
+    if not pages:
+        return
+    try:
+        from .semantic_client import SemanticClient
+        semantic_url = os.getenv("SEMANTIC_URL", "http://semantic-svc:8003")
+        client = SemanticClient(semantic_url)
+        await client.index_batch(pages)
+        await client.close()
+        logger.debug("Batch-indexed %d pages", len(pages))
+    except Exception:
+        logger.debug("Failed to batch-index %d pages (vector index unavailable)", len(pages))
