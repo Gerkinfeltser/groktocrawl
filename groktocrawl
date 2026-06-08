@@ -31,13 +31,17 @@ Examples:
   groktocrawl crawl https://docs.example.com --max-depth 2 --limit 20
   groktocrawl agent "What are the key announcements from Google I/O 2025?"  (streaming, default)
   groktocrawl agent "Research multimodal models" --sync  (non-streaming, poll for results)
+  groktocrawl agent "Deep research" --pyramid   (artifact-pyramid output on disk)
   groktocrawl answer "What is the current Fed interest rate?"  (streaming, default)
   groktocrawl answer "How many moons does Jupiter have?" --sync  (wait for full answer)
+  groktocrawl answer "Question" --pyramid   (artifact-pyramid output on disk)
 """
 
 import argparse
+import datetime
 import json
 import os
+import re
 import sys
 import textwrap
 import time
@@ -93,6 +97,269 @@ POLL_INTERVAL = 2
 QUIET = False
 JSON_OUTPUT = False
 VERBOSE = False
+
+
+def _slugify(text: str, max_len: int = 60) -> str:
+    """Turn query text into a filesystem-safe slug."""
+    slug = text.lower().strip()
+    slug = re.sub(r"[^a-z0-9\s-]", "", slug)
+    slug = re.sub(r"[\s-]+", "-", slug).strip("-")
+    return slug[:max_len].rstrip("-")
+
+
+def _default_output_dir(query: str) -> str:
+    """Generate a default output directory path from the query."""
+    slug = _slugify(query)
+    date = datetime.date.today().isoformat()
+    return os.path.abspath(f"groktocrawl-output/{date}-{slug}")
+
+
+def _write_pyramid(
+    output_dir: str,
+    query: str,
+    result_text: str,
+    sources: list,
+    citations: list,
+    search_results: list | None = None,
+) -> str:
+    """Write an artifact-pyramid directory and return the absolute path.
+
+    Artifact pyramid structure:
+        <output-dir>/
+        00-index.md
+        01-summary/findings.md
+        02-analysis/00-index.md
+        02-analysis/dimension-*.md     (stubs linking to L3)
+        03-dossiers/00-index.md
+        03-dossiers/consulted-*.md     (scraped sources)
+        03-dossiers/discovered-*.md    (search results)
+    """
+    pyramid_root = os.path.abspath(output_dir)
+    l1_dir = os.path.join(pyramid_root, "01-summary")
+    l2_dir = os.path.join(pyramid_root, "02-analysis")
+    l3_dir = os.path.join(pyramid_root, "03-dossiers")
+
+    for d in (l1_dir, l2_dir, l3_dir):
+        os.makedirs(d, exist_ok=True)
+
+    now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # ---- 00-index.md ----
+    index_lines = [
+        f"# {query}",
+        "",
+        "## Methodology",
+        "",
+        f"- **Query:** {query}",
+        f"- **Generated:** {now}",
+        f"- **Sources consulted:** {len(sources) if sources else 0}",
+        "",
+        "## Pyramid Contents",
+        "",
+        "| Layer | File | Description |",
+        "|-------|------|-------------|",
+        "| L1 | `01-summary/findings.md` | Key findings and synthesis |",
+        "| L2 | `02-analysis/00-index.md` | Analysis dimension index |",
+        "| L2 | `02-analysis/dimension-*.md` | Per-angle stub files with source links |",
+        "| L3 | `03-dossiers/00-index.md` | Source index table |",
+        "| L3 | `03-dossiers/consulted-*.md` | Full scraped source content |",
+        "| L3 | `03-dossiers/discovered-*.md` | Raw search results (unscraped) |",
+        "",
+        "## Navigation",
+        "",
+        "- **L1** is the entry point — start here for key findings",
+        "- **L2** groups sources by analytical dimension with links to L3",
+        "- **L3** contains full source material with YAML frontmatter",
+        "",
+        "SOURCES (LAYER 1 NAVIGATION)",
+        "01-summary/findings.md",
+        " -> Key findings and synthesis for this research query",
+        "02-analysis/00-index.md",
+        " -> Index of analysis dimensions with source groupings",
+        "03-dossiers/00-index.md",
+        " -> Complete source index with consulted/discovered flags",
+    ]
+    _write_file(os.path.join(pyramid_root, "00-index.md"), "\n".join(index_lines))
+
+    # ---- 01-summary/findings.md ----
+    findings = [
+        "# Key Findings",
+        "",
+        result_text.strip(),
+        "",
+        "## Implications",
+        "",
+        "_(Auto-extracted from agent/answer output — "
+        "dimensional analysis with specific implications is "
+        "available in L2 dimension files.)_",
+        "",
+    ]
+    if citations:
+        findings.append("## References")
+        findings.append("")
+        for c in citations:
+            findings.append(f"- [{c.get('index', '?')}] {c.get('url', '')}")
+        findings.append("")
+    _write_file(os.path.join(l1_dir, "findings.md"), "\n".join(findings))
+
+    # ---- 02-analysis/00-index.md ----
+    l2_index = [
+        "# Analysis Dimensions",
+        "",
+        "Sources are grouped by domain of origin. Each dimension file",
+        "lists the sources from that domain and links to their full",
+        "content in L3 dossiers.",
+        "",
+        "| Dimension | Sources |",
+        "|-----------|---------|",
+    ]
+    l2_files: list[str] = []
+
+    if sources:
+        # Group sources by domain
+        from urllib.parse import urlparse
+        domain_groups: dict[str, list[dict]] = {}
+        for s in sources:
+            url = s.get("url", "") if isinstance(s, dict) else str(s)
+            domain = urlparse(url).netloc or "unknown"
+            domain_groups.setdefault(domain, []).append(
+                s if isinstance(s, dict) else {"url": url, "title": url}
+            )
+
+        for domain, domain_sources in sorted(domain_groups.items()):
+            dim_slug = _slugify(domain, 40)
+            dim_file = f"dimension-{dim_slug}.md"
+            l2_files.append(dim_file)
+            l2_index.append(f"| {domain} | {len(domain_sources)} sources |")
+
+            # Write dimension stub file
+            stub_lines = [
+                f"# Dimension: {domain}",
+                "",
+                f"{len(domain_sources)} source(s) from {domain}",
+                "",
+                "| # | Title | URL | L3 Source |",
+                "|---|-------|-----|-----------|",
+            ]
+            for i, ds in enumerate(domain_sources, 1):
+                url = ds.get("url", "") if isinstance(ds, dict) else str(ds)
+                title = ds.get("title", url) if isinstance(ds, dict) else url
+                src_slug = _slugify(title, 40)
+                stub_lines.append(
+                    f"| {i} | {title} | {url} | "
+                    f"`03-dossiers/consulted-{src_slug}.md` |"
+                )
+            stub_lines.extend([
+                "",
+                "SOURCES (LAYER 2 NAVIGATION)",
+            ])
+            for ds in domain_sources:
+                url = ds.get("url", "") if isinstance(ds, dict) else str(ds)
+                title = ds.get("title", url) if isinstance(ds, dict) else url
+                src_slug = _slugify(title, 40)
+                stub_lines.append(
+                    f"03-dossiers/consulted-{src_slug}.md"
+                )
+                stub_lines.append(
+                    f" -> Full scraped content from {url}"
+                )
+            _write_file(os.path.join(l2_dir, dim_file), "\n".join(stub_lines))
+
+    if not sources:
+        l2_index.append("| _(no sources available)_ | — |")
+
+    l2_index.append("")
+    l2_index.append("SOURCES (LAYER 2 NAVIGATION)")
+    for l2f in l2_files:
+        l2_index.append(f"02-analysis/{l2f}")
+        dim_name = l2f.replace("dimension-", "").replace(".md", "").replace("-", " ")
+        l2_index.append(f" -> Sources grouped by {dim_name}")
+    _write_file(os.path.join(l2_dir, "00-index.md"), "\n".join(l2_index))
+
+    # ---- 03-dossiers/00-index.md ----
+    l3_index = [
+        "# Source Index",
+        "",
+        "| Type | File | Title | URL |",
+        "|------|------|-------|-----|",
+    ]
+    consulted_files: list[str] = []
+
+    if sources:
+        for s in sources:
+            url = s.get("url", "") if isinstance(s, dict) else str(s)
+            title = s.get("title", url) if isinstance(s, dict) else url
+            src_slug = _slugify(title, 40)
+            fname = f"consulted-{src_slug}.md"
+            consulted_files.append(fname)
+
+            l3_index.append(
+                f"| consulted | `{fname}` | {title} | {url} |"
+            )
+
+            # Write source dossier
+            from urllib.parse import urlparse
+            domain = urlparse(url).netloc
+            content = s.get("markdown", s.get("content", "")) if isinstance(s, dict) else ""
+            body = [
+                "---",
+                f"url: {url}",
+                f"title: {title}",
+                f"domain: {domain}",
+                f"fetched_at: {now}",
+                f"word_count: {len(content.split())}",
+                "status: consulted",
+                "---",
+                "",
+                content if content else "(no content available)",
+            ]
+            _write_file(os.path.join(l3_dir, fname), "\n".join(body))
+
+    discovered_entries = []
+    if search_results:
+        for item in search_results:
+            url = item.get("url", "") if isinstance(item, dict) else str(item)
+            title = item.get("title", url) if isinstance(item, dict) else url
+            src_slug = _slugify(title, 40)
+            fname = f"discovered-{src_slug}.md"
+            discovered_entries.append(fname)
+            l3_index.append(
+                f"| discovered | `{fname}` | {title} | {url} |"
+            )
+            body = [
+                "---",
+                f"url: {url}",
+                f"title: {title}",
+                f"fetched_at: {now}",
+                "status: discovered",
+                "---",
+                "",
+                "_(Not scraped — search result only.)_",
+            ]
+            _write_file(os.path.join(l3_dir, fname), "\n".join(body))
+
+    if not sources and not search_results:
+        l3_index.append("| — | — | _(no sources)_ | — |")
+
+    l3_index.append("")
+    l3_index.append("SOURCES (LAYER 3 NAVIGATION)")
+    for cf in consulted_files:
+        l3_index.append(f"03-dossiers/{cf}")
+        l3_index.append(" -> Full scraped content (consulted, used in synthesis)")
+    for df in discovered_entries:
+        l3_index.append(f"03-dossiers/{df}")
+        l3_index.append(" -> Search result only (discovered, not scraped)")
+    _write_file(os.path.join(l3_dir, "00-index.md"), "\n".join(l3_index))
+
+    info(f"Pyramid written to {pyramid_root}")
+    return pyramid_root
+
+
+def _write_file(path: str, content: str) -> None:
+    """Write a file, creating parent directories if needed."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(content)
 
 
 def log(msg: str) -> None:
@@ -571,6 +838,12 @@ def cmd_agent(client: Client, args: argparse.Namespace) -> None:
         emit(f"[dry-run] Would start agent: {args.prompt}", {"dry_run": True, "command": "agent"})
         return
 
+    pyramid_mode = args.pyramid or bool(args.output_dir)
+    output_dir = args.output_dir or (_default_output_dir(args.prompt) if pyramid_mode else "")
+
+    if pyramid_mode:
+        log(f"Agent researching... (pyramid output to {output_dir})")
+
     try:
         if args.sync:
             # Non-streaming path: create job and poll
@@ -594,7 +867,8 @@ def cmd_agent(client: Client, args: argparse.Namespace) -> None:
                 log(f"Agent job ID: {job_id}")
             return
 
-        log(f"Agent job {job_id} — researching...")
+        if not pyramid_mode:
+            log(f"Agent job {job_id} — researching...")
         while True:
             time.sleep(POLL_INTERVAL)
             try:
@@ -606,11 +880,21 @@ def cmd_agent(client: Client, args: argparse.Namespace) -> None:
             s = status.get("status", "unknown")
             if s == "completed":
                 data = status.get("data", {})
-                if JSON_OUTPUT:
+                result_text = data.get("result", "(no result)")
+                sources = data.get("sources", [])
+
+                if pyramid_mode:
+                    path = _write_pyramid(
+                        output_dir=output_dir,
+                        query=args.prompt,
+                        result_text=result_text,
+                        sources=sources,
+                        citations=[],
+                    )
+                    emit(path, {"pyramid": path})
+                elif JSON_OUTPUT:
                     emit("", {"job_id": job_id, "status": "completed", "result": data})
                 else:
-                    result_text = data.get("result", "(no result)")
-                    sources = data.get("sources", [])
                     print(f"\n{result_text}\n")
                     if sources:
                         print("Sources:")
@@ -626,6 +910,7 @@ def cmd_agent(client: Client, args: argparse.Namespace) -> None:
         resp = result["_stream"]
         sources_shown = False
         full_result = ""
+        agent_sources = []
         for line in resp.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data: "):
                 continue
@@ -636,28 +921,44 @@ def cmd_agent(client: Client, args: argparse.Namespace) -> None:
                 event = json.loads(data_str)
                 if event["type"] == "sources_pending" and not sources_shown:
                     if event.get("sources"):
-                        log(f"Found {len(event['sources'])} sources...")
+                        if not pyramid_mode:
+                            log(f"Found {len(event['sources'])} sources...")
                 elif event["type"] == "source_scraped":
                     url = event.get("url", "")
                     chars = event.get("chars", 0)
                     info(f"  Scraped: {url} ({chars} chars)")
                 elif event["type"] == "sources" and not sources_shown:
                     if event.get("sources"):
-                        log("Sources:")
-                        for s in event["sources"]:
-                            log("  " + s)
+                        agent_sources = event["sources"]
+                        if not pyramid_mode:
+                            log("Sources:")
+                            for s in event["sources"]:
+                                log("  " + s)
                     sources_shown = True
                 elif event["type"] == "token":
                     full_result += event["content"]
-                    print(event["content"], end="", flush=True)
+                    if not pyramid_mode:
+                        print(event["content"], end="", flush=True)
                 elif event["type"] == "done":
                     full_result = event.get("result", full_result)
-                    print()
+                    if not pyramid_mode:
+                        print()
                 elif event["type"] == "error":
                     die("Error: " + event["content"])
             except json.JSONDecodeError:
                 continue
-        if JSON_OUTPUT:
+
+        if pyramid_mode:
+            # Write pyramid from captured SSE result
+            path = _write_pyramid(
+                output_dir=output_dir,
+                query=args.prompt,
+                result_text=full_result,
+                sources=agent_sources,
+                citations=[],
+            )
+            emit(path, {"pyramid": path})
+        elif JSON_OUTPUT:
             emit("", {"result": full_result})
         elif not sources_shown and full_result:
             print(full_result)
@@ -672,6 +973,12 @@ def cmd_answer(client: Client, args: argparse.Namespace) -> None:
         emit(f"[dry-run] Would answer: {args.query}", {"dry_run": True, "command": "answer"})
         return
 
+    pyramid_mode = args.pyramid or bool(args.output_dir)
+    output_dir = args.output_dir or (_default_output_dir(args.query) if pyramid_mode else "")
+
+    if pyramid_mode:
+        log(f"Answering... (pyramid output to {output_dir})")
+
     try:
         result = client.answer(query=args.query, num_sources=args.num_sources, stream=not args.sync)
     except ApiError as e:
@@ -682,6 +989,7 @@ def cmd_answer(client: Client, args: argparse.Namespace) -> None:
         sources_shown = False
         full_answer = ""
         citations = []
+        answer_sources = []
         for line in resp.iter_lines(decode_unicode=True):
             if not line or not line.startswith("data: "):
                 continue
@@ -692,30 +1000,55 @@ def cmd_answer(client: Client, args: argparse.Namespace) -> None:
                 event = json.loads(data_str)
                 if event["type"] == "sources" and not sources_shown:
                     if event.get("sources"):
-                        log("Sources:")
-                        for s in event["sources"]:
-                            log("  " + s["url"])
+                        answer_sources = event["sources"]
+                        if not pyramid_mode:
+                            log("Sources:")
+                            for s in event["sources"]:
+                                log("  " + s["url"])
                     sources_shown = True
                 elif event["type"] == "token":
                     full_answer += event["content"]
-                    print(event["content"], end="", flush=True)
+                    if not pyramid_mode:
+                        print(event["content"], end="", flush=True)
                 elif event["type"] == "done":
                     full_answer = event.get("answer", full_answer)
                     citations = event.get("citations", [])
-                    print()
+                    if not pyramid_mode:
+                        print()
                 elif event["type"] == "error":
                     die("Error: " + event["content"])
             except json.JSONDecodeError:
                 continue
-        if citations and not JSON_OUTPUT:
-            print("\nCitations:")
-            for c in citations:
-                print("  [{}] {}".format(c["index"], c["url"]))
-        if JSON_OUTPUT:
-            emit("", {"answer": full_answer, "citations": citations})
+
+        if pyramid_mode:
+            path = _write_pyramid(
+                output_dir=output_dir,
+                query=args.query,
+                result_text=full_answer,
+                sources=answer_sources,
+                citations=citations,
+            )
+            emit(path, {"pyramid": path})
+        else:
+            if citations and not JSON_OUTPUT:
+                print("\nCitations:")
+                for c in citations:
+                    print("  [{}] {}".format(c["index"], c["url"]))
+            if JSON_OUTPUT:
+                emit("", {"answer": full_answer, "citations": citations})
         return
 
-    if JSON_OUTPUT:
+    if pyramid_mode:
+        # Sync path, pyramid mode
+        path = _write_pyramid(
+            output_dir=output_dir,
+            query=args.query,
+            result_text=result.get("answer", ""),
+            sources=result.get("sources", []),
+            citations=result.get("citations", []),
+        )
+        emit(path, {"pyramid": path})
+    elif JSON_OUTPUT:
         emit("", {"answer": result.get("answer", ""), "sources": result.get("sources", []), "citations": result.get("citations", [])})
     else:
         answer = result.get("answer", "")
@@ -1210,6 +1543,8 @@ def make_parser() -> argparse.ArgumentParser:
     p_agent.add_argument("--urls", nargs="+", help="Seed URLs to focus research")
     p_agent.add_argument("--no-poll", action="store_true", help="Don't poll for results (sync mode only)")
     p_agent.add_argument("--sync", action="store_true", help="Non-streaming mode (poll for results)")
+    p_agent.add_argument("--pyramid", action="store_true", help="Write artifact-pyramid output to disk (SSE-buffered, prints path on completion)")
+    p_agent.add_argument("-o", "--output-dir", help="Output directory for pyramid (implies --pyramid)")
 
     p_download = subparsers.add_parser("download", help="Download binary content (PDF, EPUB, image, etc.) to disk")
     p_download.add_argument("url", help="URL to download")
@@ -1276,6 +1611,8 @@ def make_parser() -> argparse.ArgumentParser:
     p_answer.add_argument("query", help="Natural language question")
     p_answer.add_argument("-n", "--num-sources", type=int, default=5, help="Number of sources (1-20, default: 5)")
     p_answer.add_argument("--sync", action="store_true", help="Non-streaming mode (wait for full answer)")
+    p_answer.add_argument("--pyramid", action="store_true", help="Write artifact-pyramid output to disk (SSE-buffered, prints path on completion)")
+    p_answer.add_argument("-o", "--output-dir", help="Output directory for pyramid (implies --pyramid)")
     p_llmstxt = subparsers.add_parser("generate-llmstxt", help="Generate an llms.txt for a website")
     p_llmstxt.add_argument("url", help="Site URL to generate llms.txt for")
     p_llmstxt.add_argument("--max-pages", type=int, default=50, help="Max pages to scan (default: 50)")
