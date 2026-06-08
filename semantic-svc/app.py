@@ -56,9 +56,10 @@ def _get_rerank_model() -> CrossEncoder:
     return _rerank_model
 
 
-def _url_hash(url: str) -> str:
-    """Deterministic point ID from URL."""
-    return hashlib.sha256(url.encode()).hexdigest()
+def _url_hash(url: str) -> int:
+    """Deterministic point ID from URL — first 64 bits of SHA-256 as uint64."""
+    h = hashlib.sha256(url.encode()).hexdigest()
+    return int(h[:16], 16)
 
 
 async def _ensure_qdrant() -> QdrantClient:
@@ -140,7 +141,7 @@ class IndexRequest(BaseModel):
 
 class IndexResponse(BaseModel):
     status: str
-    url_hash: str
+    url_hash: int
 
 
 class VectorSearchRequest(BaseModel):
@@ -241,11 +242,11 @@ async def search_vector(body: VectorSearchRequest):
         body.query, normalize_embeddings=True
     ).tolist()
 
-    hits = qdrant.search(
+    hits = qdrant.query_points(
         collection_name=COLLECTION_NAME,
-        query_vector=query_embedding,
+        query=query_embedding,
         limit=body.limit,
-    )
+    ).points
 
     results = [
         VectorSearchResult(
@@ -259,7 +260,7 @@ async def search_vector(body: VectorSearchRequest):
 
 
 @app.delete("/index/{url_hash}")
-async def delete_index(url_hash: str):
+async def delete_index(url_hash: int):
     """Remove a page from the vector index by URL hash."""
     qdrant = await _ensure_qdrant()
     qdrant.delete(
