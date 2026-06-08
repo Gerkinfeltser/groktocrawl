@@ -112,6 +112,7 @@ def create_app() -> FastAPI:
     app.state.llm_base_url = os.getenv("LLM_BASE_URL", "http://llm-svc:8011/v1")
     app.state.llm_api_key = os.getenv("LLM_API_KEY", "")
     app.state.llm_model = os.getenv("LLM_MODEL", "deepseek-v4-flash")
+    app.state.semantic_url = os.getenv("SEMANTIC_URL", "http://semantic-svc:8003")
 
     # ── Middleware: request_id ───────────────────────────────────
     @app.middleware("http")

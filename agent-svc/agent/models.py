@@ -99,6 +99,7 @@ class SearchRequest(BaseModel):
     query: str
     limit: int = 5
     search_type: str = "fast"  # "fast" | "rich"
+    retrieval_mode: str = "keyword"  # "keyword" | "semantic" | "hybrid"
     categories: list[str] | None = None
     sources: list[str] | None = None
     output_schema: dict[str, Any] | None = None  # JSON Schema for structured extraction
@@ -258,6 +259,7 @@ class Citation(BaseModel):
 class AnswerRequest(BaseModel):
     query: str = Field(..., max_length=10000, description="Natural language question")
     search_type: str = Field(default="auto", description="Hint for search depth")
+    retrieval_mode: str = Field(default="keyword", description="keyword | semantic | hybrid")
     num_sources: int = Field(default=5, ge=1, le=20, description="How many sources to ground the answer")
     model: str = Field(default="default", description="Per-request LLM override")
     stream: bool = Field(default=False, description="SSE streaming response")
