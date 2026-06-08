@@ -99,7 +99,7 @@ class SearchRequest(BaseModel):
     query: str
     limit: int = 5
     search_type: str = "fast"  # "fast" | "rich"
-    retrieval_mode: str = "keyword"  # "keyword" | "semantic" | "hybrid"
+    retrieval_mode: str = "keyword"  # "keyword" | "semantic" | "hybrid" | "vector" | "hybrid_vector"
     categories: list[str] | None = None
     sources: list[str] | None = None
     output_schema: dict[str, Any] | None = None  # JSON Schema for structured extraction

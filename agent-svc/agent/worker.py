@@ -75,6 +75,9 @@ async def _process_crawl_async(
         pages = []
         if result.get("success"):
             pages.append({"url": url, "markdown": result["data"].get("markdown", "")})
+            asyncio.create_task(_index_page_async(
+                url, "", result["data"].get("markdown", "")[:2000]
+            ))
         payload = {"completed": len(pages), "total": 1, "pages": pages}
         store.complete_job(job_id, payload)
         await deliver_webhook(webhook_config, "completed", job_id, payload)
@@ -108,6 +111,9 @@ async def _process_batch_scrape_async(
             result = await scraper.scrape(url)
             if result.get("success"):
                 pages.append({"url": url, "markdown": result["data"].get("markdown", "")})
+                asyncio.create_task(_index_page_async(
+                    url, "", result["data"].get("markdown", "")[:2000]
+                ))
         payload = {"completed": len(pages), "total": len(urls), "pages": pages}
         store.complete_job(job_id, payload)
         await deliver_webhook(webhook_config, "completed", job_id, payload)
@@ -184,3 +190,19 @@ async def _process_llmstxt_async(
         elapsed = time.monotonic() - start
         METRICS.histogram("job_duration_seconds", "Job processing duration", ["type", "status"]).observe({"type": "llmstxt", "status": "failed"}, elapsed)
         METRICS.counter("jobs_failed_total", "Total failed jobs", ["type"]).inc({"type": "llmstxt"})
+
+
+async def _index_page_async(url: str, title: str, content: str) -> None:
+    """Fire-and-forget index a page in the vector index.
+
+    Failure is logged but never propagated — indexing is best-effort.
+    """
+    try:
+        from .semantic_client import SemanticClient
+        semantic_url = os.getenv("SEMANTIC_URL", "http://semantic-svc:8003")
+        client = SemanticClient(semantic_url)
+        await client.index_page(url, title, content)
+        await client.close()
+        logger.debug("Indexed %s", url)
+    except Exception:
+        logger.debug("Failed to index %s (vector index unavailable or full)", url)
