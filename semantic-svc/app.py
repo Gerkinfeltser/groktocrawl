@@ -41,6 +41,10 @@ COLLECTION_NAME = "groktocrawl_pages"
 MAX_DOCS = int(os.getenv("VECTOR_INDEX_MAX_DOCS", "250000"))
 QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
 
+# ── Near-duplicate detection ──────────────────────────────────────
+NEAR_DUP_THRESHOLD = float(os.getenv("NEAR_DUP_THRESHOLD", "0.95"))
+NEAR_DUP_MODE = os.getenv("NEAR_DUP_MODE", "skip")  # "skip" | "update"
+
 
 def _get_embed_model() -> SentenceTransformer:
     global _embed_model
@@ -137,11 +141,16 @@ class IndexRequest(BaseModel):
     url: str
     title: str = ""
     content: str
+    near_dup_threshold: float | None = None  # overrides NEAR_DUP_THRESHOLD per-request
+    near_dup_mode: str | None = None  # "skip" | "update" — overrides NEAR_DUP_MODE per-request
 
 
 class IndexResponse(BaseModel):
-    status: str
+    status: str  # "indexed" | "duplicate" | "updated_duplicate"
     url_hash: int
+    matched_url: str | None = None
+    matched_title: str | None = None
+    score: float | None = None
 
 
 class VectorSearchRequest(BaseModel):
@@ -195,12 +204,55 @@ async def rerank(body: RerankRequest):
 
 # ── Phase 2: Vector Index ────────────────────────────────────────
 
+
+async def _check_near_duplicate(
+    qdrant: QdrantClient,
+    embedding: list[float],
+    url: str,
+    threshold: float,
+) -> dict | None:
+    """Search Qdrant for a semantically similar page (different URL).
+
+    Returns the matched point payload and score, or None if no
+    near-duplicate is found above the threshold.
+    """
+    try:
+        hits = qdrant.query_points(
+            collection_name=COLLECTION_NAME,
+            query=embedding,
+            query_filter=models.Filter(
+                must_not=[
+                    models.FieldCondition(
+                        key="url",
+                        match=models.MatchValue(value=url),
+                    )
+                ]
+            ),
+            limit=1,
+        ).points
+        if hits and hits[0].score >= threshold:
+            return {
+                "url": hits[0].payload.get("url", ""),
+                "title": hits[0].payload.get("title", ""),
+                "score": float(hits[0].score),
+            }
+    except Exception as e:
+        logger.warning("Near-dup check failed for %s: %s", url, e)
+    return None
+
+
 @app.post("/index", response_model=IndexResponse, status_code=201)
 async def index_page(body: IndexRequest):
     """Embed and store a page in the persistent vector index.
 
     URL is used as the point ID — re-indexing the same URL
     updates the existing vector rather than creating a duplicate.
+
+    Before indexing, checks for semantically near-identical content
+    at a different URL. If found above the similarity threshold,
+    the behavior depends on ``near_dup_mode``:
+      - ``"skip"`` (default): skip indexing, return duplicate status
+      - ``"update"``: proceed with upsert anyway
     """
     qdrant = await _ensure_qdrant()
     model = _get_embed_model()
@@ -211,6 +263,26 @@ async def index_page(body: IndexRequest):
     ).tolist()
 
     point_id = _url_hash(body.url)
+
+    # ── Near-duplicate check ──────────────────────────────────────
+    threshold = body.near_dup_threshold if body.near_dup_threshold is not None else NEAR_DUP_THRESHOLD
+    mode = body.near_dup_mode if body.near_dup_mode is not None else NEAR_DUP_MODE
+
+    match = await _check_near_duplicate(qdrant, embedding, body.url, threshold)
+    if match is not None:
+        if mode == "skip":
+            logger.info("Near-dup detected: %s ~ %s (score=%.4f, threshold=%.2f)",
+                         body.url, match["url"], match["score"], threshold)
+            return IndexResponse(
+                status="duplicate",
+                url_hash=point_id,
+                matched_url=match["url"],
+                matched_title=match["title"],
+                score=match["score"],
+            )
+        else:
+            logger.info("Near-dup detected but mode=update: %s ~ %s (score=%.4f)",
+                         body.url, match["url"], match["score"])
 
     qdrant.upsert(
         collection_name=COLLECTION_NAME,
@@ -229,7 +301,14 @@ async def index_page(body: IndexRequest):
 
     await _evict_if_needed(qdrant)
 
-    return IndexResponse(status="indexed", url_hash=point_id)
+    status = "updated_duplicate" if match is not None else "indexed"
+    return IndexResponse(
+        status=status,
+        url_hash=point_id,
+        matched_url=match["url"] if match else None,
+        matched_title=match["title"] if match else None,
+        score=match["score"] if match else None,
+    )
 
 
 @app.post("/search/vector", response_model=VectorSearchResponse)
