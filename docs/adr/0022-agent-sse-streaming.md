@@ -1,6 +1,6 @@
 # Agent SSE Streaming — Real-Time Research for Interactive Clients
 
-* Status: proposed
+* Status: accepted
 * Deciders: magnus, jasper
 * Date: 2026-06-08
 
