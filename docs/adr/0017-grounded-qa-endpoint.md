@@ -110,6 +110,36 @@ SSE streaming is an optional overlay on the synchronous path, not a separate pro
 - **Latency tracking:** `latency_ms` field returned in both sync and streaming modes
 - **Auth header fix:** The LLM client's unconditional `Authorization: Bearer` header was changed to conditional (only sent when `api_key` is non-empty). This was necessary because the LLM fixture (and some LLM backends) reject empty Bearer tokens. Discovered during integration testing.
 
+### Concurrent Scraping
+
+Scraping is the dominant cost factor (~90% of wall time). Each URL goes through a three-tier fallback pipeline (llms.txt → Accept: text/markdown → Playwright), and some sites (Britannica, Study.com) exhaust all three tiers taking 30-45s to fail. In the original implementation, URLs were scraped sequentially via `for url in urls[:5]`, producing 1-3 minutes of dead air before any SSE event fired.
+
+**Improvement (PR #135):** `_scrape_urls()` now uses bounded concurrent execution:
+
+- `asyncio.Semaphore(2)` — limits concurrent scrapes to 2, based on scraper-svc capacity probe results (~1.2x speedup)
+- `asyncio.wait_for(timeout=20)` — per-URL timeout that cuts off three-tier exhaust at 20s instead of 30-45s
+- Early termination — when `min_sources` are successfully scraped, remaining in-flight tasks are cancelled
+- Priority ordering — adapter-matched URLs (GitHub, YouTube) run before general web URLs for faster slot turnover
+
+The scraper-svc was confirmed partially concurrent via internal benchmark: 3 fresh Wikipedia articles took 11.35s sequentially vs 9.48s concurrently (~1.2x). True linear scaling is blocked by a shared Playwright browser instance.
+
+### sources_pending SSE Event
+
+The original SSE contract emitted the `sources` event only after all scraping completed — the caller saw dead air for the entire scrape duration. PR #135 added a `sources_pending` event that fires immediately after the search phase, before any scraping begins:
+
+```
+event: sources_pending
+data: {"sources": [{"url": "...", "title": "..."}, ...]}
+
+event: sources
+data: {"sources": [{"url": "...", "title": "...", "content": "..."}, ...]}
+
+event: token
+data: {"content": "..."}
+```
+
+The `sources_pending` event is **additive** (backwards-compatible per SSE spec). Existing consumers that only handle `sources`, `token`, and `done` ignore the unknown `sources_pending` event type. New consumers can show source URLs in a loading/pending state immediately, eliminating the dead-air UX gap.
+
 ### LLMClient.generate_stream()
 
 A new async generator method on `LLMClient` that supports SSE-style token-by-token streaming from any OpenAI-compatible backend. Yields structured events (`token`, `done`, `error`) rather than raw SSE bytes, making it compatible with any streaming consumer. Uses `httpx.AsyncClient.stream()` for efficient backpressure-aware consumption.
@@ -126,7 +156,8 @@ A new async generator method on `LLMClient` that supports SSE-style token-by-tok
 
 * Breaks from ADR-012's webhook pattern — every **async** endpoint gets webhooks, but this endpoint is deliberately synchronous. Consumers expecting the async pattern will need to adjust.
 * Citation quality depends on the LLM following the `[N]` format instruction — if the LLM uses a different citation style (footnotes, parenthetical URLs), the regex parser returns empty citations. Mitigation: the sources list is always returned regardless of citation parsing success.
-* Search + scrape + LLM latency is additive — if SearXNG is slow (<500ms) and the LLM is slow (>3s), the total exceeds the 1-3s target. The endpoint degrades gracefully but cannot guarantee latency.
+* Search + scrape + LLM latency is additive. Scraping is the dominant cost (~90% of wall time) — each URL traverses up to three scraper tiers (llms.txt → Accept: text/markdown → Playwright). Concurrent scraping (semaphore=2, 20s per-URL timeout) provides ~20% speedup over sequential. Real-world latency for a 3-source answer is 5-25s, exceeding the original 1-3s target.
+* **Dead-air UX gap** — the `sources` SSE event fires only after all scraping completes. For multi-source queries this creates 1-3 minutes of dead air. **Mitigation (PR #135):** the `sources_pending` SSE event fires immediately after search results are available, showing URLs in a loading state before scraping begins. Eliminates perceived dead air even when total latency remains unchanged.
 * No webhook/retry — callers must handle failures themselves.
 
 ## Quality Attributes (arc42 §1.2)
@@ -135,7 +166,7 @@ Three quality goals drive the answer endpoint design, distinct from the research
 
 | Quality Goal | Scenario | Measure | Priority |
 |---|---|---|---|
-| **Latency** | A caller submits a factual question ("What is the current Fed rate?"). The endpoint returns a cited answer within 3 seconds end-to-end. | P95 response time <3s for single-source questions; <5s for multi-source synthesis | High |
+| **Latency** | A caller submits a factual question ("What is the current Fed rate?"). The endpoint returns a cited answer. | P95 response time <5s for single-source questions; <25s for multi-source synthesis. Dead air mitigated by `sources_pending` SSE event. | High |
 | **Citation Accuracy** | Every factual claim in the answer maps to a source URL the LLM actually used. No hallucinated sources or claims unsupported by context. | Precision of cited sources against provided context >95% | High |
 | **Graceful Degradation** | Search returns no results, or scraping fails on all sources. The endpoint returns a clear "no information found" message rather than hallucinating. | Zero hallucinated answers when context is empty | Critical |
 
@@ -175,6 +206,7 @@ Three quality goals drive the answer endpoint design, distinct from the research
 
 * Issue #61 — Feature request: POST /v2/answer
 * PR #117 — Implementation
+* PR #135 — Concurrent scraping and sources_pending SSE event (concurrency addendum to this ADR)
 * ADR-0012 — Webhook delivery for async endpoints (documenting the pattern this endpoint deliberately diverges from)
 * Exa Answer API — https://exa.ai/docs/reference/answer.md (inspiration for the design)
 
@@ -260,10 +292,12 @@ flowchart LR
 
     subgraph streaming["SSE Streaming Path"]
         SSE["StreamingResponse\nServer-Sent Events"]
-        EVT_SRC["event: sources\nsource list"]
-        EVT_TOK["event: token\nper-token content"]
-        EVT_DONE["event: done\nfull answer + citations"]
+        EVT_PEND["event: sources_pending\\nsource URLs + titles\\nimmediate, before scrape"]
+        EVT_SRC["event: sources\\nscraped sources with content"]
+        EVT_TOK["event: token\\nper-token content"]
+        EVT_DONE["event: done\\nfull answer + citations"]
         
+        SSE --> EVT_PEND
         SSE --> EVT_SRC
         SSE --> EVT_TOK
         SSE --> EVT_DONE
