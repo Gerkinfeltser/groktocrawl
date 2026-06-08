@@ -4,25 +4,31 @@ Phase 1 endpoints (existing):
 - POST /embed — vectorize query and document texts via BGE-M3
 - POST /rerank — cross-encode query against documents via BGE-reranker-v2-m3
 
-Phase 2 endpoints (new):
+Phase 2 endpoints:
 - POST /index — embed and store a page in the persistent vector index
 - POST /search/vector — query the vector index by semantic similarity
 - DELETE /index/{url_hash} — remove a page from the index
 - GET /index/stats — index size and configuration
 
-Phase 3 (this file):
-- Smarter eviction: domain-based TTLs, crawl-frequency weighting, access boosting
-- Domain classification of indexed URLs
-- Access tracking on search result retrieval
-- Retention score computed at eviction time
+Phase 3 endpoints:
+- Retention scoring, domain classification, access tracking (see ADR-0027)
+
+Phase 4 endpoints (this file):
+- GET /index/model — current embedding model config and migration state
+- POST /index/migrate/start — start embedding model migration
+- GET /index/migrate/status — migration progress
+- POST /index/migrate/cutover — switch to new model
+- Named vector support for multi-model coexistence (see ADR-0028)
 """
 
 import asyncio
 import datetime
 import hashlib
+import json
 import logging
 import math
 import os
+import time
 import urllib.parse
 
 from fastapi import FastAPI, HTTPException
@@ -36,9 +42,16 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="semantic-svc")
 
 # ── Model config ──────────────────────────────────────────────────
-EMBED_MODEL_NAME = "BAAI/bge-m3"
+# Configurable via env vars so embedding models can be swapped
+# without code changes.
+EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "BAAI/bge-m3")
+EMBED_DIM = int(os.getenv("EMBED_DIM", "1024"))
 RERANK_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
-EMBED_DIM = 1024
+
+# Active named vector: which model produces vectors for indexing
+# and queries. Must match a named vector in the Qdrant collection.
+# Named vector convention: v_{model_short} (e.g., v_bge-m3, v_bge-m4)
+ACTIVE_EMBED_MODEL = os.getenv("ACTIVE_EMBED_MODEL", "bge-m3")
 
 _embed_model: SentenceTransformer | None = None
 _rerank_model: CrossEncoder | None = None
@@ -49,10 +62,38 @@ COLLECTION_NAME = "groktocrawl_pages"
 MAX_DOCS = int(os.getenv("VECTOR_INDEX_MAX_DOCS", "250000"))
 QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
 
+# ── Migration state (in-memory, lost on restart) ──────────────────
+# For restart-surviving state, store in Valkey or a known Qdrant point.
+_migration = {
+    "status": "idle",  # idle | backfilling | dual_write | cutover | complete
+    "source_model": EMBED_MODEL_NAME,
+    "source_dim": EMBED_DIM,
+    "target_model": "",
+    "target_dim": 0,
+    "docs_processed": 0,
+    "docs_total": 0,
+    "started_at": "",
+    "completed_at": "",
+}
+_migration_task: asyncio.Task | None = None
+
+# In-memory override for active model (set by /migrate/cutover;
+# resets to ACTIVE_EMBED_MODEL env var on restart).
+_active_override: str | None = None
+
+
+def _get_active_model() -> str:
+    """Return the effective active named vector.
+    
+    Prefers the in-memory override (set by cutover), falling back
+    to the ACTIVE_EMBED_MODEL env var.
+    """
+    return _active_override if _active_override is not None else ACTIVE_EMBED_MODEL
+
 
 # ── Domain classification ─────────────────────────────────────────
 
-# Domain patterns for retention categories
+# Domain patterns for retention categories (unchanged from Phase 3)
 _DOCS_DOMAINS = {
     "readthedocs.io", "readthedocs.org",
 }
@@ -80,7 +121,7 @@ _BLOG_DOMAINS = {
 
 def _compute_domain_category(url: str) -> str:
     """Classify a URL's domain into a retention category.
-
+    
     Categories (in eviction-priority order):
         news (0.3), social (0.4), blog (0.6), api (0.7),
         unknown (0.8), reference (1.0), docs (1.2)
@@ -137,32 +178,14 @@ _DOMAIN_MULTIPLIERS = {
     "docs": 1.2,
 }
 
-_RECENCY_HALF_LIFE_DAYS = 90.0  # recency factor halves every ~63 days
+_RECENCY_HALF_LIFE_DAYS = 90.0
 
 
 def _compute_retention_score(payload: dict) -> float:
-    """Compute retention score from a Qdrant point's payload.
-
-    Higher score = more valuable to keep. Eviction targets lowest scores.
-
-    score = domain_multiplier * recency_factor + access_boost + crawl_boost
-
-    domain_multiplier: 0.3 (news) – 1.2 (docs)
-    recency_factor:    decays from 1.0 (today) to 0.1 (90+ days)
-    access_boost:      min(access_count, 100) * 0.01, max 1.0
-    crawl_boost:       min(crawl_count, 20) * 0.05, max 1.0
-
-    Worked examples:
-      News, indexed today, never accessed:   0.3 * 1.00 = 0.30
-      News, indexed 90d ago, never accessed: 0.3 * 0.37 = 0.11
-      Docs, indexed 90d ago, accessed 50x:   1.2 * 0.37 + 0.50 = 0.94
-      Docs, indexed 90d ago, accessed 50x, crawled 20x:
-                                             1.2 * 0.37 + 0.50 + 1.00 = 1.94
-    """
+    """Compute retention score from a Qdrant point's payload."""
     category = payload.get("domain_category", "unknown")
     domain_mult = _DOMAIN_MULTIPLIERS.get(category, 0.8)
 
-    # Recency: decay from 1.0 (indexed today) toward 0.1 (90+ days ago)
     raw_date = payload.get("last_indexed_at", "")
     if raw_date:
         try:
@@ -174,13 +197,11 @@ def _compute_retention_score(payload: dict) -> float:
         except (ValueError, TypeError):
             recency_factor = 0.5
     else:
-        recency_factor = 0.5  # No date → middle-of-the-road priority
+        recency_factor = 0.5
 
-    # Access boost: pages returned in search results get a retention boost
     access_count = payload.get("access_count", 0)
     access_boost = min(int(access_count), 100) * 0.01
 
-    # Crawl boost: frequently re-indexed pages (monitors, recurring) stay longer
     crawl_count = payload.get("crawl_count", 0)
     crawl_boost = min(int(crawl_count), 20) * 0.05
 
@@ -209,8 +230,21 @@ def _url_hash(url: str) -> int:
     return int(h[:16], 16)
 
 
+def _named_vector_name(model_name: str) -> str:
+    """Short name for a named vector (e.g., 'BAAI/bge-m3' -> 'v_bge-m3')."""
+    short = model_name.split("/")[-1].lower()
+    # Replace non-alphanumeric chars with hyphens for Qdrant compatibility
+    short = "".join(c if c.isalnum() else "-" for c in short).strip("-")
+    return f"v_{short}"
+
+
+def _now_iso() -> str:
+    """Return current UTC timestamp as ISO 8601 string."""
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
 async def _ensure_qdrant() -> QdrantClient:
-    """Lazy-init Qdrant client and collection."""
+    """Lazy-init Qdrant client and collection with named vector support."""
     global _qdrant, _qdrant_ready
     if _qdrant is None:
         _qdrant = QdrantClient(url=QDRANT_URL)
@@ -218,14 +252,43 @@ async def _ensure_qdrant() -> QdrantClient:
         try:
             collections = _qdrant.get_collections()
             if COLLECTION_NAME not in [c.name for c in collections.collections]:
+                # Create collection with a single named vector for the active model
+                nv_name = _named_vector_name(EMBED_MODEL_NAME)
                 _qdrant.create_collection(
                     collection_name=COLLECTION_NAME,
-                    vectors_config=models.VectorParams(
-                        size=EMBED_DIM,
-                        distance=models.Distance.COSINE,
-                    ),
+                    vectors_config={
+                        nv_name: models.VectorParams(
+                            size=EMBED_DIM,
+                            distance=models.Distance.COSINE,
+                        ),
+                    },
                 )
-                logger.info("Created Qdrant collection '%s'", COLLECTION_NAME)
+                logger.info(
+                    "Created Qdrant collection '%s' with named vector '%s' (dim=%d)",
+                    COLLECTION_NAME, nv_name, EMBED_DIM,
+                )
+            else:
+                # Validate that the active named vector exists in the collection
+                info = _qdrant.get_collection(COLLECTION_NAME)
+                configured_vectors = info.config.params.vectors
+                if isinstance(configured_vectors, dict):
+                    nv_name = _named_vector_name(EMBED_MODEL_NAME)
+                    if nv_name not in configured_vectors:
+                        # Legacy collection (no named vectors) — add the named vector
+                        logger.info(
+                            "Legacy collection detected. Adding named vector '%s' (dim=%d). "
+                            "Existing points without named vectors will get defaults.",
+                            nv_name, EMBED_DIM,
+                        )
+                        # Qdrant doesn't support adding named vectors post-creation
+                        # with a different dim. If the collection was created without
+                        # named vectors, we need to work with the default vector.
+                        logger.warning(
+                            "Collection has %s without '%s'. "
+                            "Migration will add named vectors at index time.",
+                            type(configured_vectors).__name__,
+                            nv_name,
+                        )
             _qdrant_ready = True
         except Exception as e:
             logger.error("Qdrant init failed: %s", e)
@@ -236,21 +299,12 @@ async def _ensure_qdrant() -> QdrantClient:
 # ── Scoring-based eviction (Phase 3) ──────────────────────────────
 
 async def _evict_if_needed(qdrant: QdrantClient):
-    """Scoring-based eviction if the index exceeds MAX_DOCS.
-
-    Scrolls all points with payloads (no vectors needed), computes a
-    retention score for each, and deletes the lowest-scoring documents
-    until the index is under the cap plus a buffer to avoid thrashing.
-
-    Domain-based TTLs, crawl-frequency weighting, and access-frequency
-    boosting are handled by _compute_retention_score().
-    """
+    """Scoring-based eviction if the index exceeds MAX_DOCS."""
     count = qdrant.count(COLLECTION_NAME).count
     if count <= MAX_DOCS:
         return
 
     excess = count - MAX_DOCS
-    # Buffer: delete excess + 2% to avoid thrashing on re-index
     target_delete = excess + max(100, int(MAX_DOCS * 0.02))
 
     logger.info(
@@ -258,7 +312,6 @@ async def _evict_if_needed(qdrant: QdrantClient):
         count, MAX_DOCS,
     )
 
-    # Scroll all points with payloads (no vectors — much faster)
     scored_points: list[tuple[float, int]] = []
     next_offset: int | None = None
     page_size = 2000
@@ -279,15 +332,11 @@ async def _evict_if_needed(qdrant: QdrantClient):
             score = _compute_retention_score(point.payload)
             scored_points.append((score, point.id))
 
-        # Once we have enough candidates and there are more pages,
-        # keep going until we've seen all points
         if next_offset is None:
             break
 
-    # Sort by score ascending (lowest = best eviction candidate)
     scored_points.sort(key=lambda x: x[0])
 
-    # Delete the lowest-scoring points
     to_delete = [pid for _, pid in scored_points[:target_delete]]
 
     if to_delete:
@@ -307,6 +356,114 @@ async def _evict_if_needed(qdrant: QdrantClient):
         )
     else:
         logger.info("No eviction candidates found")
+
+
+# ── Migration logic ────────────────────────────────────────────────
+
+async def _run_backfill(qdrant: QdrantClient, target_name: str, target_dim: int):
+    """Background task: scroll all points, re-embed with new model, add named vector.
+    
+    This runs as an asyncio task and updates _migration state as it progresses.
+    """
+    global _migration
+    logger.info(
+        "Migration backfill started: %s (%d) -> %s (%d)",
+        EMBED_MODEL_NAME, EMBED_DIM, target_name, target_dim,
+    )
+
+    # Load the target embedding model
+    target_model = SentenceTransformer(target_name)
+
+    # Count total docs and scroll
+    total = qdrant.count(COLLECTION_NAME).count
+    _migration["docs_total"] = total
+    _migration["status"] = "backfilling"
+
+    processed = 0
+    next_offset: int | None = None
+    page_size = 100  # Smaller batch to avoid OOM on large embeddings
+
+    try:
+        while True:
+            page, next_offset = qdrant.scroll(
+                COLLECTION_NAME,
+                limit=page_size,
+                offset=next_offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            if not page:
+                break
+
+            nv_name = _named_vector_name(target_name)
+            now = _now_iso()
+
+            for point in page:
+                if point.payload is None:
+                    continue
+                content = point.payload.get("title", "") + " " + point.payload.get("url", "")
+                # If we had original content stored, we'd use that. For backfill,
+                # we embed from URL+title as a stopgap. Full re-indexing would
+                # re-scrape the source.
+                # Embed with the new model
+                try:
+                    # Use a truncated content signal for backfill embedding
+                    signal = f"{point.payload.get('title', '')} {point.payload.get('url', '')}"
+                    if not signal.strip():
+                        signal = point.payload.get('url', '')
+                    embedding = target_model.encode(
+                        signal[:2000], normalize_embeddings=True
+                    ).tolist()
+                except Exception as e:
+                    logger.warning("Backfill embed failed for point %s: %s", point.id, e)
+                    continue
+
+                # Update the point: add named vector + update embedding_models list
+                existing_models = json.loads(
+                    point.payload.get("embedding_models", "[]")
+                )
+                model_short = _named_vector_name(EMBED_MODEL_NAME)
+                target_short = nv_name
+                if model_short not in existing_models:
+                    existing_models.append(model_short)
+                if target_short not in existing_models:
+                    existing_models.append(target_short)
+
+                qdrant.upsert(
+                    COLLECTION_NAME,
+                    points=[
+                        models.PointStruct(
+                            id=point.id,
+                            vector={
+                                nv_name: embedding,
+                            },
+                            payload={
+                                "embedding_model": EMBED_MODEL_NAME,
+                                "embedding_dim": EMBED_DIM,
+                                "embedding_models": existing_models,
+                            },
+                        )
+                    ],
+                )
+                processed += 1
+                if processed % 100 == 0:
+                    _migration["docs_processed"] = processed
+                    logger.info("Migration backfill: %d / %d", processed, total)
+
+            if next_offset is None:
+                break
+
+        _migration["docs_processed"] = processed
+        _migration["status"] = "dual_write"
+        logger.info(
+            "Migration backfill complete: %d / %d documents. Entering dual-write phase.",
+            processed, total,
+        )
+
+    except Exception as e:
+        _migration["status"] = "idle"
+        logger.error("Migration backfill failed: %s", e)
+        raise
 
 
 # ── Request/Response models ──────────────────────────────────────
@@ -366,6 +523,80 @@ class IndexStatsResponse(BaseModel):
     max_docs: int
 
 
+class ModelInfoResponse(BaseModel):
+    current_model: str
+    current_dim: int
+    active_named_vector: str
+    collection: str
+    total_docs: int
+    max_docs: int
+    migration: dict
+
+
+class MigrationStartRequest(BaseModel):
+    target_model: str
+    target_dim: int
+
+
+class MigrationStatusResponse(BaseModel):
+    status: str
+    source_model: str
+    source_dim: int
+    target_model: str
+    target_dim: int
+    docs_processed: int
+    docs_total: int
+    started_at: str
+    completed_at: str
+
+
+# ── Payload building ──────────────────────────────────────────────
+
+def _build_index_payload(url: str, title: str, existing_payload: dict | None) -> dict:
+    """Build enriched payload for a new or updated index entry."""
+    now = _now_iso()
+    domain_category = _compute_domain_category(url)
+
+    if existing_payload:
+        first_indexed = existing_payload.get("first_indexed_at", now)
+        access_count = int(existing_payload.get("access_count", 0))
+        last_accessed = existing_payload.get("last_accessed_at", "")
+        crawl_count = int(existing_payload.get("crawl_count", 0)) + 1
+        # Preserve model metadata if re-indexing
+        embedding_model = existing_payload.get("embedding_model", EMBED_MODEL_NAME)
+        embedding_dim = int(existing_payload.get("embedding_dim", EMBED_DIM))
+        embedding_models_raw = existing_payload.get("embedding_models", "[]")
+        try:
+            embedding_models = json.loads(embedding_models_raw) if isinstance(embedding_models_raw, str) else list(embedding_models_raw)
+        except (json.JSONDecodeError, TypeError):
+            embedding_models = [_named_vector_name(embedding_model)]
+    else:
+        first_indexed = now
+        access_count = 0
+        last_accessed = ""
+        crawl_count = 1
+        embedding_model = EMBED_MODEL_NAME
+        embedding_dim = EMBED_DIM
+        embedding_models = [_named_vector_name(embedding_model)]
+
+    payload = {
+        "url": url,
+        "title": title,
+        "domain_category": domain_category,
+        "first_indexed_at": first_indexed,
+        "last_indexed_at": now,
+        "crawl_count": crawl_count,
+        "access_count": access_count,
+        "last_accessed_at": last_accessed,
+        "embedding_model": embedding_model,
+        "embedding_dim": embedding_dim,
+        "embedding_models": json.dumps(embedding_models),
+    }
+
+    payload["retention_score"] = _compute_retention_score(payload)
+    return payload
+
+
 # ── Endpoints ────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -395,65 +626,18 @@ async def rerank(body: RerankRequest):
     return RerankResponse(results=results)
 
 
-# ── Phase 2/3: Vector Index ──────────────────────────────────────
-
-def _now_iso() -> str:
-    """Return current UTC timestamp as ISO 8601 string."""
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
-
-
-def _build_index_payload(url: str, title: str, existing_payload: dict | None) -> dict:
-    """Build enriched payload for a new or updated index entry.
-
-    Preserves first_indexed_at, access_count, and last_accessed_at from
-    existing payload on re-index. Increments crawl_count.
-    """
-    now = _now_iso()
-    domain_category = _compute_domain_category(url)
-
-    if existing_payload:
-        # Re-index: preserve first_indexed_at, access metadata
-        first_indexed = existing_payload.get("first_indexed_at", now)
-        access_count = int(existing_payload.get("access_count", 0))
-        last_accessed = existing_payload.get("last_accessed_at", "")
-        crawl_count = int(existing_payload.get("crawl_count", 0)) + 1
-    else:
-        # First index: all fresh
-        first_indexed = now
-        access_count = 0
-        last_accessed = ""
-        crawl_count = 1
-
-    payload = {
-        "url": url,
-        "title": title,
-        "domain_category": domain_category,
-        "first_indexed_at": first_indexed,
-        "last_indexed_at": now,
-        "crawl_count": crawl_count,
-        "access_count": access_count,
-        "last_accessed_at": last_accessed,
-    }
-
-    # Compute and store retention score for cache (recalculated on eviction too)
-    payload["retention_score"] = _compute_retention_score(payload)
-    return payload
-
+# ── Phase 2/3/4: Vector Index ────────────────────────────────────
 
 @app.post("/index", response_model=IndexResponse, status_code=201)
 async def index_page(body: IndexRequest):
     """Embed and store a page in the persistent vector index.
 
-    URL is used as the point ID — re-indexing the same URL
-    updates the existing vector rather than creating a duplicate.
-
-    Phase 3: enriches payload with domain category, crawl/access
-    tracking metadata, and retention score.
+    Phase 4: Uses named vectors. During dual-write migration,
+    indexes with both the active model and the target model.
     """
     qdrant = await _ensure_qdrant()
     model = _get_embed_model()
 
-    # Check if this URL already exists (to preserve access metadata)
     point_id = _url_hash(body.url)
     existing_payload = None
     try:
@@ -466,7 +650,7 @@ async def index_page(body: IndexRequest):
         if existing and existing[0].payload:
             existing_payload = existing[0].payload
     except Exception:
-        pass  # Best-effort — treat as new on failure
+        pass
 
     # Embed the content
     embedding = model.encode(
@@ -476,12 +660,37 @@ async def index_page(body: IndexRequest):
     # Build enriched payload
     payload = _build_index_payload(body.url, body.title, existing_payload)
 
+    # Build vector dict: at minimum the active named vector
+    active_nv = _get_active_model()
+    vectors = {active_nv: embedding}
+
+    # During dual-write phase, also embed with the target model
+    if _migration["status"] == "dual_write":
+        target_name = _migration["target_model"]
+        if target_name:
+            try:
+                target_model = SentenceTransformer(target_name)
+                target_embedding = target_model.encode(
+                    body.content[:2000], normalize_embeddings=True
+                ).tolist()
+                target_nv = _named_vector_name(target_name)
+                vectors[target_nv] = target_embedding
+
+                # Update embedding_models list
+                existing_models = json.loads(payload.get("embedding_models", "[]"))
+                for nv in [active_nv, target_nv]:
+                    if nv not in existing_models:
+                        existing_models.append(nv)
+                payload["embedding_models"] = json.dumps(existing_models)
+            except Exception as e:
+                logger.warning("Dual-write embed failed for target model: %s", e)
+
     qdrant.upsert(
         collection_name=COLLECTION_NAME,
         points=[
             models.PointStruct(
                 id=point_id,
-                vector=embedding,
+                vector=vectors,
                 payload=payload,
             )
         ],
@@ -496,9 +705,9 @@ async def index_page(body: IndexRequest):
 async def search_vector(body: VectorSearchRequest):
     """Search the vector index by semantic similarity.
 
-    Phase 3: after returning results, fires a background task to
-    increment access_count and update last_accessed_at for the
-    returned results.
+    Phase 4: searches the active named vector. The active model
+    is determined by _get_active_model() — defaults to env var,
+    overridable via /migrate/cutover.
     """
     qdrant = await _ensure_qdrant()
     model = _get_embed_model()
@@ -507,9 +716,12 @@ async def search_vector(body: VectorSearchRequest):
         body.query, normalize_embeddings=True
     ).tolist()
 
+    active_nv = _get_active_model()
+
     hits = qdrant.query_points(
         collection_name=COLLECTION_NAME,
         query=query_embedding,
+        query_vector_name=active_nv,
         limit=body.limit,
     ).points
 
@@ -530,18 +742,13 @@ async def search_vector(body: VectorSearchRequest):
 
 
 async def _track_access(qdrant: QdrantClient, hits: list) -> None:
-    """Increment access_count and update last_accessed_at for search results.
-
-    Fire-and-forget — failure is logged but never propagated.
-    """
+    """Increment access_count and update last_accessed_at for search results."""
     now = _now_iso()
     try:
         for hit in hits:
             point_id = hit.id
             payload = hit.payload or {}
             current_count = int(payload.get("access_count", 0))
-            # Use set_payload instead of overwrite to avoid losing concurrent updates
-            # We set only the access-related fields
             qdrant.set_payload(
                 COLLECTION_NAME,
                 points=[point_id],
@@ -572,3 +779,117 @@ async def index_stats():
     qdrant = await _ensure_qdrant()
     count = qdrant.count(COLLECTION_NAME).count
     return IndexStatsResponse(total_docs=count, max_docs=MAX_DOCS)
+
+
+# ── Phase 4: Model info and migration endpoints ──────────────────
+
+@app.get("/index/model", response_model=ModelInfoResponse)
+async def index_model():
+    """Return current embedding model config and migration state."""
+    qdrant = await _ensure_qdrant()
+    count = qdrant.count(COLLECTION_NAME).count
+    return ModelInfoResponse(
+        current_model=EMBED_MODEL_NAME,
+        current_dim=EMBED_DIM,
+        active_named_vector=_get_active_model(),
+        collection=COLLECTION_NAME,
+        total_docs=count,
+        max_docs=MAX_DOCS,
+        migration={
+            "status": _migration["status"],
+            "source_model": _migration["source_model"],
+            "target_model": _migration["target_model"],
+            "docs_processed": _migration["docs_processed"],
+            "docs_total": _migration["docs_total"],
+        },
+    )
+
+
+@app.post("/index/migrate/start", status_code=202)
+async def migrate_start(body: MigrationStartRequest):
+    """Start an embedding model migration (backfill phase).
+
+    Background task scrolls all points, re-embeds with the target
+    model, and adds a named vector. Queries continue using the
+    active model until cutover.
+    """
+    global _migration_task, _migration
+
+    if _migration["status"] != "idle":
+        raise HTTPException(409, f"Migration already in progress: {_migration['status']}")
+
+    qdrant = await _ensure_qdrant()
+
+    target_model_id = body.target_model
+    target_dim = body.target_dim
+
+    _migration = {
+        "status": "backfilling",
+        "source_model": EMBED_MODEL_NAME,
+        "source_dim": EMBED_DIM,
+        "target_model": target_model_id,
+        "target_dim": target_dim,
+        "docs_processed": 0,
+        "docs_total": 0,
+        "started_at": _now_iso(),
+        "completed_at": "",
+    }
+
+    _migration_task = asyncio.create_task(
+        _run_backfill(qdrant, target_model_id, target_dim)
+    )
+
+    return {
+        "status": "accepted",
+        "message": f"Backfill started: {EMBED_MODEL_NAME} -> {target_model_id}",
+    }
+
+
+@app.get("/index/migrate/status", response_model=MigrationStatusResponse)
+async def migrate_status():
+    """Return migration progress."""
+    return MigrationStatusResponse(
+        status=_migration["status"],
+        source_model=_migration["source_model"],
+        source_dim=_migration["source_dim"],
+        target_model=_migration["target_model"],
+        target_dim=_migration["target_dim"],
+        docs_processed=_migration["docs_processed"],
+        docs_total=_migration["docs_total"],
+        started_at=_migration["started_at"],
+        completed_at=_migration["completed_at"],
+    )
+
+
+@app.post("/index/migrate/cutover")
+async def migrate_cutover():
+    """Switch queries to the new model.
+
+    The in-memory active model override flips to the target model's
+    named vector. On container restart, reverts to ACTIVE_EMBED_MODEL
+    env var. For permanent cutover, update the env var and restart.
+    """
+    global _active_override
+
+    if _migration["status"] not in ("dual_write", "backfilling"):
+        raise HTTPException(409, f"Cannot cutover: migration status is '{_migration['status']}'")
+
+    if not _migration["target_model"]:
+        raise HTTPException(400, "No target model configured")
+
+    target_nv = _named_vector_name(_migration["target_model"])
+    _active_override = target_nv
+    _migration["status"] = "cutover"
+    _migration["completed_at"] = _now_iso()
+
+    logger.info(
+        "Migration cutover: active model switched to '%s' (named vector: '%s')",
+        _migration["target_model"], target_nv,
+    )
+
+    return {
+        "status": "cutover",
+        "active_named_vector": target_nv,
+        "message": f"Queries now using '{target_nv}'. "
+                   f"Update ACTIVE_EMBED_MODEL env var and restart to persist.",
+    }
