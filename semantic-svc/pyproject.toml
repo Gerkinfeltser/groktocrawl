@@ -1,0 +1,11 @@
+[project]
+name = "semantic-svc"
+version = "0.1.0"
+description = "GroktoCrawl semantic search — embedding and reranking"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "sentence-transformers>=3.0.0",
+    "numpy>=1.26.0",
+]

@@ -250,6 +250,52 @@ async def search(request: Request, body: SearchRequest):
             SearchResult(url=r["url"], title=r["title"], description=r.get("description", ""))
             for r in results
         ]
+        # Semantic/hybrid retrieval: rerank results by embedding similarity
+        if body.retrieval_mode in ("semantic", "hybrid") and results:
+            from .semantic_client import SemanticClient
+            from .scraper_client import ScraperClient
+            import numpy as np
+
+            semantic = SemanticClient(request.app.state.semantic_url)
+            scraper = ScraperClient(request.app.state.scraper_url)
+            try:
+                # Scrape content for top results
+                urls_to_scrape = [r["url"] for r in results[:body.limit]]
+                contents = []
+                for url in urls_to_scrape:
+                    try:
+                        scraped = await scraper.scrape(url)
+                        content = scraped.get("data", {}).get("markdown", "") if scraped.get("success") else ""
+                        contents.append(content[:2000])  # Truncate for embedding
+                    except Exception:
+                        contents.append("")
+
+                # Embed query + document contents
+                texts = [body.query] + contents
+                embeddings = await semantic.embed(texts)
+                query_embedding = np.array(embeddings[0])
+                doc_embeddings = np.array(embeddings[1:])
+
+                if body.retrieval_mode == "hybrid":
+                    # Cross-encoder reranker for merged keyword+semantic scoring
+                    reranked = await semantic.rerank(
+                        body.query,
+                        [r.description for r in search_results[:body.limit]],
+                        top_k=body.limit,
+                    )
+                    # Reorder by cross-encoder scores
+                    new_order = [item["index"] for item in reranked]
+                    search_results = [search_results[i] for i in new_order if i < len(search_results)]
+                else:
+                    # Cosine similarity reranking
+                    similarities = np.dot(query_embedding, doc_embeddings.T)
+                    ranked_indices = np.argsort(similarities)[::-1]
+                    search_results = [search_results[i] for i in ranked_indices if i < len(search_results)]
+
+            finally:
+                await semantic.close()
+                await scraper.close()
+
         # Route results to the correct top-level key based on sources filter
         data: dict[str, list] = {"web": [], "images": [], "news": []}
         if body.sources:
