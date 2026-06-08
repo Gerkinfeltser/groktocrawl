@@ -251,7 +251,10 @@ async def answer(request: Request, body: AnswerRequest):
                 llm_model=request.app.state.llm_model,
                 requested_model=body.model if body.model != "default" else None,
             ):
-                if event["type"] == "sources":
+                if event["type"] == "sources_pending":
+                    import json
+                    yield f"data: {json.dumps({'type': 'sources_pending', 'sources': event['sources']})}\n\n"
+                elif event["type"] == "sources":
                     import json
                     yield f"data: {json.dumps({'type': 'sources', 'sources': event['sources']})}\n\n"
                 elif event["type"] == "token":

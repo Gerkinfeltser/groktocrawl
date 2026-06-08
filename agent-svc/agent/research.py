@@ -157,34 +157,77 @@ async def _scrape_urls(
     min_sources: int = 3,
     max_attempts: int | None = None,
 ) -> tuple[list[str], list[dict]]:
-    """Scrape URLs and return (documents, source_details).
+    """Scrape URLs with bounded concurrency and return (documents, source_details).
 
-    Tries URLs in order until ``min_sources`` are successfully scraped
+    Tries URLs in batches until ``min_sources`` are successfully scraped
     or the list is exhausted (whichever comes first).
-    ``max_attempts`` sets an upper bound on how many URLs are tried
-    (default: try all provided URLs).
+    Uses a semaphore (max 2 concurrent) with per-URL timeout (20s).
+    ``max_attempts`` sets an upper bound on how many URLs are tried.
     """
+    import asyncio
+    from urllib.parse import urlparse
+
     documents: list[str] = []
     source_details: list[dict] = []
     max_attempts = max_attempts or len(urls)
+    semaphore = asyncio.Semaphore(2)
+    url_timeout = 20
+
+    async def _scrape_one(url: str) -> tuple[str | None, dict | None]:
+        async with semaphore:
+            try:
+                logger.info("Scraping: %s", url)
+                result = await asyncio.wait_for(scraper.scrape(url), timeout=url_timeout)
+                if result.get("success") and result.get("data", {}).get("markdown"):
+                    md = result["data"]["markdown"]
+                    domain = urlparse(url).netloc
+                    doc = f"Source: {url} (domain: {domain})\n\n{md[:8000]}"
+                    src = {"url": url, "source": result["data"].get("source", "unknown"), "char_count": len(md)}
+                    return doc, src
+                else:
+                    logger.warning("Failed to scrape %s: %s", url, result.get("error"))
+                    return None, None
+            except asyncio.TimeoutError:
+                logger.warning("Timeout scraping %s after %ss", url, url_timeout)
+                return None, None
+            except Exception as e:
+                logger.warning("Error scraping %s: %s", url, e)
+                return None, None
+
+    # Process URLs in batches — launch concurrent tasks, collect results,
+    # stop when min_sources is reached or max_attempts exhausted
+    pending = list(urls)
+    task_to_url: dict[asyncio.Task, str] = {}
+    tasks: set[asyncio.Task] = set()
     attempts = 0
 
-    for url in urls:
-        if len(documents) >= min_sources:
-            break
-        if attempts >= max_attempts:
+    while pending or tasks:
+        # Fill slots up to our budget
+        while len(tasks) < 2 and pending and attempts < max_attempts:
+            url = pending.pop(0)
+            attempts += 1
+            task = asyncio.create_task(_scrape_one(url))
+            task_to_url[task] = url
+            tasks.add(task)
+
+        if not tasks:
             break
 
-        attempts += 1
-        logger.info("Scraping: %s", url)
-        result = await scraper.scrape(url)
-        if result.get("success") and result.get("data", {}).get("markdown"):
-            md = result["data"]["markdown"]
-            domain = urlparse(url).netloc
-            documents.append(f"Source: {url} (domain: {domain})\n\n{md[:8000]}")
-            source_details.append({"url": url, "source": result["data"].get("source", "unknown"), "char_count": len(md)})
-        else:
-            logger.warning("Failed to scrape %s: %s", url, result.get("error"))
+        # Wait for at least one task to complete
+        done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+        for task in done:
+            doc, src = task.result()
+            if doc and src:
+                documents.append(doc)
+                source_details.append(src)
+                if len(documents) >= min_sources:
+                    # Cancel remaining tasks and stop
+                    for t in tasks:
+                        t.cancel()
+                    tasks.clear()
+                    return documents, source_details
+
     return documents, source_details
 
 
@@ -348,6 +391,13 @@ async def run_answer_stream(
         logger.info("Answer (stream): searching for: %s", query)
         search_results, _health = await searxng.search(query, limit=num_sources * 2)
         target_urls = [r["url"] for r in search_results if r.get("url")]
+
+        # Yield pending sources for progress visibility
+        pending_sources = [
+            {"url": r["url"], "title": r.get("title", ""), "relevance": r.get("description", "")}
+            for r in search_results if r.get("url")
+        ]
+        yield {"type": "sources_pending", "sources": pending_sources}
 
         # Step 2: Scrape (keep trying until we have num_sources or exhaust the pool)
         documents, source_details = await _scrape_urls(target_urls, scraper, min_sources=num_sources, max_attempts=num_sources * 2)
