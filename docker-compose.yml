@@ -95,7 +95,7 @@ services:
       - VECTOR_INDEX_MAX_DOCS=${VECTOR_INDEX_MAX_DOCS:-250000}
 
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.18.2
     restart: unless-stopped
     volumes:
       - qdrant_data:/qdrant/storage
