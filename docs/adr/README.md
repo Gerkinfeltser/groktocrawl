@@ -42,5 +42,6 @@ An Architecture Decision Record captures an important architectural decision mad
 | 0021 | [Web Portal](0021-web-portal.md) | accepted |
 | 0022 | [Agent SSE Streaming](0022-agent-sse-streaming.md) | accepted |
 | 0023 | [Search Type Spectrum — Fast and Rich](0023-search-type-spectrum-fast-and-rich.md) | proposed |
+| 0024 | [Artifact Pyramid CLI Output](0024-artifact-pyramid-cli-output.md) | proposed |
 
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full ADR workflow: when to write an ADR, how to number it, and how to get it reviewed in a PR.
