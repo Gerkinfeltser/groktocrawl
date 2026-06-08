@@ -259,7 +259,7 @@ class Citation(BaseModel):
 class AnswerRequest(BaseModel):
     query: str = Field(..., max_length=10000, description="Natural language question")
     search_type: str = Field(default="auto", description="Hint for search depth")
-    retrieval_mode: str = Field(default="keyword", description="keyword | semantic | hybrid")
+    retrieval_mode: str = Field(default="keyword", description="keyword | semantic | hybrid | vector | hybrid_vector")
     num_sources: int = Field(default=5, ge=1, le=20, description="How many sources to ground the answer")
     model: str = Field(default="default", description="Per-request LLM override")
     stream: bool = Field(default=False, description="SSE streaming response")
