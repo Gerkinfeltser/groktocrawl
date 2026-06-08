@@ -9,9 +9,9 @@ description: >-
 license: MIT
 metadata:
   author: groktopus
-  version: "1.5.0"
+  version: "1.5.1"
   changelog:
-    "1.5.0": "Add Adapter System section — YouTube and Bluesky adapters auto-route scrape to rich markdown output"
+    "1.5.1": "CLI answer default changed from sync to streaming; --stream flag replaced with --sync (opt-out)"
     "1.4.0": "Add CLI subcommands for monitor (create/list/get/update/delete), parse (file to markdown), and generate-llmstxt (with async polling)"
     "1.3.3": "Add change monitoring section with active job tracking and monitor lifecycle guidance"
     "1.3.2": "Add multi-source research fallback chain (search→scrape→browser→agent) and domain exploration strategy (llms.txt→map→crawl→search site:)"
@@ -35,7 +35,7 @@ groktocrawl scrape https://example.com
 groktocrawl search "raspberry pi 5" --limit 3 --json
 groktocrawl agent "What were the key Google I/O 2025 announcements?"
 groktocrawl answer "What is the Fed rate?"
-groktocrawl answer "How tall is the Burj Khalifa?" --stream
+groktocrawl answer "How tall is the Burj Khalifa?" --sync  (non-streaming, wait for full answer)
 ```
 
 ## Commands
@@ -49,7 +49,7 @@ groktocrawl answer "How tall is the Burj Khalifa?" --stream
 | map | URL discovery | `groktocrawl map <url> --limit 50` |
 | crawl | Site crawling | `groktocrawl crawl <url> --max-depth 3` |
 | agent | Autonomous research | `groktocrawl agent "<prompt>"` |
-| answer | Grounded Q&A (sync) | `groktocrawl answer "<question>"` |
+| answer | Grounded Q&A (streaming) | `groktocrawl answer "<question>"` |
 | browser | Headless browser | `groktocrawl browser create --ttl 300` |
 | active | List crawl jobs | `groktocrawl active --json` |
 | monitor | Manage monitors | `groktocrawl monitor create/list/get/update/delete` |
@@ -61,7 +61,7 @@ groktocrawl answer "How tall is the Burj Khalifa?" --stream
 | Need | Command | Why |
 |------|---------|-----|
 | Multi-source deep research | `agent "<prompt>"` | Searches, scrapes, and synthesizes deeply |
-| Single factual question | `answer "<question>"` | One call, cited answer |
+| Single factual question | `answer "<question>"` | One call, cited answer, streaming by default |
 | Single URL content | `scrape <url>` | One fetch, no synthesis |
 | Binary files (PDF, EPUB, image) | `download <url>` | Binary content download |
 | Search results | `search "<query>"` | Just the search hits |
@@ -128,6 +128,9 @@ groktocrawl agent "Compare the features from the p5.js release notes..."
 
 ### Scrape returns short content
 JS-heavy sites (SPAs, modern news) may return under 500 chars. Switch to browser pipeline. Exception: YouTube and Bluesky URLs are handled by the adapter system — scrape returns rich content without browser fallback.
+
+### Running `which groktocrawl` before every call
+Don't. The CLI is at `~/.local/bin/groktocrawl`, it's always on PATH. If it broke, the first actual call would error out and tell you. The `which` check is a cargo-cult habit that adds a wasted round-trip and 30s of latency for zero value. Just call `groktocrawl` directly.
 
 ### Error recovery
 
