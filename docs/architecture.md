@@ -79,6 +79,7 @@ flowchart LR
         stats["GET /index/stats"]
         model_info["GET /index/model\nModel config + migration"]
         migrate["POST /index/migrate/start\nGET /index/migrate/status\nPOST /index/migrate/cutover"]
+        metrics_ep["GET /metrics\nOpenMetrics format\nstdlib (no deps)"]
     end
 
     smart_scrape --> tier1
@@ -181,3 +182,5 @@ All significant architectural decisions are documented as ADRs in `docs/adr/`. S
 | [ADR-0026](adr/0026-phase2-vector-index.md) | Phase 2 persistent vector index |
 | [ADR-0027](adr/0027-smarter-index-retention.md) | Phase 3 smarter index retention |
 | [ADR-0028](adr/0028-embedding-model-migration-path.md) | Phase 4 embedding model migration |
+| [ADR-0029](adr/0029-service-level-metrics-for-semantic-svc.md) | Service-level metrics for semantic-svc |
+| [ADR-0018](adr/0018-observability-infrastructure.md) | Observability infrastructure (agent-svc /metrics, health, logging) |
