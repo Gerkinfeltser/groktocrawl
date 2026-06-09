@@ -43,9 +43,12 @@ engines:
   - name: bing
     disabled: true
 
-  # Our primary search engine — requires BRAVE_API_KEY env var
+  # Override default brave engine with API key
+  # (use_default_settings: true loads a brave scraper without auth)
+  # Using engine: braveapi hits the actual Brave Search API with
+  # X-Subscription-Token auth (not scraping search.brave.com)
   - name: brave-api
-    engine: brave
+    engine: braveapi
     api_key: "${BRAVE_API_KEY}"
     shortcut: bv
     disabled: false
