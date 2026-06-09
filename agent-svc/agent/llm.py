@@ -6,6 +6,7 @@ Ollama, llama.cpp, vLLM, etc.
 
 import json
 import logging
+import os
 
 import httpx
 
@@ -62,6 +63,11 @@ class LLMClient:
             "max_tokens": 8192,
             "stream": True,
         }
+
+        # Disable thinking/reasoning mode for models that support it
+        # (DeepSeek V4 Flash emits  blocks by default)
+        if os.getenv("LLM_ENABLE_THINKING", "false").lower() not in ("true", "1"):
+            body["enable_thinking"] = False
 
         headers = {
             "Content-Type": "application/json",
@@ -140,6 +146,10 @@ class LLMClient:
             "temperature": 0.3,
             "max_tokens": 8192,
         }
+
+        # Disable thinking/reasoning mode for models that support it
+        if os.getenv("LLM_ENABLE_THINKING", "false").lower() not in ("true", "1"):
+            body["enable_thinking"] = False
 
         # If schema is provided, request structured JSON output
         if schema:

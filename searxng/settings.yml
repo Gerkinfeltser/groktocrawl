@@ -1,7 +1,14 @@
-# Minimal SearXNG configuration for GroktoCrawl
+# SearXNG configuration for GroktoCrawl
 # See https://docs.searxng.org/admin/settings/ for full reference
+#
+# Environment variable placeholders (${VAR}) are substituted at
+# container startup by the searxng/docker-entrypoint.sh wrapper.
+# Set values in .env or docker-compose environment.
 
 use_default_settings: true
+
+general:
+  instance_name: "GroktoCrawl"
 
 server:
   secret_key: "groktocrawl-secret-change-me"
@@ -20,14 +27,25 @@ search:
     - html
     - json
 
+# Disable engines that fail from container networks
+# (wikidata 403s, ahmia/torch unavailable, etc.)
+# Only wikipedia and brave-api are enabled.
 engines:
-  - name: duckduckgo
-    disabled: false
-  - name: google
-    disabled: false
-  - name: wikipedia
-    disabled: false
+  # Disable problematic engines
+  - name: ahmia
+    disabled: true
+  - name: torch
+    disabled: true
+  - name: wikidata
+    disabled: true
   - name: duckduckgo definitions
     disabled: true
   - name: bing
     disabled: true
+
+  # Our primary search engine — requires BRAVE_API_KEY env var
+  - name: brave-api
+    engine: brave
+    api_key: "${BRAVE_API_KEY}"
+    shortcut: bv
+    disabled: false
