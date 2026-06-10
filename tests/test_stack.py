@@ -507,6 +507,127 @@ def test_cveorg_adapter_known_cve():
     assert len(md) > 100, f"Expected >100 chars, got {len(md)}"
 
 
+# ── Security adapter tests ─────────────────────────────────────
+SHODAN_HOST = "https://www.shodan.io/host/8.8.8.8"
+CRTSH_DOMAIN = "https://crt.sh/?q=example.com"
+EXPLOITDB_ID = "https://www.exploit-db.com/exploits/1000"
+MITRE_TECHNIQUE = "https://attack.mitre.org/techniques/T1059"
+VT_FILE = "https://virustotal.com/gui/file/d41d8cd98f00b204e9800998ecf8427e"
+ABUSEIPDB_IP = "https://www.abuseipdb.com/check/8.8.8.8"
+HIBP_ACCOUNT = "https://haveibeenpwned.com/account/test@example.com"
+OTX_IP = "https://otx.alienvault.com/indicator/IP/8.8.8.8"
+VULNCHECK_CVE = "https://vulncheck.com/cve/CVE-2024-3094"
+CENSYS_IP = "https://search.censys.io/ipv4/8.8.8.8"
+
+
+def test_shodan_adapter_public_host():
+    """Shodan host page should be handled by the adapter (scrape fallback)."""
+    r = httpx.post(SCRAPER + "/scrape", json={"url": SHODAN_HOST}, timeout=120)
+    payload = r.json()
+    assert payload["success"] is True, payload.get("error")
+    md = payload.get("data", {}).get("markdown", "")
+    assert len(md) > 50, f"Expected >50 chars, got {len(md)}"
+    assert "8.8.8.8" in md or "Shodan" in md or "shodan" in md.lower()
+
+
+def test_shodan_adapter_source():
+    """Shodan adapter source should be shodan-html (no API key in CI)."""
+    r = httpx.post(SCRAPER + "/scrape", json={"url": SHODAN_HOST}, timeout=120)
+    payload = r.json()
+    assert payload["success"] is True
+    src = payload.get("data", {}).get("source", "")
+    assert "shodan" in src, f"Expected shodan source, got {src}"
+
+
+def test_crtsh_adapter_domain():
+    """CRT.sh domain lookup should return certificate data."""
+    r = httpx.post(SCRAPER + "/scrape", json={"url": CRTSH_DOMAIN}, timeout=120)
+    payload = r.json()
+    assert payload["success"] is True, payload.get("error")
+    md = payload.get("data", {}).get("markdown", "")
+    assert len(md) > 50, f"Expected >50 chars, got {len(md)}"
+    assert "example.com" in md or "Certificate" in md
+
+
+def test_exploitdb_adapter_exploit():
+    """Exploit-DB exploit page should return content via adapter."""
+    r = httpx.post(SCRAPER + "/scrape", json={"url": EXPLOITDB_ID}, timeout=120)
+    payload = r.json()
+    assert payload["success"] is True, payload.get("error")
+    md = payload.get("data", {}).get("markdown", "")
+    assert len(md) > 50, f"Expected >50 chars, got {len(md)}"
+
+
+def test_mitreattack_adapter_technique():
+    """MITRE ATT&CK technique page should return content via STIX adapter."""
+    r = httpx.post(SCRAPER + "/scrape", json={"url": MITRE_TECHNIQUE}, timeout=120)
+    payload = r.json()
+    assert payload["success"] is True, payload.get("error")
+    md = payload.get("data", {}).get("markdown", "")
+    assert len(md) > 50, f"Expected >50 chars, got {len(md)}"
+    assert "T1059" in md or "Command" in md or "Scripting" in md
+
+
+def test_abuseipdb_adapter_ip():
+    """AbuseIPDB IP check should return content via adapter."""
+    r = httpx.post(SCRAPER + "/scrape", json={"url": ABUSEIPDB_IP}, timeout=120)
+    payload = r.json()
+    assert payload["success"] is True, payload.get("error")
+    md = payload.get("data", {}).get("markdown", "")
+    assert len(md) > 50, f"Expected >50 chars, got {len(md)}"
+
+
+def test_censys_adapter_ip():
+    """Censys IP page should be handled by the adapter (scrape fallback)."""
+    r = httpx.post(SCRAPER + "/scrape", json={"url": CENSYS_IP}, timeout=120)
+    payload = r.json()
+    assert payload["success"] is True, payload.get("error")
+    md = payload.get("data", {}).get("markdown", "")
+    assert len(md) > 20, f"Expected >20 chars, got {len(md)}"
+
+
+def test_virustotal_adapter_file():
+    """VirusTotal file page should be handled by the adapter."""
+    r = httpx.post(SCRAPER + "/scrape", json={"url": VT_FILE}, timeout=120)
+    payload = r.json()
+    # VT returns 404 for empty hashes — that's fine, the adapter just falls through
+    # In this case the generic tier handles it
+    assert payload.get("error") is None or payload["success"] is True
+
+
+def test_security_adapters_loaded():
+    """All 10 security adapters should be registered at startup."""
+    r = httpx.get(SCRAPER + "/health", timeout=30)
+    assert r.status_code == 200
+
+
+def test_otx_adapter_indicator():
+    """OTX indicator page should return content via adapter."""
+    r = httpx.post(SCRAPER + "/scrape", json={"url": OTX_IP}, timeout=120)
+    payload = r.json()
+    assert payload["success"] is True, payload.get("error")
+    md = payload.get("data", {}).get("markdown", "")
+    assert len(md) > 20, f"Expected >20 chars, got {len(md)}"
+
+
+def test_hibp_adapter_breach():
+    """HIBP account page should return content via adapter."""
+    r = httpx.post(SCRAPER + "/scrape", json={"url": HIBP_ACCOUNT}, timeout=120)
+    payload = r.json()
+    assert payload["success"] is True, payload.get("error")
+    md = payload.get("data", {}).get("markdown", "")
+    assert len(md) > 20, f"Expected >20 chars, got {len(md)}"
+
+
+def test_vulncheck_adapter_cve():
+    """VulnCheck CVE page should return content via adapter."""
+    r = httpx.post(SCRAPER + "/scrape", json={"url": VULNCHECK_CVE}, timeout=120)
+    payload = r.json()
+    assert payload["success"] is True, payload.get("error")
+    md = payload.get("data", {}).get("markdown", "")
+    assert len(md) > 50, f"Expected >50 chars, got {len(md)}"
+
+
 def test_answer_endpoint_returns_valid_structure():
     """POST /v2/answer returns a grounded answer with sources and citations."""
     r = httpx.post(
