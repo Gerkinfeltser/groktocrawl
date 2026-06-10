@@ -1,0 +1,72 @@
+[project]
+name = "groktocrawl"
+version = "0.7.0"
+description = "Self-hosted, Firecrawl-compatible web scraping and AI research API"
+requires-python = ">=3.12"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-xdist>=3.0",
+    "httpx>=0.28.0",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+exclude = [
+    ".git",
+    "__pycache__",
+    "*.egg-info",
+    "dist",
+    ".venv",
+    "venv",
+    ".pytest_cache",
+]
+
+[tool.ruff.lint]
+select = [
+    "F",     # pyflakes — catch errors
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "I",     # isort — import ordering
+    "N",     # pep8-naming
+    "UP",    # pyupgrade — modern Python
+    "B",     # flake8-bugbear
+    "C4",    # flake8-comprehensions
+    "SIM",   # flake8-simplify
+    "C901",  # mccabe complexity
+    "G",     # flake8-logging-format
+    "T20",   # flake8-print — no print in production code
+    "RUF",   # ruff-specific rules
+    "FURB",  # refurb — general quality
+]
+
+ignore = [
+    "E501",   # line too long — covered by ruff formatter
+    "E402",   # module import not at top — needed for some app patterns
+    "SIM117", # nested with — sometimes clearer
+    "SIM108", # ternary — if/else can be clearer
+    "SIM114", # combine conditions — sometimes clearer separate
+    "RUF001", # ambiguous char — noisy on comments
+    "RUF003", # ambiguous char in docstring — noisy
+    "FURB101",# TypeVar name check — not always applicable
+    "RUF006", # fire-and-forget create_task — intentional pattern
+    "C901",   # complexity — tracked separately, not a blocker
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"**/tests/**" = ["T20"]
+"tests/*" = ["T20"]
+
+[tool.black]
+target-version = ["py312"]
+line-length = 88
+skip-magic-trailing-comma = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=agent-svc/agent --cov=scraper-svc/scraper --cov=browser-svc/browser_svc --cov=parse-svc/parse_svc --cov=portal-svc/portal --cov=semantic-svc --cov-report=term-missing --cov-fail-under=15 --durations=10 -n auto"

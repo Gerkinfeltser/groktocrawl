@@ -1,0 +1,47 @@
+# GroktoCrawl CODEOWNERS
+# Each line is a file pattern followed by one or more owners.
+# Order matters: the last matching pattern takes precedence.
+#
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner for all files
+* @groktopus
+
+# Core API and worker
+/agent-svc/ @groktopus
+
+# Scraper service (including adapters)
+/scraper-svc/ @groktopus
+
+# Semantic search service
+/semantic-svc/ @groktopus
+
+# Browser session service
+/browser-svc/ @groktopus
+
+# File parsing service
+/parse-svc/ @groktopus
+
+# Web portal
+/portal-svc/ @groktopus
+
+# Infrastructure
+/docker-compose.yml @groktopus
+
+# CLI tool
+/groktocrawl @groktopus
+
+# Documentation
+/docs/ @groktopus
+/README.md @groktopus
+/AGENTS.md @groktopus
+/CONTRIBUTING.md @groktopus
+/CHANGELOG.md @groktopus
+
+# CI/CD and GitHub config
+/.github/ @groktopus
+
+# Project configuration
+/pyproject.toml @groktopus
+/.pre-commit-config.yaml @groktopus
+/.devcontainer/ @groktopus

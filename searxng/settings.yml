@@ -49,6 +49,6 @@ engines:
   # X-Subscription-Token auth (not scraping search.brave.com)
   - name: brave-api
     engine: braveapi
-    api_key: "${BRAVE_API_KEY}"
+    api_key: "placeholder-no-key"
     shortcut: bv
     disabled: false

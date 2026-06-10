@@ -31,7 +31,9 @@ FLARE_SOLVERR_URL = os.getenv("FLARE_SOLVERR_URL", "http://flare-solverr:8191/v1
 SCRAPE_CACHE_TTL = int(os.getenv("SCRAPE_CACHE_TTL", "3600"))
 SCRAPE_CACHE_MIN_TTL = int(os.getenv("SCRAPE_CACHE_MIN_TTL", "60"))
 SCRAPE_CACHE_MAX_TTL = int(os.getenv("SCRAPE_CACHE_MAX_TTL", "86400"))
-SCRAPE_CACHE_STABLE_MULTIPLIER = float(os.getenv("SCRAPE_CACHE_STABLE_MULTIPLIER", "2.0"))
+SCRAPE_CACHE_STABLE_MULTIPLIER = float(
+    os.getenv("SCRAPE_CACHE_STABLE_MULTIPLIER", "2.0")
+)
 SCRAPE_CACHE_VOLATILE_CAP = int(os.getenv("SCRAPE_CACHE_VOLATILE_CAP", "300"))
 
 # ── Proxy configuration ─────────────────────────────────────────
@@ -112,12 +114,12 @@ def _normalize_url_for_cache(url: str) -> str:
     parsed = urlparse(url)
     scheme = parsed.scheme.lower()
     netloc = parsed.netloc.lower()
-    path = parsed.path.rstrip("/") if parsed.path != "/" else "/"
+    path = parsed.path.lower().rstrip("/") if parsed.path.lower() != "/" else "/"
     query = parsed.query
     fragment = parsed.fragment
     # Sort query parameters for consistency
     if query:
-        params = sorted(query.split("&"))
+        params = sorted(query.lower().split("&"))
         query = "&".join(params)
     normalized = f"{scheme}://{netloc}{path}"
     if query:
@@ -154,13 +156,18 @@ async def _get_cache_client():
         import redis.asyncio as aioredis
 
         _cache_client = aioredis.from_url(
-            redis_url, decode_responses=True,
+            redis_url,
+            decode_responses=True,
         )
         await _cache_client.ping()
         logger.info("Connected to Valkey for scrape result cache at %s", redis_url)
         return _cache_client
     except Exception as e:
-        logger.warning("Valkey unavailable for scrape cache at %s — caching disabled (%s)", redis_url, e)
+        logger.warning(
+            "Valkey unavailable for scrape cache at %s — caching disabled (%s)",
+            redis_url,
+            e,
+        )
         _cache_client = None
         return None
 
@@ -197,15 +204,18 @@ async def _check_cache(url: str) -> dict | None:
         last_modified = cached.get("last_modified")
 
         # Slow tiers with ETag/LM → blocking revalidation
-        if (source_tier in ("playwright", "flare-solverr", "browser-svc")
-                and (etag or last_modified)):
+        if source_tier in ("playwright", "flare-solverr", "browser-svc") and (
+            etag or last_modified
+        ):
             fresh, result = await _conditional_revalidate(url, etag, last_modified)
             if fresh:
                 # 304 — extend TTL and return cached content
                 new_ttl = _resolve_cache_ttl(url)
                 cached["last_checked_at"] = time.time()
                 await _set_cache_raw(key, cached, new_ttl)
-                logger.info("Cache revalidated (304) for %s, extended TTL to %ds", url, new_ttl)
+                logger.info(
+                    "Cache revalidated (304) for %s, extended TTL to %ds", url, new_ttl
+                )
                 return cached
             elif result:
                 # 200 — content changed, return fresh and update cache
@@ -266,10 +276,11 @@ def _resolve_cache_ttl(url: str, stability_multiplier: float = 1.0) -> int:
     matched_ttl: int | None = None
     matched_len = 0
     for pattern, ttl in domain_ttls.items():
-        if hostname == pattern or hostname.endswith("." + pattern):
-            if len(pattern) > matched_len:
-                matched_ttl = ttl
-                matched_len = len(pattern)
+        if (hostname == pattern or hostname.endswith("." + pattern)) and len(
+            pattern
+        ) > matched_len:
+            matched_ttl = ttl
+            matched_len = len(pattern)
 
     base_ttl = matched_ttl if matched_ttl is not None else SCRAPE_CACHE_TTL
     adjusted = int(base_ttl * stability_multiplier)
@@ -283,17 +294,19 @@ def _merge_cache_metadata(fresh_result: dict, cached: dict) -> dict:
     change_count) across cache generations.
     """
     fresh_result["fetch_count"] = cached.get("fetch_count", 0) + 1
-    fresh_result["first_fetched_at"] = cached.get(
-        "first_fetched_at", time.time()
-    )
+    fresh_result["first_fetched_at"] = cached.get("first_fetched_at", time.time())
     fresh_result["last_checked_at"] = time.time()
     fresh_result["change_count"] = cached.get("change_count", 0)
     return fresh_result
 
 
-def _enrich_cache_entry(result: dict, url: str, etag: str | None = None,
-                        last_modified: str | None = None,
-                        prior_entry: dict | None = None) -> dict:
+def _enrich_cache_entry(
+    result: dict,
+    url: str,
+    etag: str | None = None,
+    last_modified: str | None = None,
+    prior_entry: dict | None = None,
+) -> dict:
     """Add freshness metadata to a result dict before caching.
 
     Enriches the result with content_hash, ETag, Last-Modified, source_tier,
@@ -349,8 +362,7 @@ async def _set_cache_raw(key: str, payload: dict, ttl: int) -> None:
         logger.debug("Cache write failed for key=%s: %s", key, e)
 
 
-async def _set_cache(url: str, result: dict,
-                     prior_entry: dict | None = None) -> None:
+async def _set_cache(url: str, result: dict, prior_entry: dict | None = None) -> None:
     """Store a scrape result with intelligent cache metadata.
 
     Enriches the result with freshness tracking fields (content_hash, ETag,
@@ -380,8 +392,10 @@ async def _set_cache(url: str, result: dict,
 
         # Enrich with freshness metadata
         enriched = _enrich_cache_entry(
-            result, url,
-            etag=etag, last_modified=last_modified,
+            result,
+            url,
+            etag=etag,
+            last_modified=last_modified,
             prior_entry=prior_entry,
         )
 
@@ -405,14 +419,19 @@ async def _set_cache(url: str, result: dict,
         await client.setex(key, ttl, json.dumps(enriched))
         logger.info(
             "Cached scrape result for %s (key=%s, ttl=%ds, fetch_count=%d, change_count=%d)",
-            url, key, ttl, enriched.get("fetch_count", 0), enriched.get("change_count", 0),
+            url,
+            key,
+            ttl,
+            enriched.get("fetch_count", 0),
+            enriched.get("change_count", 0),
         )
     except Exception as e:
         logger.debug("Cache write failed for %s: %s", url, e)
 
 
-async def _conditional_revalidate(url: str, etag: str | None,
-                                  last_modified: str | None) -> tuple[bool, dict | None]:
+async def _conditional_revalidate(
+    url: str, etag: str | None, last_modified: str | None
+) -> tuple[bool, dict | None]:
     """Send a conditional GET to check whether cached content is still fresh.
 
     Uses If-None-Match and If-Modified-Since headers. Returns a (fresh, result)
@@ -435,7 +454,9 @@ async def _conditional_revalidate(url: str, etag: str | None,
 
     try:
         async with httpx.AsyncClient(
-            follow_redirects=True, timeout=15, headers=headers,
+            follow_redirects=True,
+            timeout=15,
+            headers=headers,
         ) as client:
             resp = await client.get(url)
             if resp.status_code == 304:
@@ -462,15 +483,16 @@ async def _conditional_revalidate(url: str, etag: str | None,
             else:
                 logger.debug(
                     "Unexpected revalidation status %d for %s",
-                    resp.status_code, url,
+                    resp.status_code,
+                    url,
                 )
                 return (False, None)
     except Exception as e:
         logger.debug("Revalidation failed for %s: %s", url, e)
         return (False, None)
 
-from .adapters.base import AdapterContext, get_registry
 
+from .adapters.base import AdapterContext, get_registry
 
 # ── Binary content-type detection ──────────────────────────────
 BINARY_TYPE_PREFIXES = ("image/", "audio/", "video/")
@@ -494,10 +516,7 @@ def _is_binary_content_type(content_type: str) -> bool:
     ct = content_type.lower().split(";")[0].strip()
     if ct in BINARY_TYPE_EXACT:
         return True
-    for prefix in BINARY_TYPE_PREFIXES:
-        if ct.startswith(prefix):
-            return True
-    return False
+    return any(ct.startswith(p) for p in BINARY_TYPE_PREFIXES)
 
 
 def _derive_filename(url: str, content_type: str) -> str:
@@ -580,17 +599,12 @@ def _is_bot_challenge(title: str, url: str) -> bool:
     for indicator in DDOS_GUARD_INDICATORS:
         if indicator.lower() in title.lower():
             return True
-    if "ddos-guard" in url.lower() or "/.well-known/ddos-guard" in url.lower():
-        return True
-    return False
+    return "ddos-guard" in url.lower() or "/.well-known/ddos-guard" in url.lower()
 
 
 def _is_substack_redirect(url: str) -> bool:
     """Check if the URL indicates a Substack session/channel frame redirect."""
-    for pattern in SUBSTACK_REDIRECT_PATTERNS:
-        if pattern in url.lower():
-            return True
-    return False
+    return any(pattern in url.lower() for pattern in SUBSTACK_REDIRECT_PATTERNS)
 
 
 # ── Barrier classification (replaces _looks_suspicious) ──────────
@@ -601,13 +615,17 @@ class BarrierInfo:
     """Structured result of barrier classification on a scraped page."""
 
     detected: bool
-    barrier_type: str | None  # "cloudflare", "ddos-guard", "captcha", "rate-limit", "substack-redirect", "empty", "suspicious", None
+    barrier_type: (
+        str | None
+    )  # "cloudflare", "ddos-guard", "captcha", "rate-limit", "substack-redirect", "empty", "suspicious", None
     confidence: float
     detail: str = ""
     title: str = ""
 
 
-def _classify_barrier(title: str, url: str, content: str, html: str | None = None) -> BarrierInfo:
+def _classify_barrier(
+    title: str, url: str, content: str, html: str | None = None
+) -> BarrierInfo:
     """Classify whether a scraped page is a barrier/challenge page.
 
     Replaces the old boolean _looks_suspicious() with structured,
@@ -620,7 +638,13 @@ def _classify_barrier(title: str, url: str, content: str, html: str | None = Non
       3+ signals → 0.95
     """
     if not content and not html:
-        return BarrierInfo(detected=True, barrier_type="empty", confidence=0.95, detail="No content returned", title=title)
+        return BarrierInfo(
+            detected=True,
+            barrier_type="empty",
+            confidence=0.95,
+            detail="No content returned",
+            title=title,
+        )
 
     signals: list[str] = []
     content_lower = content.lower() if content else ""
@@ -639,9 +663,10 @@ def _classify_barrier(title: str, url: str, content: str, html: str | None = Non
             break
 
     # ── Signal: Explicit title match ──────────────────────────
-    if "attention required" in title_lower or "403 forbidden" in title_lower:
-        if "cloudflare" not in signals:
-            signals.append("cloudflare-title")
+    if (
+        "attention required" in title_lower or "403 forbidden" in title_lower
+    ) and "cloudflare" not in signals:
+        signals.append("cloudflare-title")
 
     # ── Signal: URL-based Cloudflare detection ────────────────
     if "cf_chl" in url_lower or "challenge-platform" in url_lower:
@@ -673,7 +698,9 @@ def _classify_barrier(title: str, url: str, content: str, html: str | None = Non
 
     # ── Signal: Indicator words in content (fallback) ─────────
     if not signals:
-        for indicator in CLOUDFLARE_INDICATORS + DDOS_GUARD_INDICATORS + SUBSTACK_REDIRECT_PATTERNS:
+        for indicator in (
+            CLOUDFLARE_INDICATORS + DDOS_GUARD_INDICATORS + SUBSTACK_REDIRECT_PATTERNS
+        ):
             if indicator.lower() in content_lower:
                 signals.append("content-match")
                 break
@@ -681,7 +708,13 @@ def _classify_barrier(title: str, url: str, content: str, html: str | None = Non
     # ── Confidence scoring ────────────────────────────────────
     signal_count = len(set(signals))
     if signal_count == 0:
-        return BarrierInfo(detected=False, barrier_type=None, confidence=0.0, detail="No barrier signals detected", title=title)
+        return BarrierInfo(
+            detected=False,
+            barrier_type=None,
+            confidence=0.0,
+            detail="No barrier signals detected",
+            title=title,
+        )
 
     confidence = min(0.50 + (signal_count * 0.20), 0.95)
 
@@ -718,12 +751,26 @@ def _classify_barrier(title: str, url: str, content: str, html: str | None = Non
 # Extensions and domain patterns that suggest an iframe/embed points
 # to downloadable document content rather than another web page.
 EMBEDDED_CONTENT_EXTENSIONS = {
-    ".pdf", ".epub", ".doc", ".docx", ".xls", ".xlsx",
-    ".ppt", ".pptx", ".zip", ".tar", ".gz",
+    ".pdf",
+    ".epub",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
+    ".zip",
+    ".tar",
+    ".gz",
 }
 EMBEDDED_CONTENT_DOMAINS = {
-    "sci-hub", "sci.bban", "docdrop", "academia",
-    "researchgate", "arxiv.org", "cdn.",
+    "sci-hub",
+    "sci.bban",
+    "docdrop",
+    "academia",
+    "researchgate",
+    "arxiv.org",
+    "cdn.",
 }
 
 
@@ -748,9 +795,7 @@ def _has_embedded_content(html: str) -> bool:
         if domain in html_lower:
             return True
     # Check for common document URL patterns
-    if "/pdf/" in html_lower or "/download/" in html_lower:
-        return True
-    return False
+    return "/pdf/" in html_lower or "/download/" in html_lower
 
 
 def _looks_like_markdown(text: str) -> bool:
@@ -782,25 +827,29 @@ async def fetch_via_llms_txt(url: str, client: httpx.AsyncClient) -> dict | None
     llms_url = f"{parsed.scheme}://{parsed.netloc}/llms.txt"
     try:
         resp = await client.get(llms_url, follow_redirects=True, timeout=10)
-        if resp.status_code == 200 and resp.text.strip():
-            # llms.txt files should start with # or be plain markdown
-            if _looks_like_markdown(resp.text) or resp.text.strip().startswith("#"):
-                logger.info("Tier 1 hit: /llms.txt at %s", llms_url)
-                result = {"markdown": resp.text, "source": "llms.txt", "url": llms_url}
-                # Pass through ETag/Last-Modified for intelligent caching
-                etag = resp.headers.get("etag")
-                lm = resp.headers.get("last-modified")
-                if etag:
-                    result["etag"] = etag
-                if lm:
-                    result["last_modified"] = lm
-                return result
+        if (
+            resp.status_code == 200
+            and resp.text.strip()
+            and (_looks_like_markdown(resp.text) or resp.text.strip().startswith("#"))
+        ):
+            logger.info("Tier 1 hit: /llms.txt at %s", llms_url)
+            result = {"markdown": resp.text, "source": "llms.txt", "url": llms_url}
+            # Pass through ETag/Last-Modified for intelligent caching
+            etag = resp.headers.get("etag")
+            lm = resp.headers.get("last-modified")
+            if etag:
+                result["etag"] = etag
+            if lm:
+                result["last_modified"] = lm
+            return result
     except Exception as e:
         logger.debug("Tier 1 miss for %s: %s", llms_url, e)
     return None
 
 
-async def fetch_via_content_negotiation(url: str, client: httpx.AsyncClient) -> dict | None:
+async def fetch_via_content_negotiation(
+    url: str, client: httpx.AsyncClient
+) -> dict | None:
     """Tier 2: Request with Accept: text/markdown header.
 
     Also checks for binary content types and short-circuits to a download payload.
@@ -821,7 +870,11 @@ async def fetch_via_content_negotiation(url: str, client: httpx.AsyncClient) -> 
             # Standard markdown detection
             if _looks_like_markdown(resp.text):
                 logger.info("Tier 2 hit: content negotiation for %s", url)
-                result = {"markdown": resp.text, "source": "content-negotiation", "url": url}
+                result = {
+                    "markdown": resp.text,
+                    "source": "content-negotiation",
+                    "url": url,
+                }
                 # Pass through ETag/Last-Modified for intelligent caching
                 etag = resp.headers.get("etag")
                 lm = resp.headers.get("last-modified")
@@ -864,7 +917,7 @@ def _resolve_to_ips(hostname: str) -> list:
     try:
         addrinfo = socket.getaddrinfo(hostname, None)
         ips = set()
-        for family, _, _, _, sockaddr in addrinfo:
+        for _family, _, _, _, sockaddr in addrinfo:
             try:
                 ips.add(ip_address(sockaddr[0]))
             except ValueError:
@@ -908,7 +961,10 @@ def _is_private_url(url: str) -> tuple[bool, str]:
     for addr in ips:
         for net in _PRIVATE_NETWORKS:
             if addr in net:
-                return True, f"Hostname '{hostname}' resolves to private IP {addr} ({net})"
+                return (
+                    True,
+                    f"Hostname '{hostname}' resolves to private IP {addr} ({net})",
+                )
         if addr in _METADATA_IPS:
             return True, f"Hostname '{hostname}' resolves to metadata endpoint {addr}"
 
@@ -924,7 +980,8 @@ async def _playwright_fetch_with_proxy(
     Returns the scrape result dict or None. Does NOT wrap in try/except
     for the outer browser lifecycle — callers handle that.
     """
-    from playwright.async_api import async_playwright, TimeoutError
+    from playwright.async_api import async_playwright
+
     from .cookie_store import inject_cookies, store_cookies
     from .stealth import create_stealth_browser, create_stealth_context
 
@@ -956,7 +1013,9 @@ async def _playwright_fetch_with_proxy(
             title = await page.title()
             current_url = page.url
             if _is_bot_challenge(title, current_url):
-                logger.info("Bot challenge detected on %s, waiting for resolution...", url)
+                logger.info(
+                    "Bot challenge detected on %s, waiting for resolution...", url
+                )
                 await page.wait_for_timeout(8000)
                 title = await page.title()
                 current_url = page.url
@@ -965,7 +1024,11 @@ async def _playwright_fetch_with_proxy(
 
             # Check for Substack session/channel frame redirect
             if _is_substack_redirect(current_url):
-                logger.info("Substack redirect detected on %s (-> %s), waiting for content...", url, current_url)
+                logger.info(
+                    "Substack redirect detected on %s (-> %s), waiting for content...",
+                    url,
+                    current_url,
+                )
                 await page.wait_for_timeout(5000)
                 current_url = page.url
                 if _is_substack_redirect(current_url):
@@ -975,21 +1038,35 @@ async def _playwright_fetch_with_proxy(
             html = await page.content()
             markdown = html_to_markdown(html) if html else ""
 
-            if not markdown or len(markdown) < 500 or _classify_barrier(title, url, markdown, html).detected:
+            if (
+                not markdown
+                or len(markdown) < 500
+                or _classify_barrier(title, url, markdown, html).detected
+            ):
                 for attempt in range(2):
                     logger.info(
                         "SPA retry %d for %s (markdown: %d chars)",
-                        attempt + 1, url, len(markdown),
+                        attempt + 1,
+                        url,
+                        len(markdown),
                     )
-                    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    await page.evaluate(
+                        "window.scrollTo(0, document.body.scrollHeight)"
+                    )
                     await page.wait_for_timeout(3000)
 
                     html = await page.content()
                     markdown = html_to_markdown(html) if html else ""
-                    if markdown and len(markdown) >= 500 and not _classify_barrier(title, url, markdown, html).detected:
+                    if (
+                        markdown
+                        and len(markdown) >= 500
+                        and not _classify_barrier(title, url, markdown, html).detected
+                    ):
                         logger.info(
                             "SPA retry %d succeeded for %s (%d chars)",
-                            attempt + 1, url, len(markdown),
+                            attempt + 1,
+                            url,
+                            len(markdown),
                         )
                         break
 
@@ -1003,11 +1080,18 @@ async def _playwright_fetch_with_proxy(
             if barrier.detected and barrier.confidence > 0.7:
                 logger.warning(
                     "Barrier detected in playwright result for %s: %s (confidence: %.2f)",
-                    url, barrier.barrier_type, barrier.confidence,
+                    url,
+                    barrier.barrier_type,
+                    barrier.confidence,
                 )
                 return {
                     "error": f"Barrier detected: {barrier.barrier_type} (confidence: {barrier.confidence:.2f})",
-                    "barrier": {"detected": True, "type": barrier.barrier_type, "confidence": barrier.confidence, "detail": barrier.detail},
+                    "barrier": {
+                        "detected": True,
+                        "type": barrier.barrier_type,
+                        "confidence": barrier.confidence,
+                        "detail": barrier.detail,
+                    },
                     "markdown": "",
                     "source": "barrier-detection",
                     "url": url,
@@ -1046,7 +1130,12 @@ async def fetch_via_playwright(url: str) -> dict | None:
         try:
             result = await _playwright_fetch_with_proxy(url, pw_proxy)
         except Exception as e:
-            logger.warning("Proxy (%s) failed for %s: %s", pw_proxy.get("server", "unknown") if pw_proxy else "none", url, e)
+            logger.warning(
+                "Proxy (%s) failed for %s: %s",
+                pw_proxy.get("server", "unknown") if pw_proxy else "none",
+                url,
+                e,
+            )
             result = None
 
         if result is not None:
@@ -1057,7 +1146,8 @@ async def fetch_via_playwright(url: str) -> dict | None:
             proxy_identity = pw_proxy.get("server", "unknown")
             logger.warning(
                 "Proxy (%s) unreachable or failed for %s — retrying without proxy (fail-open)",
-                proxy_identity, url,
+                proxy_identity,
+                url,
             )
             result = await _playwright_fetch_with_proxy(url, None)
             if result is not None:
@@ -1100,7 +1190,9 @@ async def fetch_via_flaresolverr(url: str) -> dict | None:
                             if barrier.detected and barrier.confidence > 0.7:
                                 logger.warning(
                                     "Barrier detected in flare-solverr result for %s: %s (confidence: %.2f)",
-                                    url, barrier.barrier_type, barrier.confidence,
+                                    url,
+                                    barrier.barrier_type,
+                                    barrier.confidence,
                                 )
                                 return {
                                     "error": f"Barrier detected: {barrier.barrier_type} (confidence: {barrier.confidence:.2f})",
@@ -1116,7 +1208,11 @@ async def fetch_via_flaresolverr(url: str) -> dict | None:
                                 }
 
                             logger.info("Tier 3.5 hit: flare-solverr for %s", url)
-                            return {"markdown": markdown, "source": "flare-solverr", "url": url}
+                            return {
+                                "markdown": markdown,
+                                "source": "flare-solverr",
+                                "url": url,
+                            }
     except (httpx.ConnectError, httpx.TimeoutException):
         logger.debug("FlareSolverr not available for %s", url)
     except Exception as e:
@@ -1127,8 +1223,8 @@ async def fetch_via_flaresolverr(url: str) -> dict | None:
 def html_to_markdown(html: str) -> str:
     """Convert HTML to clean markdown using readability + markdownify."""
     try:
-        from readability import Document
         from markdownify import markdownify as md
+        from readability import Document
 
         doc = Document(html)
         summary = doc.summary()
@@ -1142,6 +1238,7 @@ def html_to_markdown(html: str) -> str:
         # Fallback: try BeautifulSoup for text extraction
         try:
             from bs4 import BeautifulSoup
+
             soup = BeautifulSoup(html, "html.parser")
             # Remove script/style
             for tag in soup(["script", "style", "nav", "footer", "header"]):
@@ -1170,7 +1267,9 @@ async def _fetch_via_browser_svc(url: str) -> dict | None:
                 json={"ttl": 60},  # Short TTL, we only need one page load
             )
             if create_resp.status_code != 200:
-                logger.warning("Browser-svc session creation failed: %d", create_resp.status_code)
+                logger.warning(
+                    "Browser-svc session creation failed: %d", create_resp.status_code
+                )
                 return None
             session_id = create_resp.json().get("id")
             if not session_id:
@@ -1216,7 +1315,9 @@ async def _fetch_via_browser_svc(url: str) -> dict | None:
                     if barrier.detected and barrier.confidence > 0.7:
                         logger.warning(
                             "Barrier detected in browser-svc result for %s: %s (confidence: %.2f)",
-                            url, barrier.barrier_type, barrier.confidence,
+                            url,
+                            barrier.barrier_type,
+                            barrier.confidence,
                         )
                         return {
                             "error": f"Barrier detected: {barrier.barrier_type} (confidence: {barrier.confidence:.2f})",
@@ -1231,7 +1332,11 @@ async def _fetch_via_browser_svc(url: str) -> dict | None:
                             "url": url,
                         }
 
-                    logger.info("Browser-svc fallback hit for %s (article text: %d chars)", url, len(text))
+                    logger.info(
+                        "Browser-svc fallback hit for %s (article text: %d chars)",
+                        url,
+                        len(text),
+                    )
                     return {
                         "markdown": text,
                         "source": "browser-svc",
@@ -1250,7 +1355,9 @@ async def _fetch_via_browser_svc(url: str) -> dict | None:
                     if barrier.detected and barrier.confidence > 0.7:
                         logger.warning(
                             "Barrier detected in browser-svc HTML result for %s: %s (confidence: %.2f)",
-                            url, barrier.barrier_type, barrier.confidence,
+                            url,
+                            barrier.barrier_type,
+                            barrier.confidence,
                         )
                         return {
                             "error": f"Barrier detected: {barrier.barrier_type} (confidence: {barrier.confidence:.2f})",
@@ -1265,7 +1372,11 @@ async def _fetch_via_browser_svc(url: str) -> dict | None:
                             "url": url,
                         }
 
-                    logger.info("Browser-svc fallback hit for %s (HTML: %d chars)", url, len(html))
+                    logger.info(
+                        "Browser-svc fallback hit for %s (HTML: %d chars)",
+                        url,
+                        len(html),
+                    )
                     return {
                         "markdown": markdown,
                         "source": "browser-svc",
@@ -1286,7 +1397,9 @@ async def _fetch_via_browser_svc(url: str) -> dict | None:
     return None
 
 
-async def _get_browser_page_content(browser_svc_url: str, session_id: str) -> str | None:
+async def _get_browser_page_content(
+    browser_svc_url: str, session_id: str
+) -> str | None:
     """Get the full page HTML from a browser-svc session via executeScript."""
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -1355,7 +1468,9 @@ def _quality_acceptable(result: dict) -> bool:
     return score >= QA_MIN_QUALITY_THRESHOLD
 
 
-async def _maybe_degrade(result: dict, tier_label: str, best_effort: list) -> dict | None:
+async def _maybe_degrade(
+    result: dict, tier_label: str, best_effort: list
+) -> dict | None:
     """Check quality and decide whether to return or degrade to next tier.
 
     If quality is acceptable, returns the result dict (caller should return it).
@@ -1372,7 +1487,9 @@ async def _maybe_degrade(result: dict, tier_label: str, best_effort: list) -> di
     bs = bq.get("score", 0.0)
     logger.info(
         "Degrading from %s: quality=%.2f < %.2f",
-        tier_label, bs, QA_MIN_QUALITY_THRESHOLD,
+        tier_label,
+        bs,
+        QA_MIN_QUALITY_THRESHOLD,
     )
     result["_degraded_from"] = tier_label
     best_effort.append(result)
@@ -1410,7 +1527,9 @@ async def _politeness_check_and_delay(url: str) -> tuple[bool, dict | None]:
     if result.action == "delay" and result.delay_seconds > 0:
         logger.info(
             "Politeness delaying %s: sleeping %.1fs (domain=%s)",
-            url, result.delay_seconds, result.domain,
+            url,
+            result.delay_seconds,
+            result.domain,
         )
         await asyncio.sleep(result.delay_seconds)
 
@@ -1439,7 +1558,7 @@ async def _enrich_with_politeness(result: dict, url: str) -> dict:
 
 async def _politeness_check_for_tier(url: str, tier_label: str) -> dict | None:
     """Check politeness before a tier. Returns None to proceed, error dict to return."""
-    proceed, blocked = await _politeness_check_and_delay(url)
+    _proceed, blocked = await _politeness_check_and_delay(url)
     if blocked:
         logger.info("Politeness blocked %s at %s", url, tier_label)
         return blocked
@@ -1491,7 +1610,7 @@ async def smart_scrape(url: str) -> dict:
                 return adapter_result.to_dict()
 
         # Politeness check: robots.txt + rate limit (before any HTTP)
-        proceed, blocked = await _politeness_check_and_delay(url)
+        _proceed, blocked = await _politeness_check_and_delay(url)
         if blocked:
             return blocked
 
@@ -1505,7 +1624,7 @@ async def smart_scrape(url: str) -> dict:
             logger.info("Cache hit below quality threshold, re-fetching %s", url)
 
         # Tier 1: /llms.txt
-        proceed, blocked = await _politeness_check_and_delay(url)
+        _proceed, blocked = await _politeness_check_and_delay(url)
         if blocked:
             return blocked
         result = await fetch_via_llms_txt(url, client)
@@ -1517,26 +1636,30 @@ async def smart_scrape(url: str) -> dict:
                 return accepted
 
         # Tier 2: Accept: text/markdown
-        proceed, blocked = await _politeness_check_and_delay(url)
+        _proceed, blocked = await _politeness_check_and_delay(url)
         if blocked:
             return blocked
         result = await fetch_via_content_negotiation(url, client)
         if result:
-            accepted = await _maybe_degrade(result, "tier2-content-negotiation", best_effort)
+            accepted = await _maybe_degrade(
+                result, "tier2-content-negotiation", best_effort
+            )
             if accepted:
                 accepted = await _enrich_with_politeness(accepted, url)
                 await _set_cache(url, accepted, prior_entry=cached)
                 return accepted
 
     # Tier 3: Playwright render + readability (no shared client needed)
-    proceed, blocked = await _politeness_check_and_delay(url)
+    _proceed, blocked = await _politeness_check_and_delay(url)
     if blocked:
         return blocked
     result = await fetch_via_playwright(url)
     if result:
         # Barrier detection — if page IS a challenge/error, skip remaining tiers
         if "barrier" in result:
-            logger.warning("Barrier detected at Tier 3 for %s, skipping remaining tiers", url)
+            logger.warning(
+                "Barrier detected at Tier 3 for %s, skipping remaining tiers", url
+            )
             return result
 
         markdown_text = result.get("markdown", "")
@@ -1554,20 +1677,28 @@ async def smart_scrape(url: str) -> dict:
             # Low quality — degrade through remaining tiers
             logger.info("Tier 3 content quality below threshold, degrading for %s", url)
         else:
-            logger.info("Tier 3 content flagged: barrier=%s (conf=%.2f), embedded=%s",
-                        barrier.barrier_type or "none", barrier.confidence, content_embedded)
+            logger.info(
+                "Tier 3 content flagged: barrier=%s (conf=%.2f), embedded=%s",
+                barrier.barrier_type or "none",
+                barrier.confidence,
+                content_embedded,
+            )
 
     # Tier 3.5: FlareSolverr for hard Cloudflare challenges
     if result:
-        proceed, blocked = await _politeness_check_and_delay(url)
+        _proceed, blocked = await _politeness_check_and_delay(url)
         if blocked:
             return blocked
         fs_result = await fetch_via_flaresolverr(url)
         if fs_result:
             if "barrier" in fs_result:
-                logger.warning("Barrier detected at Tier 3.5 for %s, skipping remaining tiers", url)
+                logger.warning(
+                    "Barrier detected at Tier 3.5 for %s, skipping remaining tiers", url
+                )
                 return fs_result
-            accepted = await _maybe_degrade(fs_result, "tier35-flaresolverr", best_effort)
+            accepted = await _maybe_degrade(
+                fs_result, "tier35-flaresolverr", best_effort
+            )
             if accepted:
                 accepted = await _enrich_with_politeness(accepted, url)
                 await _set_cache(url, accepted, prior_entry=cached)
@@ -1581,7 +1712,9 @@ async def smart_scrape(url: str) -> dict:
         page_content = result.get("raw_html_start") or result.get("markdown", "")
         recovery_result = await attempt_llm_recovery(url, page_content)
         if recovery_result:
-            accepted = await _maybe_degrade(recovery_result, "tier4-llm-recovery", best_effort)
+            accepted = await _maybe_degrade(
+                recovery_result, "tier4-llm-recovery", best_effort
+            )
             if accepted:
                 accepted = await _enrich_with_politeness(accepted, url)
                 await _set_cache(url, accepted, prior_entry=cached)
@@ -1598,10 +1731,14 @@ async def smart_scrape(url: str) -> dict:
             redirected_url = f" (redirected to {substack_match.group()})"
 
         if _is_substack_redirect(raw_html):
-            logger.info("Substack redirect detected, trying browser-svc fallback for %s", url)
+            logger.info(
+                "Substack redirect detected, trying browser-svc fallback for %s", url
+            )
             browser_result = await _fetch_via_browser_svc(url)
             if browser_result:
-                accepted = await _maybe_degrade(browser_result, "browser-svc", best_effort)
+                accepted = await _maybe_degrade(
+                    browser_result, "browser-svc", best_effort
+                )
                 if accepted:
                     accepted = await _enrich_with_politeness(accepted, url)
                     await _set_cache(url, accepted, prior_entry=cached)
@@ -1622,7 +1759,6 @@ async def smart_scrape(url: str) -> dict:
                     url,
                 )
 
-
     # All tiers exhausted — return best effort if any tier produced content
     if best_effort:
         best = max(best_effort, key=lambda r: r.get("quality", {}).get("score", 0.0))
@@ -1630,17 +1766,22 @@ async def smart_scrape(url: str) -> dict:
         bs = bq.get("score", 0.0)
         logger.warning(
             "All tiers exhausted for %s, returning best effort (quality=%.2f, source=%s)",
-            url, bs, best.get("source", "unknown"),
+            url,
+            bs,
+            best.get("source", "unknown"),
         )
-        best["warning"] = f"Suboptimal content — quality ({bs:.2f}) below threshold ({QA_MIN_QUALITY_THRESHOLD:.2f})"
+        best["warning"] = (
+            f"Suboptimal content — quality ({bs:.2f}) below threshold ({QA_MIN_QUALITY_THRESHOLD:.2f})"
+        )
         await _set_cache(url, best, prior_entry=cached)
         return await _enrich_with_politeness(best, url)
 
-    return await _enrich_with_politeness({
-        "error": f"Could not extract content from {url}",
-        "markdown": "",
-        "source": "none",
-        "url": url,
-    },
-    url,
-)
+    return await _enrich_with_politeness(
+        {
+            "error": f"Could not extract content from {url}",
+            "markdown": "",
+            "source": "none",
+            "url": url,
+        },
+        url,
+    )

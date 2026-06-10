@@ -1,0 +1,40 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.16
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+        name: ruff lint
+        description: "Lint Python files with ruff"
+      - id: ruff-format
+        name: ruff format
+        description: "Format Python files with ruff"
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        name: trailing whitespace
+        description: "Trim trailing whitespace"
+      - id: end-of-file-fixer
+        name: end of file fixer
+        description: "Ensure files end with a newline"
+      - id: check-yaml
+        name: check yaml
+        description: "Check YAML files for syntax errors"
+      - id: check-toml
+        name: check toml
+        description: "Check TOML files for syntax errors"
+      - id: check-added-large-files
+        name: check added large files
+        description: "Prevent large files from being committed"
+        args: [--maxkb=500]
+      - id: check-merge-conflict
+        name: check merge conflicts
+        description: "Check for merge conflict markers"
+      - id: detect-private-key
+        name: detect private keys
+        description: "Detect accidentally committed private keys"
+      - id: check-case-conflict
+        name: check case conflict
+        description: "Check for filename case conflicts"
