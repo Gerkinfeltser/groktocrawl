@@ -49,7 +49,14 @@ Tier 1: Check `/llms.txt` at the site root (one GET, whole site in markdown)
 Tier 2: Request with `Accept: text/markdown` header (per-page markdown)
 Tier 3: Playwright render + readability extraction
 
-**Adapters run before tier 1.** When a URL matches a registered adapter (e.g., a `github.com` or `youtube.com` URL), the adapter handles extraction with its own optimized fallback chain. If the adapter fails, the standard tier pipeline runs as normal. See `scraper-svc/scraper/adapters/base.py` for the adapter framework and `scraper-svc/scraper/adapters/` for available adapters.
+**Adapters run before tier 1.** When a URL matches a registered adapter, the adapter handles extraction with its own optimized fallback chain. If the adapter fails, the standard tier pipeline runs as normal. See `scraper-svc/scraper/adapters/base.py` for the adapter framework and `scraper-svc/scraper/adapters/` for available adapters.
+
+**Current adapter categories (20 total):**
+- **Social/media:** bluesky, substack, youtube
+- **Code:** github (file/repo), github-social (issues/PRs/discussions/releases)
+- **Vulnerability/CVE:** nvd (NVD API, enriched), cveorg (MITRE CVE Program, authoritative)
+- **Security/threat intelligence:** abuseipdb, censys, crtsh, exploitdb, hibp, mitreattack, otx, shodan, virustotal, vulncheck
+- **Shared fallback:** `_helpers.py` provides `scrape_page()` for readability-lxml extraction, used by all security adapters
 
 ### LLM-agnostic
 
