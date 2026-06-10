@@ -65,7 +65,9 @@ def test_metrics_endpoint_returns_openmetrics():
 
 
 def test_scraper_uses_llms_txt():
-    r = httpx.post(SCRAPER + "/scrape", json={"url": TEST_SITE + "/anything"}, timeout=120)
+    r = httpx.post(
+        SCRAPER + "/scrape", json={"url": TEST_SITE + "/anything"}, timeout=120
+    )
     payload = r.json()
     assert payload["success"] is True
     assert payload["data"]["source"] == "llms.txt"
@@ -76,14 +78,24 @@ def test_scraper_uses_accept_markdown():
     # Disable llms.txt by targeting the pricing page on a site that still has it.
     # The scraper should still prefer llms.txt if root exists, so use a distinct host
     # behavior by checking the content result from the pricing page through the site root.
-    r = httpx.post(SCRAPER + "/scrape", json={"url": TEST_SITE + "/pricing"}, timeout=120)
+    r = httpx.post(
+        SCRAPER + "/scrape", json={"url": TEST_SITE + "/pricing"}, timeout=120
+    )
     payload = r.json()
     assert payload["success"] is True
-    assert payload["data"]["source"] in {"llms.txt", "content-negotiation", "playwright"}
+    assert payload["data"]["source"] in {
+        "llms.txt",
+        "content-negotiation",
+        "playwright",
+    }
 
 
 def test_agent_endpoints_return_job_and_status():
-    create = httpx.post(AGENT + "/v2/agent", json={"prompt": "What is the pricing on the fixture site?"}, timeout=120)
+    create = httpx.post(
+        AGENT + "/v2/agent",
+        json={"prompt": "What is the pricing on the fixture site?"},
+        timeout=120,
+    )
     assert create.status_code == 200
     job_id = create.json()["id"]
     assert job_id
@@ -101,17 +113,25 @@ def test_crawl_batch_search_and_map_endpoints_exist():
     crawl_id = crawl.json()["id"]
     assert crawl_id
 
-    batch = httpx.post(AGENT + "/v2/batch/scrape", json={"urls": [TEST_SITE + "/", TEST_SITE + "/pricing"]}, timeout=120)
+    batch = httpx.post(
+        AGENT + "/v2/batch/scrape",
+        json={"urls": [TEST_SITE + "/", TEST_SITE + "/pricing"]},
+        timeout=120,
+    )
     assert batch.status_code == 200
     assert batch.json()["id"]
 
-    search = httpx.post(AGENT + "/v2/search", json={"query": "fixture pricing", "limit": 3}, timeout=120)
+    search = httpx.post(
+        AGENT + "/v2/search", json={"query": "fixture pricing", "limit": 3}, timeout=120
+    )
     assert search.status_code == 200
     search_payload = search.json()
     assert search_payload["success"] is True
     assert len(search_payload["data"]["web"]) >= 1
 
-    map_resp = httpx.post(AGENT + "/v2/map", json={"url": TEST_SITE, "limit": 10}, timeout=120)
+    map_resp = httpx.post(
+        AGENT + "/v2/map", json={"url": TEST_SITE, "limit": 10}, timeout=120
+    )
     assert map_resp.status_code == 200
     assert map_resp.json()["success"] is True
     assert map_resp.json()["links"]
@@ -119,9 +139,15 @@ def test_crawl_batch_search_and_map_endpoints_exist():
 
 def test_search_fast_mode_backward_compatible():
     """fast mode (default) returns identical response shape to current behavior."""
-    resp = httpx.post(AGENT + "/v2/search", json={
-        "query": "fixture pricing", "limit": 3, "search_type": "fast",
-    }, timeout=120)
+    resp = httpx.post(
+        AGENT + "/v2/search",
+        json={
+            "query": "fixture pricing",
+            "limit": 3,
+            "search_type": "fast",
+        },
+        timeout=120,
+    )
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["success"] is True
@@ -131,9 +157,15 @@ def test_search_fast_mode_backward_compatible():
 
 def test_search_rich_mode_returns_data_and_output():
     """rich mode scrapes and enriches results, returns output field."""
-    resp = httpx.post(AGENT + "/v2/search", json={
-        "query": "fixture pricing", "limit": 2, "search_type": "rich",
-    }, timeout=120)
+    resp = httpx.post(
+        AGENT + "/v2/search",
+        json={
+            "query": "fixture pricing",
+            "limit": 2,
+            "search_type": "rich",
+        },
+        timeout=120,
+    )
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["success"] is True
@@ -145,18 +177,22 @@ def test_search_rich_mode_returns_data_and_output():
 
 def test_search_rich_with_output_schema():
     """rich mode with output_schema returns structured data."""
-    resp = httpx.post(AGENT + "/v2/search", json={
-        "query": "fixture pricing",
-        "limit": 2,
-        "search_type": "rich",
-        "output_schema": {
-            "type": "object",
-            "properties": {
-                "page_name": {"type": "string"},
-                "summary": {"type": "string"},
+    resp = httpx.post(
+        AGENT + "/v2/search",
+        json={
+            "query": "fixture pricing",
+            "limit": 2,
+            "search_type": "rich",
+            "output_schema": {
+                "type": "object",
+                "properties": {
+                    "page_name": {"type": "string"},
+                    "summary": {"type": "string"},
+                },
             },
         },
-    }, timeout=120)
+        timeout=120,
+    )
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["success"] is True
@@ -168,9 +204,15 @@ def test_search_rich_with_output_schema():
 
 def test_search_unknown_type_falls_back_to_fast():
     """An unrecognized search_type should be treated as fast (default)."""
-    resp = httpx.post(AGENT + "/v2/search", json={
-        "query": "fixture", "limit": 1, "search_type": "deep",
-    }, timeout=120)
+    resp = httpx.post(
+        AGENT + "/v2/search",
+        json={
+            "query": "fixture",
+            "limit": 1,
+            "search_type": "deep",
+        },
+        timeout=120,
+    )
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["success"] is True
@@ -190,7 +232,9 @@ def test_activity_endpoint_structure():
 def test_activity_shows_active_crawl_job():
     """Creating a crawl job makes it appear in the activity feed."""
     # Create a crawl job
-    crawl = httpx.post(AGENT + "/v2/crawl", json={"url": TEST_SITE, "max_pages": 1}, timeout=120)
+    crawl = httpx.post(
+        AGENT + "/v2/crawl", json={"url": TEST_SITE, "max_pages": 1}, timeout=120
+    )
     assert crawl.status_code == 200
     crawl_id = crawl.json()["id"]
 
@@ -207,7 +251,11 @@ def test_activity_shows_active_crawl_job():
 def test_activity_excludes_completed_agent_job():
     """A completed agent job should no longer appear in the activity feed."""
     # Create an agent job and wait for completion
-    create = httpx.post(AGENT + "/v2/agent", json={"prompt": "What is the pricing on the fixture site?"}, timeout=120)
+    create = httpx.post(
+        AGENT + "/v2/agent",
+        json={"prompt": "What is the pricing on the fixture site?"},
+        timeout=120,
+    )
     assert create.status_code == 200
     job_id = create.json()["id"]
 
@@ -222,16 +270,22 @@ def test_activity_excludes_completed_agent_job():
     resp = httpx.get(AGENT + "/v2/activity", timeout=120)
     assert resp.status_code == 200
     active_ids = [j["id"] for j in resp.json()["data"]]
-    assert job_id not in active_ids, f"Completed agent job {job_id} still in activity feed"
+    assert job_id not in active_ids, (
+        f"Completed agent job {job_id} still in activity feed"
+    )
 
 
 def test_activity_multi_type():
     """Multiple job types appear in the activity feed simultaneously."""
     # Create jobs of different types
-    crawl = httpx.post(AGENT + "/v2/crawl", json={"url": TEST_SITE, "max_pages": 1}, timeout=120)
+    crawl = httpx.post(
+        AGENT + "/v2/crawl", json={"url": TEST_SITE, "max_pages": 1}, timeout=120
+    )
     crawl_id = crawl.json()["id"]
 
-    agent = httpx.post(AGENT + "/v2/agent", json={"prompt": "Summarize the fixture site?"}, timeout=120)
+    agent = httpx.post(
+        AGENT + "/v2/agent", json={"prompt": "Summarize the fixture site?"}, timeout=120
+    )
     agent_id = agent.json()["id"]
 
     # Check both appear in activity
@@ -246,9 +300,14 @@ def test_activity_multi_type():
 
 # ----- llms.txt description quality tests -----
 
+
 def test_scraper_meta_endpoint():
     """POST /scrape/meta returns meta tags from raw HTML."""
-    resp = httpx.post(SCRAPER + "/scrape/meta", json={"url": TEST_SITE + "/content/with-meta"}, timeout=30)
+    resp = httpx.post(
+        SCRAPER + "/scrape/meta",
+        json={"url": TEST_SITE + "/content/with-meta"},
+        timeout=30,
+    )
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["success"] is True
@@ -261,12 +320,14 @@ def test_scraper_meta_endpoint():
 
 def test_scraper_meta_fallback_url():
     """POST /scrape/meta returns nulls for pages without meta tags."""
-    resp = httpx.post(SCRAPER + "/scrape/meta", json={"url": TEST_SITE + "/"}, timeout=30)
+    resp = httpx.post(
+        SCRAPER + "/scrape/meta", json={"url": TEST_SITE + "/"}, timeout=30
+    )
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["success"] is True
-    # The root page has no meta description or og:description
-    assert payload["title"] == "Fixture Site"
+    # The root page has no <title> or meta description/og:description
+    assert payload["title"] is None
     assert payload["description"] is None
     assert payload["og_description"] is None
 
@@ -300,7 +361,9 @@ def test_generate_llmstxt_sentence_boundary():
         if line.startswith("- [") and ": " in line:
             desc = line.split(": ", 1)[1]
             # Should end with sentence-ending punctuation
-            assert desc.rstrip()[-1] in ".!?", f"Description should end with sentence punctuation, got: {desc[-30:]}"
+            assert desc.rstrip()[-1] in ".!?", (
+                f"Description should end with sentence punctuation, got: {desc[-30:]}"
+            )
             # Description should be substantive (not just a few words)
             assert len(desc) >= 20, f"Description too short: {desc}"
 
@@ -408,10 +471,14 @@ def test_github_adapter_social_fallback():
 
 def test_answer_endpoint_returns_valid_structure():
     """POST /v2/answer returns a grounded answer with sources and citations."""
-    r = httpx.post(AGENT + "/v2/answer", json={
-        "query": "What is the pricing on the fixture site?",
-        "num_sources": 3,
-    }, timeout=120)
+    r = httpx.post(
+        AGENT + "/v2/answer",
+        json={
+            "query": "What is the pricing on the fixture site?",
+            "num_sources": 3,
+        },
+        timeout=120,
+    )
     assert r.status_code == 200
     payload = r.json()
     assert payload["success"] is True
@@ -425,10 +492,14 @@ def test_answer_endpoint_returns_valid_structure():
 
 def test_answer_endpoint_returns_citations_when_available():
     """If sources exist, citations list should be populated."""
-    r = httpx.post(AGENT + "/v2/answer", json={
-        "query": "What services does the fixture site describe?",
-        "num_sources": 3,
-    }, timeout=120)
+    r = httpx.post(
+        AGENT + "/v2/answer",
+        json={
+            "query": "What services does the fixture site describe?",
+            "num_sources": 3,
+        },
+        timeout=120,
+    )
     assert r.status_code == 200
     payload = r.json()
     # The LLM should cite sources; if it doesn't, citations may be empty
@@ -442,11 +513,15 @@ def test_answer_endpoint_returns_citations_when_available():
 
 def test_answer_streaming_returns_sse_events():
     """POST /v2/answer with stream:true returns SSE events."""
-    r = httpx.post(AGENT + "/v2/answer", json={
-        "query": "What is the pricing on the fixture site?",
-        "num_sources": 1,
-        "stream": True,
-    }, timeout=180)
+    r = httpx.post(
+        AGENT + "/v2/answer",
+        json={
+            "query": "What is the pricing on the fixture site?",
+            "num_sources": 1,
+            "stream": True,
+        },
+        timeout=180,
+    )
     assert r.status_code == 200
     assert r.headers.get("content-type", "").startswith("text/event-stream")
     body = r.text
@@ -460,6 +535,7 @@ def test_answer_streaming_returns_sse_events():
     for line in body.split("\n"):
         if line.startswith("data: ") and line[6:] != "[DONE]":
             import json
+
             events.append(json.loads(line[6:]))
 
     event_types = {e.get("type") for e in events}
@@ -475,10 +551,14 @@ def test_answer_streaming_returns_sse_events():
 
 def test_agent_streaming_returns_sse_events():
     """POST /v2/agent with stream:true returns SSE events."""
-    r = httpx.post(AGENT + "/v2/agent", json={
-        "prompt": "What is the pricing on the fixture site?",
-        "stream": True,
-    }, timeout=180)
+    r = httpx.post(
+        AGENT + "/v2/agent",
+        json={
+            "prompt": "What is the pricing on the fixture site?",
+            "stream": True,
+        },
+        timeout=180,
+    )
     assert r.status_code == 200
     assert r.headers.get("content-type", "").startswith("text/event-stream")
     body = r.text
@@ -492,6 +572,7 @@ def test_agent_streaming_returns_sse_events():
     for line in body.split("\n"):
         if line.startswith("data: ") and line[6:] != "[DONE]":
             import json
+
             events.append(json.loads(line[6:]))
 
     event_types = {e.get("type") for e in events}
@@ -511,12 +592,16 @@ def test_agent_streaming_returns_sse_events():
 
 def test_index_structure():
     """POST /index on semantic-svc returns valid structure."""
-    r = httpx.post(SEMANTIC + "/index", json={
-        "url": "http://example.com/page-a",
-        "title": "Test Page A",
-        "content": "This is unique content for the near-dup test. "
-                   "It describes a specific topic that should not match other pages.",
-    }, timeout=30)
+    r = httpx.post(
+        SEMANTIC + "/index",
+        json={
+            "url": "http://example.com/page-a",
+            "title": "Test Page A",
+            "content": "This is unique content for the near-dup test. "
+            "It describes a specific topic that should not match other pages.",
+        },
+        timeout=30,
+    )
     assert r.status_code == 201
     payload = r.json()
     assert payload["status"] in ("indexed", "duplicate", "updated_duplicate")
@@ -532,23 +617,31 @@ def test_near_dup_detection_skip_mode():
     first to seed the index, second to detect the duplicate.
     """
     # Seed — first page with distinctive content
-    r1 = httpx.post(SEMANTIC + "/index", json={
-        "url": "http://example.com/near-dup-original",
-        "title": "Original",
-        "content": "The near-dup detection test should identify this content "
-                   "as a duplicate when it appears at a second URL with the same text. "
-                   "This paragraph is specific enough to generate a stable embedding.",
-    }, timeout=30)
+    r1 = httpx.post(
+        SEMANTIC + "/index",
+        json={
+            "url": "http://example.com/near-dup-original",
+            "title": "Original",
+            "content": "The near-dup detection test should identify this content "
+            "as a duplicate when it appears at a second URL with the same text. "
+            "This paragraph is specific enough to generate a stable embedding.",
+        },
+        timeout=30,
+    )
     assert r1.status_code == 201
 
     # Same content, different URL — should be flagged as duplicate
-    r2 = httpx.post(SEMANTIC + "/index", json={
-        "url": "http://example.com/near-dup-copy",
-        "title": "Copy",
-        "content": "The near-dup detection test should identify this content "
-                   "as a duplicate when it appears at a second URL with the same text. "
-                   "This paragraph is specific enough to generate a stable embedding.",
-    }, timeout=30)
+    r2 = httpx.post(
+        SEMANTIC + "/index",
+        json={
+            "url": "http://example.com/near-dup-copy",
+            "title": "Copy",
+            "content": "The near-dup detection test should identify this content "
+            "as a duplicate when it appears at a second URL with the same text. "
+            "This paragraph is specific enough to generate a stable embedding.",
+        },
+        timeout=30,
+    )
     assert r2.status_code == 201
     payload = r2.json()
 
@@ -560,13 +653,17 @@ def test_near_dup_detection_skip_mode():
 
 def test_near_dup_detection_update_mode():
     """Requesting near_dup_mode='update' always indexes even when duplicated."""
-    r = httpx.post(SEMANTIC + "/index", json={
-        "url": "http://example.com/near-dup-update-test",
-        "title": "Update Mode Test",
-        "content": "This content tests the update mode for near-duplicate detection. "
-                   "When set to 'update', even near-duplicate content gets indexed.",
-        "near_dup_mode": "update",
-    }, timeout=30)
+    r = httpx.post(
+        SEMANTIC + "/index",
+        json={
+            "url": "http://example.com/near-dup-update-test",
+            "title": "Update Mode Test",
+            "content": "This content tests the update mode for near-duplicate detection. "
+            "When set to 'update', even near-duplicate content gets indexed.",
+            "near_dup_mode": "update",
+        },
+        timeout=30,
+    )
     assert r.status_code == 201
     payload = r.json()
     # Should have indexed (maybe as "updated_duplicate" if a match was found)
@@ -576,13 +673,17 @@ def test_near_dup_detection_update_mode():
 
 def test_near_dup_different_content():
     """Completely different content at different URL should index normally."""
-    r = httpx.post(SEMANTIC + "/index", json={
-        "url": "http://example.com/unique-page",
-        "title": "Unique Page",
-        "content": "This content is completely unique and has nothing to do with "
-                   "any other page in the test suite. It discusses quantum computing "
-                   "applications in marine biology research.",
-    }, timeout=30)
+    r = httpx.post(
+        SEMANTIC + "/index",
+        json={
+            "url": "http://example.com/unique-page",
+            "title": "Unique Page",
+            "content": "This content is completely unique and has nothing to do with "
+            "any other page in the test suite. It discusses quantum computing "
+            "applications in marine biology research.",
+        },
+        timeout=30,
+    )
     assert r.status_code == 201
     payload = r.json()
     assert payload["status"] in ("indexed", "updated_duplicate")
@@ -595,22 +696,26 @@ def test_batch_index_endpoint():
     Batch endpoint should index multiple pages in a single call,
     returning count of successfully indexed pages.
     """
-    r = httpx.post(SEMANTIC + "/index/batch", json={
-        "pages": [
-            {
-                "url": "http://example.com/batch-page-a",
-                "title": "Batch Page A",
-                "content": "This is the first page in a batch index test. "
-                           "It contains unique content for testing batch ingestion.",
-            },
-            {
-                "url": "http://example.com/batch-page-b",
-                "title": "Batch Page B",
-                "content": "This is the second page in a batch index test. "
-                           "It also contains unique content for testing.",
-            },
-        ],
-    }, timeout=30)
+    r = httpx.post(
+        SEMANTIC + "/index/batch",
+        json={
+            "pages": [
+                {
+                    "url": "http://example.com/batch-page-a",
+                    "title": "Batch Page A",
+                    "content": "This is the first page in a batch index test. "
+                    "It contains unique content for testing batch ingestion.",
+                },
+                {
+                    "url": "http://example.com/batch-page-b",
+                    "title": "Batch Page B",
+                    "content": "This is the second page in a batch index test. "
+                    "It also contains unique content for testing.",
+                },
+            ],
+        },
+        timeout=30,
+    )
     assert r.status_code == 201
     payload = r.json()
     assert payload["status"] == "indexed"
@@ -624,4 +729,3 @@ def test_batch_index_empty():
     payload = r.json()
     assert payload["status"] == "indexed"
     assert payload["count"] == 0
-

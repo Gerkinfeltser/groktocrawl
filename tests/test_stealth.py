@@ -4,8 +4,8 @@ These test the core detection functions that don't need a running Docker stack.
 Run with: python3 -m pytest tests/test_stealth.py -v
 """
 
-import sys
 import os
+import sys
 
 import pytest
 
@@ -16,13 +16,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scraper-svc"))
 def test_stealth_module_imports():
     """Verify the stealth module imports and exposes expected functions."""
     from scraper.stealth import (
-        create_stealth_browser,
-        create_stealth_context,
+        REAL_CHROME_UA,
         STEALTH_BROWSER_ARGS,
         STEALTH_CONTEXT_KWARGS,
         STEALTH_INIT_SCRIPT,
-        REAL_CHROME_UA,
+        create_stealth_browser,
+        create_stealth_context,
     )
+
     assert callable(create_stealth_browser)
     assert callable(create_stealth_context)
     assert "--disable-blink-features=AutomationControlled" in STEALTH_BROWSER_ARGS
@@ -32,15 +33,22 @@ def test_stealth_module_imports():
     assert STEALTH_CONTEXT_KWARGS["viewport"] == {"width": 1920, "height": 1080}
     assert "locale" in STEALTH_CONTEXT_KWARGS
     assert STEALTH_CONTEXT_KWARGS["locale"] == "en-US"
-    assert "webdriver" in STEALTH_INIT_SCRIPT  # Object.defineProperty(navigator, 'webdriver')
-    assert "plugins" not in STEALTH_INIT_SCRIPT  # Stripped for compatibility with browser-svc
-    assert "chrome" not in STEALTH_INIT_SCRIPT   # Stripped for compatibility with browser-svc
+    assert (
+        "webdriver" in STEALTH_INIT_SCRIPT
+    )  # Object.defineProperty(navigator, 'webdriver')
+    assert (
+        "plugins" not in STEALTH_INIT_SCRIPT
+    )  # Stripped for compatibility with browser-svc
+    assert (
+        "chrome" not in STEALTH_INIT_SCRIPT
+    )  # Stripped for compatibility with browser-svc
     assert "getParameter" not in STEALTH_INIT_SCRIPT  # Stripped for compatibility
 
 
 def test_stealth_browser_args_comprehensive():
     """Verify all expected stealth browser args are present."""
     from scraper.stealth import STEALTH_BROWSER_ARGS
+
     expected_args = [
         "--disable-blink-features=AutomationControlled",
         "--no-sandbox",
@@ -53,6 +61,7 @@ def test_stealth_browser_args_comprehensive():
 def test_stealth_context_has_realistic_fingerprint():
     """Verify stealth context has realistic browser fingerprint settings."""
     from scraper.stealth import STEALTH_CONTEXT_KWARGS
+
     # Should have realistic viewport
     assert STEALTH_CONTEXT_KWARGS["viewport"]["width"] >= 1280
     assert STEALTH_CONTEXT_KWARGS["viewport"]["height"] >= 720
@@ -64,6 +73,7 @@ def test_stealth_context_has_realistic_fingerprint():
 def test_stealth_init_script_syntax():
     """Verify the init script is valid JavaScript syntax (basic check)."""
     from scraper.stealth import STEALTH_INIT_SCRIPT
+
     # Should be a string containing a function
     assert STEALTH_INIT_SCRIPT.startswith("() =>")
     # Should contain the webdriver override
@@ -71,12 +81,15 @@ def test_stealth_init_script_syntax():
     # Should have matching braces
     open_braces = STEALTH_INIT_SCRIPT.count("{")
     close_braces = STEALTH_INIT_SCRIPT.count("}")
-    assert open_braces == close_braces, f"Unbalanced braces: {open_braces} vs {close_braces}"
+    assert open_braces == close_braces, (
+        f"Unbalanced braces: {open_braces} vs {close_braces}"
+    )
 
 
 def test_stealth_ua_matches_chrome_131():
     """Verify the User-Agent string is a real Chrome 131 UA."""
     from scraper.stealth import REAL_CHROME_UA
+
     assert "Chrome/131" in REAL_CHROME_UA
     assert "Mozilla/5.0" in REAL_CHROME_UA
     assert "Windows NT" in REAL_CHROME_UA
@@ -89,6 +102,7 @@ class TestBotChallengeDetection:
     @staticmethod
     def _import_func():
         from scraper.fetch import _is_bot_challenge
+
         return _is_bot_challenge
 
     def test_cloudflare_js_challenge_title(self):
@@ -105,7 +119,9 @@ class TestBotChallengeDetection:
     def test_ddos_guard_challenge_title(self):
         func = self._import_func()
         assert func("DDoS-Guard", "https://example.com")
-        assert func("Checking your browser before accessing the site", "https://example.com")
+        assert func(
+            "Checking your browser before accessing the site", "https://example.com"
+        )
 
     def test_ddos_guard_challenge_url(self):
         func = self._import_func()
@@ -114,8 +130,13 @@ class TestBotChallengeDetection:
 
     def test_normal_page_not_detected(self):
         func = self._import_func()
-        assert not func("Welcome to my blog", "https://blog.example.com/posts/hello-world")
-        assert not func("Heather Cox Richardson", "https://heathercoxrichardson.substack.com/p/june-1-2025")
+        assert not func(
+            "Welcome to my blog", "https://blog.example.com/posts/hello-world"
+        )
+        assert not func(
+            "Heather Cox Richardson",
+            "https://heathercoxrichardson.substack.com/p/june-1-2025",
+        )
         assert not func("The Free Press", "https://www.thefp.com/p/some-article")
 
 
@@ -125,6 +146,7 @@ class TestSubstackRedirectDetection:
     @staticmethod
     def _import_func():
         from scraper.fetch import _is_substack_redirect
+
         return _is_substack_redirect
 
     def test_session_attribution_frame(self):
@@ -150,37 +172,46 @@ class TestSubstackRedirectDetection:
         assert not func("https://example.com")
 
 
-class TestLooksSuspicious:
-    """Test _looks_suspicious() includes Substack patterns and existing checks."""
+class TestBarrierClassification:
+    """Test _classify_barrier() replaces the old _looks_suspicious()."""
 
     @staticmethod
-    def _import_func():
-        from scraper.fetch import _looks_suspicious
-        return _looks_suspicious
+    def _import():
+        from scraper.fetch import BarrierInfo, _classify_barrier
+
+        return _classify_barrier, BarrierInfo
+
+    def _c(self, content: str, title: str = "", url: str = "https://example.com"):
+        cls, _ = self._import()
+        return cls(title, url, content)
 
     def test_empty_content_suspicious(self):
-        func = self._import_func()
-        assert func("")
-        assert func(None)  # type: ignore
+        r = self._c("")
+        assert r.detected
+        r = self._c(None)  # type: ignore
+        assert r.detected
 
     def test_short_content_suspicious(self):
-        func = self._import_func()
-        assert func("Hello")
+        r = self._c("Hello")
+        assert r.detected
 
     def test_cloudflare_indicators(self):
-        func = self._import_func()
-        assert func("Just a moment... checking your browser")
-        assert func("DDoS protection by Cloudflare")
+        r = self._c("Just a moment... checking your browser")
+        assert r.detected
+        r = self._c("DDoS protection by Cloudflare")
+        assert r.detected
 
     def test_substack_indicators(self):
-        func = self._import_func()
-        assert func("substack.com/session-attribution-frame")
-        assert func("substack.com/channel-frame")
+        r = self._c("substack.com/session-attribution-frame")
+        assert r.detected
+        r = self._c("substack.com/channel-frame")
+        assert r.detected
 
     def test_normal_content_not_suspicious(self):
-        func = self._import_func()
-        assert not func("The quick brown fox jumps over the lazy dog. " * 10)
-        assert not func("Article content with multiple paragraphs. " * 20)
+        r = self._c("The quick brown fox jumps over the lazy dog. " * 10)
+        assert not r.detected
+        r = self._c("Article content with multiple paragraphs. " * 20)
+        assert not r.detected
 
 
 class TestCookieKey:
@@ -189,11 +220,15 @@ class TestCookieKey:
     @staticmethod
     def _import_func():
         from scraper.cookie_store import _cookie_key
+
         return _cookie_key
 
     def test_standard_substack(self):
         func = self._import_func()
-        assert func("https://heathercoxrichardson.substack.com/p/june-1-2025") == "cf:clearance:substack.com"
+        assert (
+            func("https://heathercoxrichardson.substack.com/p/june-1-2025")
+            == "cf:clearance:substack.com"
+        )
 
     def test_standard_com_domain(self):
         func = self._import_func()
@@ -234,11 +269,13 @@ class TestCookieStoreGraceful:
     @staticmethod
     def _import_inject():
         from scraper.cookie_store import inject_cookies
+
         return inject_cookies
 
     @staticmethod
     def _import_store():
         from scraper.cookie_store import store_cookies
+
         return store_cookies
 
     @pytest.mark.asyncio

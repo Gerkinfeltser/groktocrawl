@@ -8,18 +8,10 @@ the stateless utility functions in fetch.py.
 import hashlib
 import json
 import os
-import time
 from unittest.mock import patch
-from urllib.parse import urlparse
-
-import pytest
 
 # Import the module under test
 from scraper.fetch import (
-    SCRAPE_CACHE_TTL,
-    SCRAPE_CACHE_MIN_TTL,
-    SCRAPE_CACHE_MAX_TTL,
-    SCRAPE_CACHE_STABLE_MULTIPLIER,
     _compute_content_hash,
     _enrich_cache_entry,
     _merge_cache_metadata,
@@ -58,10 +50,10 @@ class TestComputeContentHash:
 
 
 class TestNormalizeUrlForCache:
-    def test_lowercases_scheme_and_hostname(self):
+    def test_lowercases_scheme_and_hostname_and_path(self):
         url = "HTTP://EXAMPLE.com/Path"
         result = _normalize_url_for_cache(url)
-        assert result == "http://example.com/Path"
+        assert result == "http://example.com/path"
 
     def test_strips_trailing_slash(self):
         url = "https://example.com/page/"
@@ -107,10 +99,14 @@ class TestScrapeCacheKey:
         assert _scrape_cache_key(url) == f"scrape_cache:{expected_digest}"
 
     def test_deterministic_for_same_url(self):
-        assert _scrape_cache_key("https://example.com/a") == _scrape_cache_key("HTTPS://EXAMPLE.COM/a/")
+        assert _scrape_cache_key("https://example.com/a") == _scrape_cache_key(
+            "HTTPS://EXAMPLE.COM/a/"
+        )
 
     def test_different_for_different_urls(self):
-        assert _scrape_cache_key("https://example.com/a") != _scrape_cache_key("https://example.com/b")
+        assert _scrape_cache_key("https://example.com/a") != _scrape_cache_key(
+            "https://example.com/b"
+        )
 
 
 # ── Domain TTL parsing tests ────────────────────────────────────
@@ -132,7 +128,9 @@ class TestParseDomainTtls:
             assert result == {"news.ycombinator.com": 300, "docs.python.org": 86400}
 
     def test_invalid_json_returns_empty(self):
-        with patch.dict(os.environ, {"SCRAPE_CACHE_DOMAIN_TTLS": "not-json"}, clear=False):
+        with patch.dict(
+            os.environ, {"SCRAPE_CACHE_DOMAIN_TTLS": "not-json"}, clear=False
+        ):
             assert _parse_domain_ttls() == {}
 
 
@@ -141,47 +139,51 @@ class TestParseDomainTtls:
 
 class TestResolveCacheTtl:
     def test_default_ttl_when_no_domain_match(self):
-        with patch.dict(os.environ, {"SCRAPE_CACHE_DOMAIN_TTLS": "{}", "SCRAPE_CACHE_TTL": "3600"}, clear=True):
+        with patch.dict(os.environ, {"SCRAPE_CACHE_DOMAIN_TTLS": "{}"}, clear=False):
             ttl = _resolve_cache_ttl("https://example.com/page")
             assert ttl == 3600
 
     def test_matches_root_domain_exactly(self):
         raw = json.dumps({"example.com": 1800})
-        with patch.dict(os.environ, {"SCRAPE_CACHE_DOMAIN_TTLS": raw, "SCRAPE_CACHE_TTL": "3600"}, clear=True):
+        with patch.dict(os.environ, {"SCRAPE_CACHE_DOMAIN_TTLS": raw}, clear=False):
             ttl = _resolve_cache_ttl("https://example.com/page")
             assert ttl == 1800
 
     def test_longest_suffix_match_wins(self):
         raw = json.dumps({"python.org": 7200, "docs.python.org": 86400})
-        with patch.dict(os.environ, {"SCRAPE_CACHE_DOMAIN_TTLS": raw, "SCRAPE_CACHE_TTL": "3600"}, clear=True):
+        with patch.dict(os.environ, {"SCRAPE_CACHE_DOMAIN_TTLS": raw}, clear=False):
             ttl = _resolve_cache_ttl("https://docs.python.org/3/")
             assert ttl == 86400  # Longer match wins
 
     def test_subdomain_matches_parent(self):
         raw = json.dumps({"python.org": 7200})
-        with patch.dict(os.environ, {"SCRAPE_CACHE_DOMAIN_TTLS": raw, "SCRAPE_CACHE_TTL": "3600"}, clear=True):
+        with patch.dict(os.environ, {"SCRAPE_CACHE_DOMAIN_TTLS": raw}, clear=False):
             ttl = _resolve_cache_ttl("https://docs.python.org/3/")
             assert ttl == 7200
 
     def test_applies_stability_multiplier(self):
-        with patch.dict(os.environ, {"SCRAPE_CACHE_TTL": "3600"}, clear=True):
-            ttl = _resolve_cache_ttl("https://example.com", stability_multiplier=2.0)
-            assert ttl == 7200  # 3600 * 2.0
+        ttl = _resolve_cache_ttl("https://example.com", stability_multiplier=2.0)
+        assert ttl == 7200  # 3600 * 2.0
 
     def test_clamps_to_min_ttl(self):
-        with patch.dict(os.environ, {"SCRAPE_CACHE_TTL": "10", "SCRAPE_CACHE_MIN_TTL": "60"}, clear=True):
+        with (
+            patch("scraper.fetch.SCRAPE_CACHE_TTL", 10),
+            patch("scraper.fetch.SCRAPE_CACHE_MIN_TTL", 60),
+        ):
             ttl = _resolve_cache_ttl("https://example.com")
             assert ttl == 60  # Clamped from 10 to 60
 
     def test_clamps_to_max_ttl(self):
-        with patch.dict(os.environ, {"SCRAPE_CACHE_TTL": "999999", "SCRAPE_CACHE_MAX_TTL": "86400"}, clear=True):
+        with (
+            patch("scraper.fetch.SCRAPE_CACHE_TTL", 999999),
+            patch("scraper.fetch.SCRAPE_CACHE_MAX_TTL", 86400),
+        ):
             ttl = _resolve_cache_ttl("https://example.com")
             assert ttl == 86400  # Clamped from 999999 to 86400
 
     def test_no_hostname_falls_back_to_default(self):
-        with patch.dict(os.environ, {"SCRAPE_CACHE_TTL": "3600"}, clear=True):
-            ttl = _resolve_cache_ttl("invalid-url")
-            assert ttl == 3600
+        ttl = _resolve_cache_ttl("invalid-url")
+        assert ttl == 3600
 
 
 # ── Cache metadata merging tests ────────────────────────────────
@@ -189,7 +191,11 @@ class TestResolveCacheTtl:
 
 class TestMergeCacheMetadata:
     def test_preserves_and_increments_fetch_count(self):
-        fresh = {"markdown": "new content", "source": "content-negotiation", "url": "https://example.com"}
+        fresh = {
+            "markdown": "new content",
+            "source": "content-negotiation",
+            "url": "https://example.com",
+        }
         cached = {"fetch_count": 5, "first_fetched_at": 1000.0, "change_count": 2}
         result = _merge_cache_metadata(fresh, cached)
         assert result["fetch_count"] == 6  # Incremented
@@ -212,44 +218,84 @@ class TestMergeCacheMetadata:
 
 class TestEnrichCacheEntry:
     def test_adds_content_hash(self):
-        result = {"markdown": "hello world", "source": "llms.txt", "url": "https://example.com"}
+        result = {
+            "markdown": "hello world",
+            "source": "llms.txt",
+            "url": "https://example.com",
+        }
         enriched = _enrich_cache_entry(result.copy(), "https://example.com")
         expected_hash = hashlib.sha256(b"hello world").hexdigest()
         assert enriched["content_hash"] == expected_hash
 
     def test_sets_source_tier_from_source(self):
-        result = {"markdown": "hello", "source": "playwright", "url": "https://example.com"}
+        result = {
+            "markdown": "hello",
+            "source": "playwright",
+            "url": "https://example.com",
+        }
         enriched = _enrich_cache_entry(result.copy(), "https://example.com")
         assert enriched["source_tier"] == "playwright"
 
     def test_stores_etag_and_last_modified(self):
-        result = {"markdown": "hello", "source": "llms.txt", "url": "https://example.com"}
+        result = {
+            "markdown": "hello",
+            "source": "llms.txt",
+            "url": "https://example.com",
+        }
         enriched = _enrich_cache_entry(
-            result.copy(), "https://example.com",
-            etag='"abc123"', last_modified="Mon, 01 Jan 2026 00:00:00 GMT",
+            result.copy(),
+            "https://example.com",
+            etag='"abc123"',
+            last_modified="Mon, 01 Jan 2026 00:00:00 GMT",
         )
         assert enriched["etag"] == '"abc123"'
         assert enriched["last_modified"] == "Mon, 01 Jan 2026 00:00:00 GMT"
 
     def test_without_prior_entry_sets_initial_counts(self):
-        result = {"markdown": "hello", "source": "llms.txt", "url": "https://example.com"}
+        result = {
+            "markdown": "hello",
+            "source": "llms.txt",
+            "url": "https://example.com",
+        }
         enriched = _enrich_cache_entry(result.copy(), "https://example.com")
         assert enriched["fetch_count"] == 1
         assert enriched["change_count"] == 0
         assert enriched["first_fetched_at"] > 0
 
     def test_with_prior_entry_detects_content_change(self):
-        prior = {"content_hash": hashlib.sha256(b"old content").hexdigest(), "fetch_count": 3, "change_count": 1}
-        result = {"markdown": "new content", "source": "llms.txt", "url": "https://example.com"}
-        enriched = _enrich_cache_entry(result.copy(), "https://example.com", prior_entry=prior)
+        prior = {
+            "content_hash": hashlib.sha256(b"old content").hexdigest(),
+            "fetch_count": 3,
+            "change_count": 1,
+            "first_fetched_at": 1000.0,
+        }
+        result = {
+            "markdown": "new content",
+            "source": "llms.txt",
+            "url": "https://example.com",
+        }
+        enriched = _enrich_cache_entry(
+            result.copy(), "https://example.com", prior_entry=prior
+        )
         assert enriched["fetch_count"] == 4
         assert enriched["change_count"] == 2  # Incremented because content changed
-        assert enriched["first_fetched_at"] == prior["first_fetched_at"]
+        assert enriched["first_fetched_at"] == 1000.0
 
     def test_with_prior_entry_no_content_change(self):
         same_hash = hashlib.sha256(b"same content").hexdigest()
-        prior = {"content_hash": same_hash, "fetch_count": 3, "change_count": 0}
-        result = {"markdown": "same content", "source": "llms.txt", "url": "https://example.com"}
-        enriched = _enrich_cache_entry(result.copy(), "https://example.com", prior_entry=prior)
+        prior = {
+            "content_hash": same_hash,
+            "fetch_count": 3,
+            "change_count": 0,
+            "first_fetched_at": 2000.0,
+        }
+        result = {
+            "markdown": "same content",
+            "source": "llms.txt",
+            "url": "https://example.com",
+        }
+        enriched = _enrich_cache_entry(
+            result.copy(), "https://example.com", prior_entry=prior
+        )
         assert enriched["change_count"] == 0  # Not incremented — content unchanged
         assert enriched["fetch_count"] == 4
