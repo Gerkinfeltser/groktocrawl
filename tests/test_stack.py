@@ -469,6 +469,44 @@ def test_github_adapter_social_fallback():
     assert "github-social" in md or "github-discussion" in md or "issue" in md.lower()
 
 
+# ── NVD adapter tests ──────────────────────────────────────────
+CVE_KNOWN = "CVE-2024-3094"  # xz backdoor — well known, unlikely to change
+NVD_DETAIL = f"https://nvd.nist.gov/vuln/detail/{CVE_KNOWN}"
+CVEORG_URL = f"https://cve.org/CVERecord?id={CVE_KNOWN}"
+
+
+def test_nvd_adapter_known_cve():
+    """Known CVE detail page should return structured markdown via NVD adapter."""
+    r = httpx.post(SCRAPER + "/scrape", json={"url": NVD_DETAIL}, timeout=120)
+    payload = r.json()
+    assert payload["success"] is True, payload.get("error")
+    md = payload.get("data", {}).get("markdown", "")
+    assert CVE_KNOWN in md or "CVE-2024" in md
+    # Should have adapter frontmatter (YAML block)
+    md_full = payload.get("data", {}).get("markdown", "")
+    assert "cve_id" in md_full or "CVE-2024" in md_full
+    assert len(md_full) > 100, f"Expected >100 chars, got {len(md_full)}"
+
+
+def test_nvd_adapter_bare_cve_id():
+    """Bare CVE ID (cve: prefix) should be handled by the NVD adapter."""
+    r = httpx.post(SCRAPER + "/scrape", json={"url": f"cve:{CVE_KNOWN}"}, timeout=120)
+    payload = r.json()
+    assert payload["success"] is True, payload.get("error")
+    md = payload.get("data", {}).get("markdown", "")
+    assert CVE_KNOWN in md, f"Expected {CVE_KNOWN} in response"
+
+
+def test_cveorg_adapter_known_cve():
+    """Known CVE on cve.org should return structured markdown via CVE Program adapter."""
+    r = httpx.post(SCRAPER + "/scrape", json={"url": CVEORG_URL}, timeout=120)
+    payload = r.json()
+    assert payload["success"] is True, payload.get("error")
+    md = payload.get("data", {}).get("markdown", "")
+    assert CVE_KNOWN in md or "Xz" in md or "CVE-2024" in md or "backdoor" in md.lower()
+    assert len(md) > 100, f"Expected >100 chars, got {len(md)}"
+
+
 def test_answer_endpoint_returns_valid_structure():
     """POST /v2/answer returns a grounded answer with sources and citations."""
     r = httpx.post(
