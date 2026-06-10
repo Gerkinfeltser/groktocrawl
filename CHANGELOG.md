@@ -14,66 +14,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Service-level metrics for semantic-svc (ADR-0029)** — adds Prometheus-compatible `/metrics` endpoint to semantic-svc with stdlib-based OpenMetrics format (no new dependencies). Metrics tracked: document count gauge (`groktocrawl_index_docs_total`), eviction counter (`groktocrawl_index_evictions_total`), request latency histogram per endpoint (`groktocrawl_index_query_duration_seconds`), embedding inference duration (`groktocrawl_index_embeddings_duration_seconds`), and request counter per endpoint (`groktocrawl_search_requests_total`). ASGI middleware instruments all 11 existing endpoints automatically. Eviction counter tracks cumulative evictions via `_evict_if_needed()`. See `docs/adr/0029-service-level-metrics-for-semantic-svc.md`. (closes #153)
 
 - **Embedding model migration path — named vectors, backfill, dual-write, cutover (ADR-0028)** — supports upgrading the embedding model without dropping the index. Uses Qdrant named vectors for per-point multi-model storage. New endpoints: `GET /index/model` (model config + migration state), `POST /index/migrate/start` (begin backfill), `GET /index/migrate/status` (progress), `POST /index/migrate/cutover` (switch queries). New payload fields: `embedding_model`, `embedding_dim`, `embedding_models` (history). Dual-write mode indexes with both old and new model during migration. Old vectors retained after cutover for rollback safety. See `docs/adr/0028-embedding-model-migration-path.md`. (closes #155)
-- **Smarter index retention — domain TTLs, frequency weighting, access boosting (ADR-0027)** — replaces the simple LRU eviction in the Qdrant vector index with a scoring function that considers content type, crawl frequency, and access patterns. New payload fields: `domain_category`, `crawl_count`, `access_count`, `first_indexed_at`, `last_indexed_at`, `last_accessed_at`, `retention_score`. Domain classification maps URLs to categories (news/social/blog/api/unknown/reference/docs) with multipliers from 0.3–1.2. Access tracking fires after search result retrieval. News and social content evicts first; reference and docs content persists longest. See `docs/adr/0027-smarter-index-retention.md`. (closes #152)
-- **Domain classification for indexed pages** — heuristic-based URL categorization without external dependencies. Covers news, social, blog, API, reference, and docs domains with known-domain lists and prefix patterns. Unknown domains default to a conservative 0.8 multiplier.
-- **Search access tracking** — `POST /search/vector` now fire-and-forgets `access_count` and `last_accessed_at` updates for returned results. Accessed pages get a retention boost at eviction time.
-- **Crawl frequency tracking** — re-indexing the same URL increments `crawl_count` in the payload, giving frequently re-crawled pages (monitors, recurring jobs) a retention boost.
-- **Title extraction in indexing hook** — `_index_page_async()` now extracts titles from scrape response metadata (og:title → meta:title → fallback) instead of sending empty strings.
 
-### Changed
+---
 
-- **`_evict_if_needed()` — LRU to scoring-based eviction** — instead of scrolling and deleting the first N points, the function now scrolls all points with payloads, computes a composite retention score for each, and deletes the lowest-scoring documents. Score components: domain multiplier × recency factor + access boost + crawl boost. Eviction includes a 2% buffer to avoid thrashing.
-- **Index payload enriched** — each Qdrant point now carries domain metadata, crawl count, access count, and retention score alongside existing `url` and `title` fields.
+## [0.7.0] — 2026-06-09
 
-- **Search type spectrum — fast and rich search modes (ADR-0023)** — `POST /v2/search` now accepts `search_type` (default: `fast`). `fast` mode is identical to current behavior (<1s). `rich` mode scrapes top results and enriches with LLM synthesis (1-3s). Optional `output_schema` enables structured data extraction from search results in a single call. Optional `system_prompt` guides synthesis behavior. CLI exposes `--search-type` (fast/rich), `--output-schema` (JSON or @file.json), and `--system-prompt` flags. See `docs/adr/0023-search-type-spectrum-fast-and-rich.md`.
+### ⚠️ Breaking Changes
 
-- **Agent SSE streaming — live progress and token streaming for deep research (ADR-0022)** — `POST /v2/agent` now accepts `stream: true` for Server-Sent Events. Two-phase streaming: discovery events (`sources_pending`, `source_scraped`) show sources as they're found and scraped, followed by token-by-token LLM output (`token` events). Falls back to create→poll pattern when `stream` is omitted. Reuses the SSE event protocol from `POST /v2/answer` (ADR-0017). CLI defaults to streaming with `--sync` to opt out. See `docs/adr/0022-agent-sse-streaming.md`.
+- **Two new required services** — `semantic-svc` and `qdrant` are now part of the docker-compose stack. `docker compose up` will fail if these images cannot be pulled. First-time startup requires pulling the Qdrant image, and the semantic-svc needs to create the initial collection — expect a longer first spin-up.
+- **New optional service** — `portal-svc` (port 8082:8081) added to docker-compose. Not required for API operation but published by default.
+- **Scraper-svc now loads `.env`** — the scraper container has `env_file: .env` in docker-compose.yml. Existing deployments with custom `.env` files will see new env vars picked up automatically.
+- **`search_type` defaults to `fast` on `/v2/search`** — this matches existing behavior but is now an explicit parameter. The new `rich` mode is opt-in.
 
-- **Web portal — single-search-bar UI for human users (ADR-0021)** — new `portal-svc` container in the Docker Compose stack. A lightweight FastAPI + Jinja2 web interface with a Google-inspired search bar. Routes queries to `POST /v2/answer` with SSE streaming, displaying real-time token output with source citations and a recent queries sidebar in localStorage. One-button v0.1 (answer endpoint); deep research button placeholder reserved for v0.2 (agent SSE, issue #130). Port 8081. See `docs/adr/0021-web-portal.md`.
+### 🧠 Semantic Search Engine (Phase 1 & 2)
 
-- **Intelligent scrape cache — freshness-aware revalidation with ETag/Last-Modified support (ADR-0019)** — the existing Valkey-backed scrape cache now stores HTTP ETag and Last-Modified headers from Tier 1-2 (llms.txt, content-negotiation) responses and uses conditional GETs (If-None-Match / If-Modified-Since) for blocking revalidation of cached content from slow tiers (playwright, flare-solverr, browser-svc). On 304 Not Modified, extends the cached entry's TTL without re-downloading. On 200, replaces the cache entry with fresh content.
-- **Content-change detection** — SHA-256 content hashing enables stale-content detection even when no ETag/Last-Modified headers are available. When content hashes match on re-fetch, the TTL is multiplied by `SCRAPE_CACHE_STABLE_MULTIPLIER` (default 2.0). When content changes repeatedly, the TTL is progressively reduced.
-- **Per-domain cache TTLs** — new `SCRAPE_CACHE_DOMAIN_TTLS` env var accepts a JSON dict mapping domain suffixes to TTLs (e.g., `{"news.ycombinator.com": 300, "docs.python.org": 86400}`). Longest suffix match wins. Falls back to the global `SCRAPE_CACHE_TTL`.
-- **Freshness tracking fields** — each cache entry now carries `fetch_count`, `first_fetched_at`, `last_checked_at`, `change_count`, `content_hash`, and `source_tier` metadata for observability and volatility-aware TTL adjustment.
-- **Configurable TTL bounds** — `SCRAPE_CACHE_MIN_TTL` (default: 60s), `SCRAPE_CACHE_MAX_TTL` (default: 86400s), and `SCRAPE_CACHE_VOLATILE_CAP` (default: 300s) prevent pathological TTL values.
+GroktoCrawl evolves from a stateless scraper into a learning search engine with a persistent vector index and ad-hoc semantic reranking.
 
-- **Observability infrastructure** — `/health` endpoint now returns per-dependency probe results (valkey, searxng, scraper, browser) with status, latency, and detail. New `/metrics` endpoint exports counters, histograms, and gauges in OpenMetrics text format for Prometheus consumption — no external dependencies. Structured JSON logging replaces ad-hoc prints with request_id correlation, timestamp, level, duration_ms, and status_code fields. Metrics tracked: scrape latency by tier (`scrape_duration_seconds`), job duration by type/status, job counters (submitted, completed, failed), queue depth, and dependency health. New `agent-svc/agent/metrics.py` and `agent-svc/agent/health.py` modules. ADR-0018. (closes #108)
+- **Phase 1: Semantic reranking (#142)** — `semantic-svc` performs embedding-based cosine reranking of SearXNG results on every `/v2/search` call. Uses pure-Python dot product (no numpy dependency, #143). Wired through the `/v2/answer` endpoint via `retrieval_mode` parameter (#156).
+- **Phase 2: Persistent vector index with Qdrant (#145)** — every page GroktoCrawl scrapes, crawls, or maps is embedded and stored in a Qdrant vector index (up to 250K docs by default). Subsequent searches query both SearXNG and the local corpus — the project's accumulated knowledge becomes searchable. Qdrant v1.18.2 pinned for reproducibility (#158).
+- **Batch vector ingestion via Qdrant gRPC (#163)** — large crawl results are ingested in batches for efficiency. New `semantic-svc/semantic/index.py` module.
+- **Content-based near-duplicate detection (#157)** — configurable cosine threshold (default 0.95) identifies duplicates at indexing time. `NEAR_DUP_THRESHOLD` and `NEAR_DUP_MODE` (skip/update) env vars.
+- **Smarter index retention — domain TTLs, frequency weighting, access boosting (#159, ADR-0027)** — replaces simple LRU eviction with a scoring function that considers content type, crawl frequency, and access patterns. News/social evicts first; reference/docs content persists longest.
+- **Embedding model migration path (#160)** — named vectors support enables future embedding model upgrades with backfill, dual-write during migration, and clean cutover.
+- **Service-level metrics for semantic-svc (#161, ADR-0029)** — stdlib-based OpenMetrics: `groktocrawl_index_docs_total`, `groktocrawl_index_evictions_total`, `groktocrawl_index_query_duration_seconds`, `groktocrawl_index_embeddings_duration_seconds`.
+- **Thread executor fix (#166)** — `model.encode()` now runs in a thread executor to avoid blocking the async event loop, fixing concurrent request handling under load.
+- **Qdrant API compatibility fixes (#146, #165)** — corrects point ID type (uint64 via SHA-256 truncation), uses `using` instead of `query_vector_name` for qdrant-client 1.18 compatibility.
 
-### Fixed
+### 🌐 Web Portal (portal-svc)
 
-- **`POST /v2/answer` retries more search results when scraping fails** — `_scrape_urls()` now loops through search results until enough sources are successfully scraped, bounded by 2x the requested count. Prevents empty responses when the top results are from sites that block scraping (BBC, Facebook, etc.) but usable sources exist further down.
+A human-facing web interface for GroktoCrawl, available at port 8082.
 
-### Added
+- **Single-search-bar UI (#132, ADR-0021)** — FastAPI + Jinja2 interface with Google-inspired design. Routes queries to `/v2/answer` with SSE streaming, real-time token output with citations, and a recent queries sidebar (localStorage-persisted).
+- **Client-side markdown rendering** — uses the `marked` library for full GFM rendering of answer text (tables, bold, inline code, links).
+- **Answer-above-sources layout** — primary content displayed first, with scrollable source citations below.
+- **Placeholder deep research button** — reserved for future v0.2 integration with agent-SSE.
 
-- **Substack adapter** (`scraper-svc/scraper/adapters/substack.py`) — reliable content extraction for Substack publications via RSS feed lookup. Three-tier fallback: RSS feed (primary, no auth) → readability-lxml page extraction → browser-svc render. Returns YAML frontmatter (title, author, publication, published_date) with full article body as clean markdown. Detects both `*.substack.com` URLs and vanity domains (e.g. `www.lennysnewsletter.com`) via RSS feed fingerprinting with per-domain probe caching. Priority 200.
-- **Unit tests for Substack adapter** — 26 tests covering URL pattern matching, vanity domain probe caching, RSS feed parsing (items, fields, edge cases), item matching by link and slug, and content-to-markdown conversion.
-- **`POST /v2/answer` — grounded Q&A endpoint with citations** — lightweight synchronous single-turn endpoint sitting between `/v2/search` (raw results) and `/v2/agent` (deep multi-step research). Pipeline: search → scrape → LLM → citations in one round-trip. Supports `stream: true` for SSE token-by-token streaming. Returns structured response with `answer` (markdown), `sources` (list), `citations` (index→URL mapping), `search_type`, and `latency_ms`. Configurable `num_sources` (1-20) and `model` per-request override.
-- **`LLMClient.generate_stream()`** — new async generator method for SSE streaming from any OpenAI-compatible LLM. Yields `token`, `done`, and `error` event dicts.
-- **Conditional auth header in LLMClient** — `Authorization: Bearer` header is now only sent when `api_key` is non-empty, fixing compatibility with LLM backends that reject empty Bearer tokens.
-- **Integration tests for `/v2/answer`** — 3 tests covering sync response structure, citation parsing, and SSE streaming event flow.
+### 🎤 Grounded Q&A (/v2/answer)
 
-- **Politeness protocol — optional per-domain rate limiting with robots.txt respect** — new `scraper-svc/scraper/politeness.py` module. Gated behind `SCRAPER_POLITENESS_ENABLED=true` in Docker `.env`, off by default. When enabled: fetches and caches robots.txt per domain (Valkey-backed), enforces configurable `Crawl-delay` between requests, and blocks URLs matching `Disallow` paths. Politeness metadata returned in scrape response. Configurable via `SCRAPER_POLITENESS_CRAWL_DELAY` and `SCRAPER_POLITENESS_ROBOTS_TTL` env vars. See `.env.sample` for full documentation.
-- **Unit tests for politeness module** — 14 tests covering robots.txt parsing, check/delay/block decision flow, rate limit timing, metadata reporting, and domain extraction.
-- **`politeness` field in scrape response** — `ScrapeResponse.data.politeness` returned when `SCRAPER_POLITENESS_ENABLED=true`.
-- **Graceful degradation** — `smart_scrape()` now checks content quality after each tier. When quality is below `QA_MIN_QUALITY_THRESHOLD` (default 0.3), the pipeline degrades to the next tier instead of returning low-quality content. Best-effort result is returned if all tiers produce low quality, with a `warning` field. Configurable via `QA_MIN_QUALITY_THRESHOLD` env var.
-- **Extraction quality gates** — post-extraction content quality assessment for boilerplate detection, completeness checks, and block page detection. Three lightweight heuristic gates in `scraper-svc/scraper/extract.py` produce a composite quality score (0.0-1.0) with structured breakdown. Quality score is returned in scrape response metadata — non-blocking, consumers set their own tolerance. See ADR-0016.
-- **`quality` field in scrape response** — `ScrapeResponse.data` and `ScrapeData.quality` now carry the quality assessment result.
-- **Structured metadata enrichment** — new `scraper-svc/scraper/metadata.py` module extracts JSON-LD, OpenGraph tags, Twitter Card tags, and standard meta tags (description, canonical URL, author, publication date, language, viewport, robots) from raw HTML already in memory during the scrape pipeline. Pure parsing — no additional fetches. Wired into the tier pipeline via `_enrich_with_metadata()` called alongside `_enrich_with_politeness()`. Returns a `metadata` field in `/scrape` and `/v2/scrape` responses alongside `content_markdown`. See [ADR-0004](docs/adr/0004-two-phase-result-markdown-and-metadata.md).
-- **`metadata` field in scrape response** — `/scrape` and `/v2/scrape` now return a `metadata` field with `json_ld`, `og`, `twitter`, and `meta` sub-fields when raw HTML is available.
-- **Unit tests for metadata extraction** — 25 tests covering JSON-LD (single/multiple/graph/list/invalid), OpenGraph (single/multi-valued), Twitter Card, standard meta tags (all fields, language detection, publication dates), and composite extraction.
-- **Unit tests for quality gates** — 18 tests covering boilerplate detection, completeness checking, block page detection, and integrated quality assessment.
-- **GitHub file adapter** (`scraper-svc/scraper/adapters/github.py`) — structured content extraction for raw.githubusercontent.com, blob URLs, repo roots (README + metadata), and tree listings. Uses raw.githubusercontent.com direct fetch as primary path with Contents API fallback. Extension allowlist for binary detection. Per-endpoint sliding window rate-limit tracker. Priority 200.
-- **GitHub social adapter** (`scraper-svc/scraper/adapters/github_social.py`) — issues, pull requests, discussions, releases (single + list), and commits via GitHub GraphQL API (v4). Three-tier fallback chain per resource: GraphQL → REST API → HTML page scrape (readability-lxml + markdownify). Works without a token at 60 req/hr (REST fallback) or without any auth (HTML scrape). Priority 190.
-- **`GITHUB_TOKEN` environment variable** — enables 5,000 API req/hr and GraphQL access for richer metadata (reviews, diff stats, threaded comments, discussion answers, release assets). `public_repo` scope for public repos, `repo` scope for private repos.
-- **CI tests for GitHub adapters** — 5 integration tests (raw file, blob→raw rewrite, repo root README, tree listing, social issue fallback) in `tests/test_stack.py`.
+A new synchronous single-turn Q&A interface sits between `/v2/search` (raw results) and `/v2/agent` (deep multi-step research), giving users a fast grounded-answer path.
 
-### Changed
+- **POST /v2/answer endpoint (#117, ADR-0017)** — pipeline: search → scrape → LLM synthesis → citations in one round-trip. Returns structured response with `answer` (markdown), `sources` (list), `citations` (index↔URL mapping), `search_type`, and `latency_ms`.
+- **SSE streaming** — `stream: true` enables token-by-token streaming with source discovery events before LLM output. Reuses protocol from ADR-0017.
+- **Concurrent scraping with early sources emission (#135)** — `_scrape_urls()` now scrapes in parallel with semaphore control, emitting sources as they complete instead of waiting for all.
+- **Retry on scrape failure (#120)** — loops through search results until enough sources succeed (bounded by 2x requested count). Prevents empty responses when top results are from hostile sites but usable sources exist deeper.
+- **Video platform URL deprioritization (#138)** — YouTube, Vimeo, and Twitch URLs are scored lower in source selection, preferring text-based sources.
+- **`answer` CLI subcommand (#118)** — `groktocrawl answer "question"` with `--sources`, `--model`, `--num-sources`, and streaming defaults.
 
-- Updated README with full GitHub adapter documentation covering 10 URL types and configuration.
-- Updated `.env.sample` with `GITHUB_TOKEN` configuration guide.
-- `smart_scrape()` now checks the adapter registry before the tier pipeline — matched adapters short-circuit to their own extraction.
-- `smart_scrape()` calls `assess_quality()` after each successful tier, attaching the quality result to the response dict.
-- `ScrapeData` model in agent-svc now includes an optional `quality` field.
+### 🔌 New Site Adapters
+
+Building on the adapter framework introduced in v0.6.0, three new adapters add structured extraction for high-value content sources.
+
+- **GitHub adapter (#115)** — `scraper-svc/scraper/adapters/github.py` for raw file content, blob URLs, repo roots (README + metadata), and tree listings. Priority 200.
+- **GitHub social adapter (#115)** — `scraper-svc/scraper/adapters/github_social.py` for issues, PRs, discussions, releases, and commits via GraphQL API (v4). Three-tier fallback: GraphQL → REST → HTML scrape. Priority 190.
+  - `GITHUB_TOKEN` env var enables 5,000 req/hr + GraphQL.
+  - Works without a token at 60 req/hr (REST) or unauth (HTML scrape).
+- **Substack adapter (#122)** — three-tier extraction via RSS feed (primary, no auth) → readability-lxml → browser-svc. Detects both `*.substack.com` and vanity domains via RSS fingerprinting. 26 unit tests.
+- **Reddit adapter (#121)** — post and comment extraction via the JSON API (`.json` suffix).
+
+### 🔍 Search Improvements
+
+- **Search type spectrum — fast and rich (#140, ADR-0023)** — `/v2/search` accepts `search_type` (default: `fast`). `fast` is instant (existing behavior). `rich` mode scrapes top results and enriches with LLM synthesis (1-3s). Optional `output_schema` enables structured data extraction in a single call.
+- **Agent SSE streaming (#137, ADR-0022)** — `/v2/agent` now supports `stream: true` for Server-Sent Events. Two-phase streaming: discovery events followed by token-by-token LLM output. CLI defaults to streaming; `--sync` to opt out.
+- **Vertical search categories (#101, #102)** — `sources` and `categories` parameters on `/v2/search` translated to SearXNG-native categories.
+
+### 🛡️ Politeness Protocol & Proxy Support
+
+- **Politeness protocol (#114)** — new `scraper-svc/scraper/politeness.py` module. Gated behind `SCRAPER_POLITENESS_ENABLED=true`. Fetches and caches robots.txt, enforces Crawl-delay, blocks Disallow paths. 14 unit tests.
+- **Proxy support — SCRAPER_PROXY_URL (#129, ADR-0020)** — contributed by @Jackal991. Single env var plumbed through httpx clients and Playwright browser context. Fail-open with WARN on proxy failure.
+
+### 📊 Observability & Operations
+
+- **Health probes and /metrics endpoint (#123, ADR-0018)** — `/health` returns per-dependency probe results. `/metrics` exports counters, histograms, and gauges in OpenMetrics format. Structured JSON logging with request_id correlation.
+- **Health endpoint fix (#125)** — corrected `health` → `healthy` state attribute name.
+
+### 🧹 Quality & Cache
+
+- **Intelligent scrape cache — ETag/Last-Modified revalidation (#126, ADR-0019)** — the Valkey-backed cache now uses conditional GETs. 304 responses extend TTL without re-downloading. SHA-256 content hashing detects changes. Per-domain TTLs, configurable bounds, volatility-aware TTL adjustment.
+- **Extraction QA pipeline (#111, ADR-0016)** — post-extraction quality gates for boilerplate detection, completeness checks, and block page detection.
+- **Graceful degradation (#112)** — `smart_scrape()` degrades through tiers on low-quality content.
+- **Structured metadata enrichment (#116, ADR-0004)** — extracts JSON-LD, OpenGraph, Twitter Card, and meta tags alongside markdown.
+- **Artifact-pyramid CLI output (#141, ADR-0024)** — `--pyramid` flag on `agent` and `answer` commands.
+
+### 🔧 Fixes & Polish
+
+- **Async event loop unblocked (#166)** — synchronous `model.encode()` now runs via thread executor.
+- **Qdrant API compatibility (#146, #165)** — uint64 point IDs, `using` keyword for qdrant-client 1.18.
+- **Numpy dependency removed (#143)** — pure-Python dot product replaces numpy in semantic reranking.
+- **Port exposure cleanup** — semantic-svc port no longer exposed to host.
+- **Conditional auth header** — `Authorization: Bearer` only sent when `api_key` is non-empty.
+- **ADR cleanup** — stale ADR-0020 removed, proxy ADR renumbered.
+
+### Contributors
+
+Special thanks to everyone who contributed to this release:
+
+- **@Jackal991** — PR #129: `SCRAPER_PROXY_URL` env var with fail-open logic, proxy identity logging, and credential redaction. A clean, minimal implementation that fills a structural gap in the scrape pipeline.
+- **@wysie** — PR #87: uv setup documentation for CLI dependencies. PR #86: portable Docker Compose config and SearXNG JSON API enabling.
+
+And @magnus919 for the bulk of the work — 52 PRs across semantic search, web portal, answer endpoint, adapters, observability, caching, and quality infrastructure.
+
+### Infrastructure
+
+- **New Docker services**: `semantic-svc`, `qdrant`, `portal-svc`
+- **New Qdrant volume**: `qdrant_data` for persistent vector storage
+- **New environment variables**: `SCRAPER_PROXY_URL`, `GITHUB_TOKEN`, `SCRAPE_CACHE_DOMAIN_TTLS`, `SCRAPE_CACHE_MIN_TTL`, `SCRAPE_CACHE_MAX_TTL`, `SCRAPE_CACHE_VOLATILE_CAP`, `SCRAPE_CACHE_STABLE_MULTIPLIER`, `SCRAPER_POLITENESS_ENABLED`, `SCRAPER_POLITENESS_CRAWL_DELAY`, `SCRAPER_POLITENESS_ROBOTS_TTL`, `QA_MIN_QUALITY_THRESHOLD`, `NEAR_DUP_THRESHOLD`, `NEAR_DUP_MODE`, `SEMANTIC_URL`, `QDRANT_URL`, `VECTOR_INDEX_MAX_DOCS`
+- **First-time startup note**: `docker compose up` will pull the Qdrant v1.18.2 image (~50MB). The Qdrant collection is created automatically on first index. Expect ~2-3 minutes for initial service readiness.
+
+### Full PR List
+
+PRs #83, #86–87, #89–90, #94, #96–97, #101–105, #111–118, #120–123, #125–126, #128–129, #132, #135–138, #140–143, #145–149, #156–168.
+
+---
 
 ## [0.6.0] — 2026-06-05
 
@@ -109,15 +160,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `.github/workflows/architecture.yml` — CI pipeline validating ADR structure on push/PR to main.
 
-### Added
-
-- _Nothing yet._
-
 ## [0.5.0] — 2026-05-31
 
 ### Security
 
-- **API key authentication** — Set `API_KEY` in `.env` to enable bearer token auth. All endpoints (except `/health`) require `Authorization: Bearer *** or `X-API-Key: ***`. When unset, a startup warning is logged, an `X-Security-Warning` header is added to every response, the `/health` endpoint includes a structured `security` field, and the CLI prints a one-time stderr warning. Backward compatible — existing deployments work unchanged. (#83)
+- **API key authentication** — Set `API_KEY` in `.env` to enable bearer token auth. All endpoints (except `/health`) require `Authorization: Bearer` or `X-API-Key`. When unset, a startup warning is logged, an `X-Security-Warning` header is added to every response, the `/health` endpoint includes a structured `security` field, and the CLI prints a one-time stderr warning. Backward compatible — existing deployments work unchanged. (#83)
 - **Private IP / SSRF protection** — Both `browser-svc` and `scraper-svc` now validate destination URLs before navigation. RFC 1918 private ranges, loopback, link-local, cloud metadata endpoints (169.254.169.254), and Docker host suffixes (`.docker.internal`) are blocked with a 400 error. Hostnames are resolved to IPs and checked, preventing DNS rebinding attacks. (#83)
 - **Port hardening** — Removed host port exposure from `browser-svc` (8012), `scraper-svc` (8001), and `parse-svc` (8013). These services are only reachable on Docker's internal DNS. The agent API on port 8080 remains the sole external entry point. (#83)
 
@@ -142,13 +189,10 @@ privately reported the unauthenticated browser pivot vulnerability. Thank you.
 ### Added
 
 - **CLI subcommands for monitor, parse, and generate-llmstxt** (`groktocrawl` binary) — three new entry points for managing change monitors (create/list/get/update/delete), parsing document files (PDF, EPUB, DOCX) to markdown, and generating llms.txt for a website with async polling. (#79, #81)
-- **SkillOpt Epoch 1 — skill document restructure** (`skills/groktocrawl/`) — added browser session lifecycle guidance, structured extraction examples, search backend config reference, and cross-command chaining patterns. (#73)
-- **SkillOpt Epoch 2 — structured extraction workflow** — full session ID plumbing through multiple commands, browser session lifecycle reference, multi-step research workflow example with PDF source handling, and "When to use which" decision table. (#74)
-- **Skill document optimization** — replaced sparse command list with comprehensive workflow-oriented references including domain exploration strategy, change monitoring, and error recovery patterns. (#72)
 - **Agent system prompt upgrade** (`agent-svc/agent/research.py`) — replaced the minimal 7-line `SYSTEM_PROMPT` with a comprehensive prompt that instructs the LLM to evaluate source quality, synthesize across multiple pages, detect contradictions, flag thin evidence, and cite sources by URL. The new prompt defines a clear source authority ladder (official docs > established news > blogs/forums) and tells the agent to be thorough and precise rather than just "concise."
 - **Extract prompt upgrade** — `EXTRACT_SYSTEM_PROMPT` now instructs the LLM to extract ALL instances of requested data, flag missing/ambiguous values, and organize output clearly.
-- **Model selection passthrough** — the `model` field from `POST /v2/agent` requests is now respected. When set to a specific model name (e.g., `"gpt-4o"`) it overrides the environment-configured default. When omitted or `"default"`, behavior is unchanged. Files changed: `api.py`, `worker.py`, `research.py`.
-- **Domain metadata in context** — each scraped source now includes `(domain: example.com)` in the context passed to the LLM, giving the research agent signal for credibility evaluation without adding a maintenance-heavy classification system.
+- **Model selection passthrough** — the `model` field from `POST /v2/agent` requests is now respected. When set to a specific model name (e.g., `"gpt-4o"`) it overrides the environment-configured default.
+- **Domain metadata in context** — each scraped source now includes `(domain: example.com)` in the context passed to the LLM.
 
 ### Changed
 
@@ -156,12 +200,8 @@ privately reported the unauthenticated browser pivot vulnerability. Thank you.
 
 ### Fixed
 
-- **50x search speedup** — removed redundant per-result scraping from `/v2/search`. Previously, every search result was independently scraped in addition to the search itself. Now results are returned directly without post-processing. (#69)
-- **Search CLI parsing** — `groktocrawl search` correctly reads from `data.web` dict instead of the flat `data` list, fixing silent empty-result returns on old CLI versions. (#71)
-- **SkillOpt Epoch 3 — structured data extraction guidance** — documented `extract` command prompt tips, error recovery patterns (JS-rendered pages, broad prompts, auth walls), and when to use `extract` vs `browser + executeScript`. (#75)
-- **SkillOpt Epoch 4 — multi-source research fallback chain** — documented systematic escalation from search → scrape → browser → agent, including when-to-escalate thresholds (500-char scrape, 403/blocked, conflicting info). (#76)
-- **SkillOpt Epoch 5 — change monitoring documentation** — added monitor lifecycle guidance, active job tracking distinction (monitors vs crawl/agent jobs), and Valkey storage details. (#77)
-- **Monitor docs correction** — clarified that monitor management uses the REST API (POST/PATCH/DELETE /v2/monitor), not CLI subcommands. (#78)
+- **50x search speedup** — removed redundant per-result scraping from `/v2/search`. (#69)
+- **Search CLI parsing** — `groktocrawl search` correctly reads from `data.web` dict instead of the flat `data` list. (#71)
 
 ## [0.3.0] — 2026-05-24
 
@@ -169,35 +209,23 @@ privately reported the unauthenticated browser pivot vulnerability. Thank you.
 
 #### Substack Scraping (Stealth Playwright Config)
 
-- **Stealth Playwright renderer** (`scraper-svc/scraper/stealth.py`) — the scraper-svc's Tier 3 now launches Chromium with `--disable-blink-features=AutomationControlled`, a real Chrome 131 User-Agent, 1920x1080 viewport, `en-US` locale, `America/New_York` timezone, and `navigator.webdriver` override via `add_init_script()`. Matches the browser-svc's proven configuration exactly.
-
-- **SPA content retry** — when extracted markdown is short (< 500 chars) or suspicious, the scraper scrolls to the bottom of the page and waits up to 6s to trigger lazy-loaded or dynamically-injected content from JS-rendered pages.
-
-- **Substack redirect detection** — `_is_substack_redirect()` detects `session-attribution-frame`, `channel-frame`, and GTM noscript redirects with a 5-second wait for delayed resolution.
-
-- **`networkidle` timeout** — increased to 45s with no `domcontentloaded` fallback, matching the browser-svc pattern that handles Substack's persistent analytics connections.
-
-- **Content gate fix** — `smart_scrape()` now returns extracted content immediately when `_looks_suspicious()` passes, even if embedded content signals (iframes for comments/analytics) are present. Previously, `substackcdn.com` was falsely matching the `cdn.` domain pattern in `EMBEDDED_CONTENT_DOMAINS`, causing 10K+ char articles to be discarded.
-
-- **Browser-svc fallback** (`_fetch_via_browser_svc()`) — when Substack redirects are detected and the content gate can't resolve them, the scraper can create a browser-svc session, navigate, and extract article text via `executeScript` with `document.querySelector('article').innerText`.
+- **Stealth Playwright renderer** (`scraper-svc/scraper/stealth.py`) — the scraper-svc's Tier 3 now launches Chromium with `--disable-blink-features=AutomationControlled`, a real Chrome 131 User-Agent, 1920x1080 viewport, `en-US` locale, `America/New_York` timezone, and `navigator.webdriver` override via `add_init_script()`.
+- **SPA content retry** — when extracted markdown is short (< 500 chars) or suspicious, the scraper scrolls to the bottom of the page and waits up to 6s to trigger lazy-loaded content.
+- **Substack redirect detection** — `_is_substack_redirect()` detects `session-attribution-frame`, `channel-frame`, and GTM noscript redirects.
+- **Content gate fix** — `smart_scrape()` now returns extracted content immediately when `_looks_suspicious()` passes, even if embedded content signals are present.
 
 #### Cookie Persistence (scraper-svc)
 
-- **Valkey-backed Cloudflare cookie store** (`scraper-svc/scraper/cookie_store.py`) — `cf_clearance` cookies are cached and reused across scrapes via the shared Valkey instance. Cross-service sharing: cookies solved by the browser-svc are immediately available to the scraper-svc (25-minute TTL, TLD+1 domain scoping).
-
-- **Cookie injection before navigation** — `fetch_via_playwright()` injects stored `cf_clearance` cookies before navigating, skipping Cloudflare challenges for previously-solved domains.
-
-- **Cookie storage after successful scrape** — new `cf_clearance` cookies are persisted to Valkey for future scrapes.
-
-- **Graceful degradation** — if Valkey is unavailable, the scraper continues without cookie persistence (logs a warning, returns content normally).
+- **Valkey-backed Cloudflare cookie store** — `cf_clearance` cookies are cached and reused across scrapes via Valkey (25-minute TTL, TLD+1 domain scoping).
+- **Cookie injection before navigation** — `fetch_via_playwright()` injects stored `cf_clearance` cookies before navigating.
 
 ### Changed
 
-- **Browser args stripped to match browser-svc**: removed `--disable-web-security`, `--disable-features=IsolateOrigins,site-per-process`, and `--disable-features=BlockInsecurePrivateNetworkRequests` from the stealth config. These extra flags deviated from real browser behavior and were potentially detectable.
+- **Browser args stripped** — removed `--disable-web-security`, `--disable-features=IsolateOrigins,site-per-process`, and `--disable-features=BlockInsecurePrivateNetworkRequests` from the stealth config.
 
 ### Fixed
 
-- **False-positive embedded content detection**: `_has_embedded_content()` was matching `substackcdn.com` against the `cdn.` domain pattern in `EMBEDDED_CONTENT_DOMAINS`, causing all Substack pages with comment/analytics iframes to be flagged as embedded-document portals and sent through the recovery chain. Fixed by prioritizing `content_good` over embedded content signals.
+- **False-positive embedded content detection** — `substackcdn.com` was falsely matching the `cdn.` domain pattern. Fixed by prioritizing `content_good` over embedded content signals.
 
 ## [0.2.0] — 2026-05-24
 
@@ -205,115 +233,38 @@ privately reported the unauthenticated browser pivot vulnerability. Thank you.
 
 #### Five-Tier Scrape Pipeline
 
-Complete overhaul of the scraper from a fixed three-tier system to an adaptive five-tier pipeline:
-
-- **Tier 3.5: FlareSolverr** — optional profile-gated container for hard Cloudflare challenges (CAPTCHA, strict fingerprinting). Enable with `docker compose --profile flare-solverr up`.
-- **Tier 4: LLM-Assisted Recovery** — when standard tiers return suspicious content (Cloudflare challenges, error pages), the scraper calls a configured LLM to analyze the page. The LLM can extract iframe URLs and retry the scrape on the real content URL, return extracted text embedded in the page, or identify bot challenge types.
-- **Tier 5: LLM Cloudflare Classification** — when all bypass methods fail, the LLM explains the block type (CAPTCHA, JS challenge, rate limit) and suggests alternative access paths (Wayback Machine, Google Cache), turning a hard failure into actionable information.
+- **Tier 3.5: FlareSolverr** — optional profile-gated container for hard Cloudflare challenges.
+- **Tier 4: LLM-Assisted Recovery** — when standard tiers return suspicious content, the scraper calls a configured LLM to analyze the page.
+- **Tier 5: LLM Cloudflare Classification** — when all bypass methods fail, the LLM explains the block type and suggests alternative access paths.
 
 #### Binary Content Support
 
-- **Content-Type detection** (`scraper-svc`) — auto-detects PDF, EPUB, images, and archives at the HTTP tier. Returns a structured `download` payload (filename, size, content_type) alongside markdown instead of failing.
-- **`groktocrawl download <url>`** — new CLI subcommand that fetches binary content directly via HTTP with a real Chrome User-Agent. Supports `--extract-text` for PDF/EPUB text extraction (requires optional `pymupdf`/`ebooklib` deps). Auto-derives filenames from URL or Content-Type.
-
-#### Iframe Content Detection
-
-- **`_has_embedded_content()`** — detects when a Playwright-rendered page contains an `<iframe>`, `<embed>`, or `<object>` pointing to document URLs (PDFs, EPUBs, known document-serving domains like Sci-Hub, Academia, ResearchGate). Pages with embedded content are escalated to LLM recovery for URL extraction instead of returning the portal page text.
-
-#### Cloudflare Bypass
-
-- **Stealth browser config** — browser-svc now launches Playwright with real Chrome User-Agent, `--disable-blink-features=AutomationControlled`, `navigator.webdriver` override, realistic viewport/locale/timezone, and `networkidle` wait strategy. Cloudflare challenge pages are detected and given an 8-second resolution window.
-- **Cookie persistence** — `cf_clearance` cookies are cached in Valkey with a 25-minute TTL. Subsequent scrapes to the same domain skip the Cloudflare challenge.
-- **FlareSolverr sidecar** — profile-gated container (`profiles: [flare-solverr]`) for sites with aggressive Cloudflare protection.
-
-#### DDoS-Guard Detection
-
-- **Browser-svc**: DDoS-Guard JS challenge detection alongside Cloudflare — title checks for "DDoS-Guard", URL checks for `/.well-known/ddos-guard/`.
-- **Scraper-svc bot challenge detection**: `fetch_via_playwright()` now uses `networkidle` wait and checks for bot challenges post-navigation, with an 8-second resolution window.
-- **Stealth scraper-svc Playwright config** — the scraper-svc's Tier 3 renderer now uses the same stealth configuration as browser-svc: `--disable-blink-features=AutomationControlled`, real Chrome 131 User-Agent, 1920x1080 viewport, `en-US` locale, `America/New_York` timezone, and `navigator.webdriver` override via `add_init_script()`. Additional fingerprint hardening: `navigator.plugins` array population, `navigator.languages` override, `window.chrome` presence, and WebGL vendor/renderer spoofing. See `scraper-svc/scraper/stealth.py`.
-- **`networkidle` → `domcontentloaded` timeout fallback** — when `networkidle` exceeds 30s (caused by persistent analytics connections on sites like Substack), the scraper falls back to `domcontentloaded` and proceeds with the rendered content instead of failing.
-- **Substack session-frame redirect detection** — `_is_substack_redirect()` detects when Substack injects `session-attribution-frame`, `channel-frame`, or GTM noscript redirects. Detection integrated into `fetch_via_playwright()` with a 5-second wait for delayed resolution, and into `_looks_suspicious()` for LLM recovery triggering.
-- **Bot challenge re-check** — after the 8-second resolution window, the scraper re-verifies the page title/URL before proceeding, avoiding false positives from brief challenge page flashes.
-
-#### Cookie Persistence (scraper-svc)
-
-- **Valkey-backed Cloudflare cookie store** — the scraper-svc's Playwright renderer now caches and reuses `cf_clearance` cookies via the shared Valkey instance (`scraper-svc/scraper/cookie_store.py`). Cookies are stored with a 25-minute TTL, scoped to TLD+1 domain. Cross-service sharing: cookies solved by the browser-svc are immediately available to the scraper-svc, and vice versa.
-- **Cookie injection before navigation** — `fetch_via_playwright()` injects stored `cf_clearance` cookies into the browser context before navigating, potentially skipping Cloudflare challenges entirely for previously-solved domains.
-- **Cookie storage after successful scrape** — after extracting content, any new `cf_clearance` cookies are persisted to Valkey for future scrapes.
-- **Graceful degradation** — if Valkey is unavailable, the scraper continues without cookie persistence (logs a warning, returns the content normally).
-
-#### LLM Fixture
-
-- **Prompt-aware fixture** — the `llm-svc` fixture now handles recovery prompt schemas: extracts `<iframe src>` URLs from page content when the prompt mentions `iframe_url` or `recovery`, returns Cloudflare/DDoS-Guard classification data when the prompt mentions `cloudflare` or `block_type`. Makes the full pipeline demonstrable with `docker compose --profile fixture up` (no external API key needed).
-
-### Changed
-
-- **Real Chrome User-Agent everywhere**: scraper-svc's `smart_scrape()` httpx client now uses a real Chrome 131 User-Agent instead of the custom `GroktoCrawl/0.1` string that triggered Cloudflare.
-- **`LLM_BASE_URL` configured in docker-compose**: scraper-svc now has `LLM_BASE_URL=http://llm-svc:8011/v1` in its environment block, fixing the port mismatch with the llm-svc fixture.
-- **Recovery prompt content**: removed 4000-char truncation — the LLM recovery module now sends the full page content instead of the first 4000 characters. URL fragments (`#view=FitH`) are stripped from extracted iframe URLs before retrying.
-
-### Fixed
-
-- **Recovery received markdown, not raw HTML** — the LLM recovery module was receiving the markdown-converted page text (no HTML tags) instead of the raw HTML. Iframe URLs in the HTML were invisible to the LLM. Fixed by passing `raw_html_start` when available.
-- **Duplicate `app = FastAPI(...)`** line in browser-svc left from a previous merge conflict resolution.
-- **LLM fixture returned wrong JSON schema** — the fixture was returning `{"result": "structured response"}` which didn't match the recovery module's expected `{"action": "iframe_url", "url": "..."}` schema.
+- **Content-Type detection** — auto-detects PDF, EPUB, images, and archives at the HTTP tier. Returns a structured `download` payload.
+- **`groktocrawl download <url>`** — new CLI subcommand for binary content.
 
 ### Infrastructure
 
-- **Contribution templates**: added bug report and feature request issue templates (`.github/ISSUE_TEMPLATE/`), PR template (`.github/PULL_REQUEST_TEMPLATE.md`), and updated `CONTRIBUTING.md` with Conventional Commits, DCO sign-off requirements, and PR template reference.
+- **Contribution templates**: added bug report and feature request issue templates, PR template, updated `CONTRIBUTING.md`.
 
 ## [0.1.1] — 2026-05-24
 
 ### Added
 
-- **Unified activity endpoint** (`GET /v2/activity`) — lists all active/processing jobs across all job types (crawl, agent, extract, batch_scrape, llmstxt). The CLI `active` command was previously broken (hit a route that was never implemented).
-  - `store.py`: `list_active_jobs()` method using Valkey SCAN + pipeline batch fetch
-  - New Pydantic models: `ActivityItem`, `ActivityResponse`
-  - CLI: `groktocrawl active` now shows job kind and URL columns; JSON output key is `active_jobs`
-
-- **Lightweight meta tag extraction** (`POST /scrape/meta`) — new endpoint on the scraper service that does a single HTTP GET and extracts `<title>`, `<meta name="description">`, and `<meta property="og:description">` from raw HTML. No Playwright, no readability, no markdown conversion.
-  - New module: `scraper-svc/scraper/meta.py`
-  - New Pydantic model: `MetaResponse`
-
-- **Sentence-boundary-aware description extraction** — the llms.txt generator now produces descriptions that end at complete sentence boundaries instead of hard-char truncation.
-  - Boilerplate signal filtering (30+ signal words: cookie, nav, footer, etc.)
-  - Lines under 30 chars filtered out
-  - Short candidates joined to reach ~100 char minimum
-  - Sentence-boundary regex scan (`. `, `! `, `? `) instead of `[:150]`
-  - Ellipsis fallback when no boundary found
-
-- **Meta tag integration** — llms.txt generation tries the meta endpoint first (cheap, one GET); falls through to full scrape + sentence-boundary extraction only when meta tags are absent or under 40 chars.
-
-### Testing
-
-- 8 unit tests for `_extract_description()` pure function (no Docker)
-- 4 new integration tests: meta endpoint, fallback, sentence-boundary, meta preference
-- 3 new fixture pages on the test-site (`/content/multi-sentence`, `/content/with-meta`, `/content/with-boilerplate`)
+- **Unified activity endpoint** (`GET /v2/activity`) — lists all active jobs across all job types.
+- **Lightweight meta tag extraction** (`POST /scrape/meta`) — single HTTP GET to extract `<title>`, `<meta name="description">`, and `<meta property="og:description">`.
+- **Sentence-boundary-aware description extraction** — llms.txt generator produces descriptions ending at complete sentence boundaries.
 
 ### Fixed
 
-- CLI `active` command (no longer returns 404 — now hits `GET /v2/activity`)
-- llms.txt descriptions no longer truncated mid-sentence
-- llms.txt descriptions no longer include cookie/nav boilerplate
+- CLI `active` command (no longer returns 404).
+- llms.txt descriptions no longer truncated mid-sentence or include boilerplate.
 
 ## [0.1.0] — 2026-05-21
 
 Initial release. Self-hosted, Firecrawl-compatible web scraping and AI research API.
 
-### Features
-
-- `/v2/scrape` — Single URL to clean markdown via three-tier scraper (llms.txt → Accept: text/markdown → Playwright)
-- `/v2/crawl` — Recursive site crawling with depth and page limits
-- `/v2/batch/scrape` — Batch scrape multiple URLs
-- `/v2/search` — Web search via SearXNG with automatic content scraping
-- `/v2/map` — URL discovery on a site with optional search filter
-- `/v2/agent` — Autonomous research agent (search → scrape → LLM synthesis)
-- `/v2/extract` — Structured data extraction from URLs with JSON Schema support
-- `/v2/browser` — Headless browser sessions (navigate, click, type, screenshot, scroll, executeScript)
-- `/v2/monitor` — Scheduled change detection with cron-based checking and webhook delivery
-- `/v2/parse` — Document file parsing (PDF, DOCX, PPTX, XLSX) to markdown
-- `/v2/generate-llmstxt` — Generate llms.txt files for any website
+- `/v2/scrape`, `/v2/crawl`, `/v2/batch/scrape`, `/v2/search`, `/v2/map`, `/v2/agent`, `/v2/extract`, `/v2/browser`, `/v2/monitor`, `/v2/parse`, `/v2/generate-llmstxt`
 - CLI with all endpoint support
 - Valkey-backed job store with 24h TTL
-- Webhook delivery for all async endpoints with HMAC signing and retry
+- Webhook delivery with HMAC signing and retry
 - Docker Compose deployment

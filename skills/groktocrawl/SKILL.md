@@ -134,6 +134,16 @@ JS-heavy sites (SPAs, modern news) may return under 500 chars. Switch to browser
 ### Running `which groktocrawl` before every call
 Don't. The CLI is at `~/.local/bin/groktocrawl`, it's always on PATH. If it broke, the first actual call would error out and tell you. The `which` check is a cargo-cult habit that adds a wasted round-trip and 30s of latency for zero value. Just call `groktocrawl` directly.
 
+### SearXNG Brave engines: `engine: brave` vs `engine: braveapi`
+
+The built-in SearXNG `engine: brave` scrapes the public Brave search website. It does NOT use the Brave Search API and gets rate-limited immediately from containerized deployments.
+
+Use `engine: braveapi` for a paid Brave Search API key — it hits `api.search.brave.com` with `X-Subscription-Token` auth.
+
+### Environment variable substitution in bind-mounted settings.yml
+
+Docker Compose does NOT expand `${VAR}` inside bind-mounted config files. Add a `docker-entrypoint.sh` that runs sed substitution at startup before handing off to SearXNG's real entrypoint. Use `cp → sed → cat` (not `sed -i`) to avoid temp file permission issues with non-root container users.
+
 ### Error recovery
 
 | Error | Recovery |
