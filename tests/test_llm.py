@@ -150,7 +150,7 @@ class TestLLMClientGenerate:
             assert "Error: LLM call failed" in result
 
     @pytest.mark.asyncio
-    async def test_disable_thinking_by_default(self, llm):
+    async def test_thinking_omitted_by_default(self, llm):
         with patch.object(
             llm._client,
             "post",
@@ -160,7 +160,7 @@ class TestLLMClientGenerate:
         ) as mock_post:
             await llm.generate(system_prompt="x", user_prompt="y")
             body = mock_post.call_args[1]["json"]
-            assert body.get("enable_thinking") is False
+            assert "enable_thinking" not in body
 
     @pytest.mark.asyncio
     async def test_thinking_enabled_via_env(self):
@@ -177,7 +177,7 @@ class TestLLMClientGenerate:
             ) as mock_post:
                 await client.generate(system_prompt="x", user_prompt="y")
                 body = mock_post.call_args[1]["json"]
-                assert "enable_thinking" not in body
+                assert body.get("enable_thinking") is True
 
     @pytest.mark.asyncio
     async def test_close(self, llm):

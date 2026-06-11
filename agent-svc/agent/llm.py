@@ -48,11 +48,13 @@ class LLMClient:
         messages = [{"role": "system", "content": system_prompt}]
 
         if context:
-            messages.append({
-                "role": "user",
-                "content": "Here is the information I gathered:\n\n"
-                           f"{context}\n\nBased on this, {user_prompt}",
-            })
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "Here is the information I gathered:\n\n"
+                    f"{context}\n\nBased on this, {user_prompt}",
+                }
+            )
         else:
             messages.append({"role": "user", "content": user_prompt})
 
@@ -64,10 +66,10 @@ class LLMClient:
             "stream": True,
         }
 
-        # Disable thinking/reasoning mode for models that support it
-        # (DeepSeek V4 Flash emits  blocks by default)
-        if os.getenv("LLM_ENABLE_THINKING", "false").lower() not in ("true", "1"):
-            body["enable_thinking"] = False
+        # Only enable thinking/reasoning for providers that support it
+        # (Anthropic/DeepSeek). Default is off; omit the param otherwise.
+        if os.getenv("LLM_ENABLE_THINKING", "false").lower() in ("true", "1"):
+            body["enable_thinking"] = True
 
         headers = {
             "Content-Type": "application/json",
@@ -86,8 +88,13 @@ class LLMClient:
                 ) as resp:
                     if resp.status_code != 200:
                         error_text = await resp.aread()
-                        logger.error("LLM API error %d: %s", resp.status_code, error_text[:500])
-                        yield {"type": "error", "content": f"LLM API returned {resp.status_code}"}
+                        logger.error(
+                            "LLM API error %d: %s", resp.status_code, error_text[:500]
+                        )
+                        yield {
+                            "type": "error",
+                            "content": f"LLM API returned {resp.status_code}",
+                        }
                         return
 
                     async for line in resp.aiter_lines():
@@ -133,10 +140,12 @@ class LLMClient:
         messages = [{"role": "system", "content": system_prompt}]
 
         if context:
-            messages.append({
-                "role": "user",
-                "content": f"Here is the information I gathered:\n\n{context}\n\nBased on this, {user_prompt}",
-            })
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"Here is the information I gathered:\n\n{context}\n\nBased on this, {user_prompt}",
+                }
+            )
         else:
             messages.append({"role": "user", "content": user_prompt})
 
@@ -147,9 +156,10 @@ class LLMClient:
             "max_tokens": 8192,
         }
 
-        # Disable thinking/reasoning mode for models that support it
-        if os.getenv("LLM_ENABLE_THINKING", "false").lower() not in ("true", "1"):
-            body["enable_thinking"] = False
+        # Only enable thinking/reasoning for providers that support it
+        # (Anthropic/DeepSeek). Default is off; omit the param otherwise.
+        if os.getenv("LLM_ENABLE_THINKING", "false").lower() in ("true", "1"):
+            body["enable_thinking"] = True
 
         # If schema is provided, request structured JSON output
         if schema:
