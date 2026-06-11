@@ -46,7 +46,7 @@ import sys
 import textwrap
 import time
 import warnings
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 warnings.simplefilter("ignore")
 
@@ -70,9 +70,10 @@ def _get_default_server() -> str:
             with open(env_path) as f:
                 for line in f:
                     line = line.strip()
-                    if line.startswith("export "):
-                        line = line[len("export "):]
-                    if line.startswith("GROKTOCRAWL_API_URL=") or line.startswith("FIRECRAWL_API_URL="):
+                    line = line.removeprefix("export ")
+                    if line.startswith("GROKTOCRAWL_API_URL=") or line.startswith(
+                        "FIRECRAWL_API_URL="
+                    ):
                         val = line.split("=", 1)[1].strip("\"'")
                         if val:
                             return val.rstrip("/")
@@ -90,8 +91,13 @@ _security_warnings_shown: set[str] = set()
 def _server_id(url: str) -> str:
     """Extract host:port from a URL for deduplicating security warnings."""
     from urllib.parse import urlparse
+
     parsed = urlparse(url)
-    return f"{parsed.hostname}:{parsed.port or (443 if parsed.scheme == 'https' else 80)}"
+    return (
+        f"{parsed.hostname}:{parsed.port or (443 if parsed.scheme == 'https' else 80)}"
+    )
+
+
 POLL_INTERVAL = 2
 
 QUIET = False
@@ -218,6 +224,7 @@ def _write_pyramid(
     if sources:
         # Group sources by domain
         from urllib.parse import urlparse
+
         domain_groups: dict[str, list[dict]] = {}
         for s in sources:
             url = s.get("url", "") if isinstance(s, dict) else str(s)
@@ -246,23 +253,20 @@ def _write_pyramid(
                 title = ds.get("title", url) if isinstance(ds, dict) else url
                 src_slug = _slugify(title, 40)
                 stub_lines.append(
-                    f"| {i} | {title} | {url} | "
-                    f"`03-dossiers/consulted-{src_slug}.md` |"
+                    f"| {i} | {title} | {url} | `03-dossiers/consulted-{src_slug}.md` |"
                 )
-            stub_lines.extend([
-                "",
-                "SOURCES (LAYER 2 NAVIGATION)",
-            ])
+            stub_lines.extend(
+                [
+                    "",
+                    "SOURCES (LAYER 2 NAVIGATION)",
+                ]
+            )
             for ds in domain_sources:
                 url = ds.get("url", "") if isinstance(ds, dict) else str(ds)
                 title = ds.get("title", url) if isinstance(ds, dict) else url
                 src_slug = _slugify(title, 40)
-                stub_lines.append(
-                    f"03-dossiers/consulted-{src_slug}.md"
-                )
-                stub_lines.append(
-                    f" -> Full scraped content from {url}"
-                )
+                stub_lines.append(f"03-dossiers/consulted-{src_slug}.md")
+                stub_lines.append(f" -> Full scraped content from {url}")
             _write_file(os.path.join(l2_dir, dim_file), "\n".join(stub_lines))
 
     if not sources:
@@ -293,14 +297,15 @@ def _write_pyramid(
             fname = f"consulted-{src_slug}.md"
             consulted_files.append(fname)
 
-            l3_index.append(
-                f"| consulted | `{fname}` | {title} | {url} |"
-            )
+            l3_index.append(f"| consulted | `{fname}` | {title} | {url} |")
 
             # Write source dossier
             from urllib.parse import urlparse
+
             domain = urlparse(url).netloc
-            content = s.get("markdown", s.get("content", "")) if isinstance(s, dict) else ""
+            content = (
+                s.get("markdown", s.get("content", "")) if isinstance(s, dict) else ""
+            )
             body = [
                 "---",
                 f"url: {url}",
@@ -311,7 +316,7 @@ def _write_pyramid(
                 "status: consulted",
                 "---",
                 "",
-                content if content else "(no content available)",
+                content or "(no content available)",
             ]
             _write_file(os.path.join(l3_dir, fname), "\n".join(body))
 
@@ -323,9 +328,7 @@ def _write_pyramid(
             src_slug = _slugify(title, 40)
             fname = f"discovered-{src_slug}.md"
             discovered_entries.append(fname)
-            l3_index.append(
-                f"| discovered | `{fname}` | {title} | {url} |"
-            )
+            l3_index.append(f"| discovered | `{fname}` | {title} | {url} |")
             body = [
                 "---",
                 f"url: {url}",
@@ -407,9 +410,9 @@ class Client:
         self,
         method: str,
         path: str,
-        json_data: Optional[Dict] = None,
-        params: Optional[Dict] = None,
-    ) -> Dict[str, Any]:
+        json_data: dict | None = None,
+        params: dict | None = None,
+    ) -> dict[str, Any]:
         import requests
 
         url = self._url(path)
@@ -423,12 +426,20 @@ class Client:
                 "json": json_data,
             }
 
+        # Read API key from environment (GROKTOCRAWL_API_KEY takes precedence)
+        api_key = os.getenv("GROKTOCRAWL_API_KEY") or os.getenv("API_KEY") or ""
+
+        headers: dict[str, str] = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
         try:
             resp = requests.request(
                 method=method,
                 url=url,
                 params=params,
                 json=json_data,
+                headers=headers,
                 timeout=120,
             )
         except requests.ConnectionError as e:
@@ -452,7 +463,9 @@ class Client:
             print(f"\u26a0\ufe0f  Security warning: {warning}", file=sys.stderr)
 
         if resp.status_code >= 400:
-            detail = body.get("detail", body.get("error", body.get("message", str(body))))
+            detail = body.get(
+                "detail", body.get("error", body.get("message", str(body)))
+            )
             raise ApiError(f"API error ({resp.status_code}): {detail}")
 
         return body
@@ -460,12 +473,12 @@ class Client:
     def scrape(
         self,
         url: str,
-        formats: Optional[List[str]] = None,
+        formats: list[str] | None = None,
         only_main_content: bool = True,
         timeout: int = 60000,
         **extra: Any,
-    ) -> Dict[str, Any]:
-        data: Dict[str, Any] = {
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = {
             "url": url,
             "formats": formats or ["markdown"],
             "onlyMainContent": only_main_content,
@@ -479,13 +492,17 @@ class Client:
         query: str,
         limit: int = 5,
         scrape: bool = False,
-        categories: Optional[list[str]] = None,
-        sources: Optional[list[str]] = None,
+        categories: list[str] | None = None,
+        sources: list[str] | None = None,
         search_type: str = "fast",
-        output_schema: Optional[dict] = None,
-        system_prompt: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        data: Dict[str, Any] = {"query": query, "limit": limit, "search_type": search_type}
+        output_schema: dict | None = None,
+        system_prompt: str | None = None,
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "query": query,
+            "limit": limit,
+            "search_type": search_type,
+        }
         if scrape:
             data["scrapeOptions"] = {"formats": ["markdown"]}
         if categories:
@@ -502,10 +519,10 @@ class Client:
         self,
         url: str,
         limit: int = 200,
-        search: Optional[str] = None,
+        search: str | None = None,
         **extra: Any,
-    ) -> Dict[str, Any]:
-        data: Dict[str, Any] = {"url": url, "limit": limit}
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = {"url": url, "limit": limit}
         if search:
             data["search"] = search
         data.update(extra)
@@ -516,11 +533,11 @@ class Client:
         url: str,
         limit: int = 50,
         max_depth: int = 2,
-        include_paths: Optional[List[str]] = None,
-        exclude_paths: Optional[List[str]] = None,
+        include_paths: list[str] | None = None,
+        exclude_paths: list[str] | None = None,
         **extra: Any,
-    ) -> Dict[str, Any]:
-        data: Dict[str, Any] = {
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = {
             "url": url,
             "limit": limit,
             "maxDepth": max_depth,
@@ -532,19 +549,19 @@ class Client:
         data.update(extra)
         return self._request("POST", "/crawl", json_data=data)
 
-    def crawl_status(self, job_id: str) -> Dict[str, Any]:
+    def crawl_status(self, job_id: str) -> dict[str, Any]:
         return self._request("GET", f"/crawl/{job_id}")
 
-    def get_active_crawls(self) -> Dict[str, Any]:
+    def get_active_crawls(self) -> dict[str, Any]:
         return self._request("GET", "/crawl/active")
 
     def create_agent(
         self,
         prompt: str,
-        urls: Optional[List[str]] = None,
-        schema: Optional[Dict] = None,
-    ) -> Dict[str, Any]:
-        data: Dict[str, Any] = {"prompt": prompt}
+        urls: list[str] | None = None,
+        schema: dict | None = None,
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = {"prompt": prompt}
         if urls:
             data["urls"] = urls
         if schema:
@@ -554,26 +571,27 @@ class Client:
     def create_agent_stream(
         self,
         prompt: str,
-        urls: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        urls: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Create an agent research job with SSE streaming.
 
         Returns a dict with ``_stream`` key containing the raw streaming response.
         """
-        data: Dict[str, Any] = {"prompt": prompt, "stream": True}
+        data: dict[str, Any] = {"prompt": prompt, "stream": True}
         if urls:
             data["urls"] = urls
         import requests
+
         url = self._url("/agent")
         resp = requests.post(url, json=data, timeout=300, stream=True)
         if resp.status_code >= 400:
             raise ApiError(f"API error ({resp.status_code}): {resp.text[:500]}")
         return {"_stream": resp}
 
-    def agent_status(self, job_id: str) -> Dict[str, Any]:
+    def agent_status(self, job_id: str) -> dict[str, Any]:
         return self._request("GET", f"/agent/{job_id}")
 
-    def cancel_agent(self, job_id: str) -> Dict[str, Any]:
+    def cancel_agent(self, job_id: str) -> dict[str, Any]:
         return self._request("DELETE", f"/agent/{job_id}")
 
     def answer(
@@ -581,11 +599,16 @@ class Client:
         query: str,
         num_sources: int = 5,
         stream: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Grounded Q&A: synchronous, cited answer."""
-        data: Dict[str, Any] = {"query": query, "num_sources": num_sources, "stream": stream}
+        data: dict[str, Any] = {
+            "query": query,
+            "num_sources": num_sources,
+            "stream": stream,
+        }
         if stream:
             import requests
+
             url = self._url("/answer")
             resp = requests.post(url, json=data, timeout=120, stream=True)
             if resp.status_code >= 400:
@@ -642,6 +665,7 @@ class Client:
 
     def parse_file(self, filepath):
         import requests
+
         url = self._url("/parse")
         if self.dry_run:
             return {"dry_run": True, "method": "POST", "url": url, "file": filepath}
@@ -652,13 +676,17 @@ class Client:
                 body = resp.json()
             except ValueError:
                 body = {"detail": resp.text[:200]}
-            raise ApiError(f"Parse error ({resp.status_code}): {body.get('detail', body.get('error', str(body)))}")
+            raise ApiError(
+                f"Parse error ({resp.status_code}): {body.get('detail', body.get('error', str(body)))}"
+            )
         return resp.json()
 
     # ---- LLMs.txt ----
 
     def create_llmstxt(self, url, max_pages=50):
-        return self._request("POST", "/generate-llmstxt", json_data={"url": url, "max_pages": max_pages})
+        return self._request(
+            "POST", "/generate-llmstxt", json_data={"url": url, "max_pages": max_pages}
+        )
 
     def llmstxt_status(self, job_id):
         return self._request("GET", f"/generate-llmstxt/{job_id}")
@@ -669,11 +697,19 @@ class Client:
 
 def cmd_scrape(client: Client, args: argparse.Namespace) -> None:
     if client.dry_run:
-        emit(f"[dry-run] Would scrape: {args.url}", {"dry_run": True, "command": "scrape", "url": args.url})
+        emit(
+            f"[dry-run] Would scrape: {args.url}",
+            {"dry_run": True, "command": "scrape", "url": args.url},
+        )
         return
 
     try:
-        result = client.scrape(url=args.url, formats=args.format, only_main_content=args.only_main_content, timeout=args.timeout)
+        result = client.scrape(
+            url=args.url,
+            formats=args.format,
+            only_main_content=args.only_main_content,
+            timeout=args.timeout,
+        )
     except ApiError as e:
         die(str(e))
 
@@ -698,7 +734,10 @@ def cmd_scrape(client: Client, args: argparse.Namespace) -> None:
 
 def cmd_search(client: Client, args: argparse.Namespace) -> None:
     if client.dry_run:
-        emit(f"[dry-run] Would search: {args.query}", {"dry_run": True, "command": "search", "query": args.query})
+        emit(
+            f"[dry-run] Would search: {args.query}",
+            {"dry_run": True, "command": "search", "query": args.query},
+        )
         return
 
     try:
@@ -715,8 +754,11 @@ def cmd_search(client: Client, args: argparse.Namespace) -> None:
                 die(f"Invalid output_schema: {e}")
 
         result = client.search(
-            query=args.query, limit=args.limit, scrape=args.scrape_results,
-            categories=args.categories, sources=args.sources,
+            query=args.query,
+            limit=args.limit,
+            scrape=args.scrape_results,
+            categories=args.categories,
+            sources=args.sources,
             search_type=args.search_type,
             output_schema=output_schema,
             system_prompt=args.system_prompt,
@@ -739,7 +781,7 @@ def cmd_search(client: Client, args: argparse.Namespace) -> None:
         return
 
     print(f"Search results for: {args.query}\n")
-    for i, item in enumerate(data[:args.limit], 1):
+    for i, item in enumerate(data[: args.limit], 1):
         if isinstance(item, dict):
             title = item.get("title", "(no title)")
             url = item.get("url", "")
@@ -754,7 +796,10 @@ def cmd_search(client: Client, args: argparse.Namespace) -> None:
 
 def cmd_map(client: Client, args: argparse.Namespace) -> None:
     if client.dry_run:
-        emit(f"[dry-run] Would map: {args.url}", {"dry_run": True, "command": "map", "url": args.url})
+        emit(
+            f"[dry-run] Would map: {args.url}",
+            {"dry_run": True, "command": "map", "url": args.url},
+        )
         return
 
     try:
@@ -786,11 +831,19 @@ def cmd_map(client: Client, args: argparse.Namespace) -> None:
 
 def cmd_crawl(client: Client, args: argparse.Namespace) -> None:
     if client.dry_run:
-        emit(f"[dry-run] Would crawl: {args.url}", {"dry_run": True, "command": "crawl"})
+        emit(
+            f"[dry-run] Would crawl: {args.url}", {"dry_run": True, "command": "crawl"}
+        )
         return
 
     try:
-        result = client.crawl(url=args.url, limit=args.limit, max_depth=args.max_depth, include_paths=args.include_paths, exclude_paths=args.exclude_paths)
+        result = client.crawl(
+            url=args.url,
+            limit=args.limit,
+            max_depth=args.max_depth,
+            include_paths=args.include_paths,
+            exclude_paths=args.exclude_paths,
+        )
     except ApiError as e:
         die(str(e))
 
@@ -835,11 +888,16 @@ def cmd_crawl(client: Client, args: argparse.Namespace) -> None:
 
 def cmd_agent(client: Client, args: argparse.Namespace) -> None:
     if client.dry_run:
-        emit(f"[dry-run] Would start agent: {args.prompt}", {"dry_run": True, "command": "agent"})
+        emit(
+            f"[dry-run] Would start agent: {args.prompt}",
+            {"dry_run": True, "command": "agent"},
+        )
         return
 
     pyramid_mode = args.pyramid or bool(args.output_dir)
-    output_dir = args.output_dir or (_default_output_dir(args.prompt) if pyramid_mode else "")
+    output_dir = args.output_dir or (
+        _default_output_dir(args.prompt) if pyramid_mode else ""
+    )
 
     if pyramid_mode:
         log(f"Agent researching... (pyramid output to {output_dir})")
@@ -847,7 +905,9 @@ def cmd_agent(client: Client, args: argparse.Namespace) -> None:
     try:
         if args.sync:
             # Non-streaming path: create job and poll
-            result = client.create_agent(prompt=args.prompt, urls=args.urls, schema=None)
+            result = client.create_agent(
+                prompt=args.prompt, urls=args.urls, schema=None
+            )
         else:
             # Streaming path (default)
             result = client.create_agent_stream(prompt=args.prompt, urls=args.urls)
@@ -964,23 +1024,27 @@ def cmd_agent(client: Client, args: argparse.Namespace) -> None:
             print(full_result)
 
 
-
-
-
 def cmd_answer(client: Client, args: argparse.Namespace) -> None:
     """Grounded Q&A: one call, cited answer."""
     if client.dry_run:
-        emit(f"[dry-run] Would answer: {args.query}", {"dry_run": True, "command": "answer"})
+        emit(
+            f"[dry-run] Would answer: {args.query}",
+            {"dry_run": True, "command": "answer"},
+        )
         return
 
     pyramid_mode = args.pyramid or bool(args.output_dir)
-    output_dir = args.output_dir or (_default_output_dir(args.query) if pyramid_mode else "")
+    output_dir = args.output_dir or (
+        _default_output_dir(args.query) if pyramid_mode else ""
+    )
 
     if pyramid_mode:
         log(f"Answering... (pyramid output to {output_dir})")
 
     try:
-        result = client.answer(query=args.query, num_sources=args.num_sources, stream=not args.sync)
+        result = client.answer(
+            query=args.query, num_sources=args.num_sources, stream=not args.sync
+        )
     except ApiError as e:
         die(str(e))
 
@@ -1049,7 +1113,14 @@ def cmd_answer(client: Client, args: argparse.Namespace) -> None:
         )
         emit(path, {"pyramid": path})
     elif JSON_OUTPUT:
-        emit("", {"answer": result.get("answer", ""), "sources": result.get("sources", []), "citations": result.get("citations", [])})
+        emit(
+            "",
+            {
+                "answer": result.get("answer", ""),
+                "sources": result.get("sources", []),
+                "citations": result.get("citations", []),
+            },
+        )
     else:
         answer = result.get("answer", "")
         sources = result.get("sources", [])
@@ -1064,19 +1135,22 @@ def cmd_answer(client: Client, args: argparse.Namespace) -> None:
             for c in citations:
                 print("  [{}] {}".format(c["index"], c["url"]))
 
+
 def cmd_download(client: Client, args: argparse.Namespace) -> None:
     """Download binary content (PDF, EPUB, image, etc.) from a URL."""
-    import os
     from urllib.parse import urlparse
 
     from requests import get as http_get
 
     url = args.url
     output = args.output
-    extract_text = getattr(args, 'extract_text', False)
+    extract_text = getattr(args, "extract_text", False)
 
     if client.dry_run:
-        emit(f"[dry-run] Would download {url}", {"dry_run": True, "command": "download", "url": url})
+        emit(
+            f"[dry-run] Would download {url}",
+            {"dry_run": True, "command": "download", "url": url},
+        )
         return
 
     log(f"Downloading {url}...")
@@ -1097,7 +1171,11 @@ def cmd_download(client: Client, args: argparse.Namespace) -> None:
     except Exception as e:
         die(f"Download failed: {e}")
 
-    content_type = resp.headers.get("content-type", "application/octet-stream").split(";")[0].strip()
+    content_type = (
+        resp.headers.get("content-type", "application/octet-stream")
+        .split(";")[0]
+        .strip()
+    )
 
     # Derive filename if not provided
     if not output:
@@ -1134,16 +1212,19 @@ def cmd_download(client: Client, args: argparse.Namespace) -> None:
             if content_type == "application/pdf":
                 try:
                     import fitz
+
                     doc = fitz.open(stream=content, filetype="pdf")
                     text = "\n".join(page.get_text() for page in doc)
                 except ImportError:
                     warn("PyMuPDF not installed. Install with: pip install pymupdf")
             elif content_type == "application/epub+zip":
                 try:
-                    import ebooklib
-                    from ebooklib import epub
-                    from bs4 import BeautifulSoup
                     from io import BytesIO
+
+                    import ebooklib
+                    from bs4 import BeautifulSoup
+                    from ebooklib import epub
+
                     book = epub.read_epub(BytesIO(content))
                     chapters = []
                     for item in book.get_items():
@@ -1152,7 +1233,9 @@ def cmd_download(client: Client, args: argparse.Namespace) -> None:
                             chapters.append(soup.get_text())
                     text = "\n".join(chapters)
                 except ImportError:
-                    warn("ebooklib not installed. Install with: pip install ebooklib beautifulsoup4")
+                    warn(
+                        "ebooklib not installed. Install with: pip install ebooklib beautifulsoup4"
+                    )
         except Exception as e:
             warn(f"Text extraction failed: {e}")
 
@@ -1164,13 +1247,23 @@ def cmd_download(client: Client, args: argparse.Namespace) -> None:
 
     # JSON output
     if JSON_OUTPUT:
-        emit("", {"success": True, "filename": output, "size": len(content), "content_type": content_type})
-
+        emit(
+            "",
+            {
+                "success": True,
+                "filename": output,
+                "size": len(content),
+                "content_type": content_type,
+            },
+        )
 
 
 def cmd_extract(client: Client, args: argparse.Namespace) -> None:
     if client.dry_run:
-        emit(f"[dry-run] Would extract from {args.urls}", {"dry_run": True, "command": "extract"})
+        emit(
+            f"[dry-run] Would extract from {args.urls}",
+            {"dry_run": True, "command": "extract"},
+        )
         return
 
     try:
@@ -1221,7 +1314,10 @@ def cmd_extract(client: Client, args: argparse.Namespace) -> None:
 def cmd_browser(client: Client, args: argparse.Namespace) -> None:
     if args.command_action == "create":
         if client.dry_run:
-            emit("[dry-run] Would create browser session", {"dry_run": True, "command": "browser", "action": "create"})
+            emit(
+                "[dry-run] Would create browser session",
+                {"dry_run": True, "command": "browser", "action": "create"},
+            )
             return
         result = client.create_browser(ttl=args.ttl)
         if JSON_OUTPUT:
@@ -1230,7 +1326,10 @@ def cmd_browser(client: Client, args: argparse.Namespace) -> None:
             log(f"Browser session: {result.get('id', '')}")
     elif args.command_action == "exec":
         if client.dry_run:
-            emit(f"[dry-run] Would execute {args.action} in session {args.session_id}", {"dry_run": True, "command": "browser", "action": "execute"})
+            emit(
+                f"[dry-run] Would execute {args.action} in session {args.session_id}",
+                {"dry_run": True, "command": "browser", "action": "execute"},
+            )
             return
         kwargs = {}
         if args.url:
@@ -1251,7 +1350,10 @@ def cmd_browser(client: Client, args: argparse.Namespace) -> None:
                 print(f"Error: {result['error']}")
     elif args.command_action == "list":
         if client.dry_run:
-            emit("[dry-run] Would list browser sessions", {"dry_run": True, "command": "browser", "action": "list"})
+            emit(
+                "[dry-run] Would list browser sessions",
+                {"dry_run": True, "command": "browser", "action": "list"},
+            )
             return
         result = client.list_browsers()
         sessions = result.get("sessions", [])
@@ -1265,7 +1367,10 @@ def cmd_browser(client: Client, args: argparse.Namespace) -> None:
                     print(f"  {s['id']}  [{s['age_seconds']}s / TTL: {s['ttl']}s]")
     elif args.command_action == "destroy":
         if client.dry_run:
-            emit(f"[dry-run] Would destroy session {args.session_id}", {"dry_run": True, "command": "browser", "action": "destroy"})
+            emit(
+                f"[dry-run] Would destroy session {args.session_id}",
+                {"dry_run": True, "command": "browser", "action": "destroy"},
+            )
             return
         result = client.destroy_browser(args.session_id)
         if JSON_OUTPUT:
@@ -1276,7 +1381,9 @@ def cmd_browser(client: Client, args: argparse.Namespace) -> None:
 
 def cmd_active(client: Client, args: argparse.Namespace) -> None:
     if client.dry_run:
-        emit("[dry-run] Would list active crawls", {"dry_run": True, "command": "active"})
+        emit(
+            "[dry-run] Would list active crawls", {"dry_run": True, "command": "active"}
+        )
         return
 
     try:
@@ -1298,7 +1405,7 @@ def cmd_active(client: Client, args: argparse.Namespace) -> None:
 
     print(f"Active crawl jobs ({len(active)}):\n")
     for job in active:
-        print(f"  {job.get('id','?')}  [{job.get('status','?')}]")
+        print(f"  {job.get('id', '?')}  [{job.get('status', '?')}]")
 
 
 def cmd_monitor(client: Client, args: argparse.Namespace) -> None:
@@ -1307,10 +1414,20 @@ def cmd_monitor(client: Client, args: argparse.Namespace) -> None:
 
     if action == "create":
         if client.dry_run:
-            emit(f"[dry-run] Would create monitor for {args.url}", {"dry_run": True, "command": "monitor", "action": "create", "url": args.url})
+            emit(
+                f"[dry-run] Would create monitor for {args.url}",
+                {
+                    "dry_run": True,
+                    "command": "monitor",
+                    "action": "create",
+                    "url": args.url,
+                },
+            )
             return
         try:
-            result = client.create_monitor(args.url, schedule=args.schedule, webhook=args.webhook)
+            result = client.create_monitor(
+                args.url, schedule=args.schedule, webhook=args.webhook
+            )
         except ApiError as e:
             die(str(e))
         if JSON_OUTPUT:
@@ -1322,7 +1439,10 @@ def cmd_monitor(client: Client, args: argparse.Namespace) -> None:
 
     elif action == "list":
         if client.dry_run:
-            emit("[dry-run] Would list monitors", {"dry_run": True, "command": "monitor", "action": "list"})
+            emit(
+                "[dry-run] Would list monitors",
+                {"dry_run": True, "command": "monitor", "action": "list"},
+            )
             return
         try:
             result = client.list_monitors()
@@ -1345,7 +1465,10 @@ def cmd_monitor(client: Client, args: argparse.Namespace) -> None:
 
     elif action == "get":
         if client.dry_run:
-            emit(f"[dry-run] Would get monitor {args.id}", {"dry_run": True, "command": "monitor", "action": "get", "id": args.id})
+            emit(
+                f"[dry-run] Would get monitor {args.id}",
+                {"dry_run": True, "command": "monitor", "action": "get", "id": args.id},
+            )
             return
         try:
             result = client.get_monitor(args.id)
@@ -1364,7 +1487,15 @@ def cmd_monitor(client: Client, args: argparse.Namespace) -> None:
 
     elif action == "update":
         if client.dry_run:
-            emit(f"[dry-run] Would update monitor {args.id}", {"dry_run": True, "command": "monitor", "action": "update", "id": args.id})
+            emit(
+                f"[dry-run] Would update monitor {args.id}",
+                {
+                    "dry_run": True,
+                    "command": "monitor",
+                    "action": "update",
+                    "id": args.id,
+                },
+            )
             return
         kwargs = {}
         if args.url:
@@ -1386,7 +1517,15 @@ def cmd_monitor(client: Client, args: argparse.Namespace) -> None:
 
     elif action == "delete":
         if client.dry_run:
-            emit(f"[dry-run] Would delete monitor {args.id}", {"dry_run": True, "command": "monitor", "action": "delete", "id": args.id})
+            emit(
+                f"[dry-run] Would delete monitor {args.id}",
+                {
+                    "dry_run": True,
+                    "command": "monitor",
+                    "action": "delete",
+                    "id": args.id,
+                },
+            )
             return
         try:
             result = client.delete_monitor(args.id)
@@ -1401,7 +1540,10 @@ def cmd_monitor(client: Client, args: argparse.Namespace) -> None:
 def cmd_parse(client: Client, args: argparse.Namespace) -> None:
     """Parse a document file to markdown via the server."""
     if client.dry_run:
-        emit(f"[dry-run] Would parse {args.filepath}", {"dry_run": True, "command": "parse", "filepath": args.filepath})
+        emit(
+            f"[dry-run] Would parse {args.filepath}",
+            {"dry_run": True, "command": "parse", "filepath": args.filepath},
+        )
         return
 
     if not os.path.isfile(args.filepath):
@@ -1433,7 +1575,10 @@ def cmd_parse(client: Client, args: argparse.Namespace) -> None:
 def cmd_generate_llmstxt(client: Client, args: argparse.Namespace) -> None:
     """Generate an llms.txt for a website."""
     if client.dry_run:
-        emit(f"[dry-run] Would generate llms.txt for {args.url}", {"dry_run": True, "command": "generate-llmstxt", "url": args.url})
+        emit(
+            f"[dry-run] Would generate llms.txt for {args.url}",
+            {"dry_run": True, "command": "generate-llmstxt", "url": args.url},
+        )
         return
 
     try:
@@ -1450,7 +1595,9 @@ def cmd_generate_llmstxt(client: Client, args: argparse.Namespace) -> None:
             emit(f"llms.txt job: {job_id}", {"job_id": job_id, "status": "started"})
         else:
             log(f"llms.txt generation started: {job_id}")
-            log(f"Check status later with: curl $GROKTOCRAWL_API_URL/v2/generate-llmstxt/{job_id}")
+            log(
+                f"Check status later with: curl $GROKTOCRAWL_API_URL/v2/generate-llmstxt/{job_id}"
+            )
         return
 
     log(f"Generating llms.txt for {args.url} — job {job_id}...")
@@ -1499,72 +1646,174 @@ def make_parser() -> argparse.ArgumentParser:
         """),
     )
 
-    parser.add_argument("--server", default="", help="API URL (default: GROKTOCRAWL_API_URL env or http://localhost:8080)")
-    parser.add_argument("--json", action="store_true", help="Machine-readable JSON output")
-    parser.add_argument("--dry-run", action="store_true", help="Preview without executing")
-    parser.add_argument("--quiet", action="store_true", help="Suppress non-essential output")
-    parser.add_argument("--verbose", action="store_true", help="Diagnostic output to stderr")
+    parser.add_argument(
+        "--server",
+        default="",
+        help="API URL (default: GROKTOCRAWL_API_URL env or http://localhost:8080)",
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="Machine-readable JSON output"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Preview without executing"
+    )
+    parser.add_argument(
+        "--quiet", action="store_true", help="Suppress non-essential output"
+    )
+    parser.add_argument(
+        "--verbose", action="store_true", help="Diagnostic output to stderr"
+    )
 
     subparsers = parser.add_subparsers(dest="command", help="Command to execute")
 
     p_scrape = subparsers.add_parser("scrape", help="Scrape a single URL")
     p_scrape.add_argument("url", help="URL to scrape")
-    p_scrape.add_argument("--format", "-f", nargs="+", default=["markdown"], choices=["markdown", "html", "rawHtml", "links", "screenshot", "json", "text"], help="Output formats (default: markdown)")
-    p_scrape.add_argument("--only-main-content", action="store_true", default=True, help="Return only main content")
-    p_scrape.add_argument("--include-all-content", dest="only_main_content", action="store_false", help="Include navigation, sidebars, etc.")
-    p_scrape.add_argument("--timeout", type=int, default=60000, help="Request timeout in ms")
-    p_scrape.add_argument("-o", "--output", help="Write output to file instead of stdout")
+    p_scrape.add_argument(
+        "--format",
+        "-f",
+        nargs="+",
+        default=["markdown"],
+        choices=["markdown", "html", "rawHtml", "links", "screenshot", "json", "text"],
+        help="Output formats (default: markdown)",
+    )
+    p_scrape.add_argument(
+        "--only-main-content",
+        action="store_true",
+        default=True,
+        help="Return only main content",
+    )
+    p_scrape.add_argument(
+        "--include-all-content",
+        dest="only_main_content",
+        action="store_false",
+        help="Include navigation, sidebars, etc.",
+    )
+    p_scrape.add_argument(
+        "--timeout", type=int, default=60000, help="Request timeout in ms"
+    )
+    p_scrape.add_argument(
+        "-o", "--output", help="Write output to file instead of stdout"
+    )
 
     p_search = subparsers.add_parser("search", help="Search the web")
     p_search.add_argument("query", help="Search query")
-    p_search.add_argument("--limit", "-l", type=int, default=5, help="Max results (default: 5)")
-    p_search.add_argument("--scrape-results", action="store_true", help="Also scrape each result for full content")
-    p_search.add_argument("--sources", nargs="+", choices=["web", "news", "images", "video", "social"], help="Source types to search (Firecrawl v2)")
-    p_search.add_argument("--categories", nargs="+", help="Content categories: research, github, pdf, news, science, it (mapped to SearXNG equivalents)")
-    p_search.add_argument("--search-type", default="fast", choices=["fast", "rich"], help="Search mode: fast (default, <1s) or rich (scraped excerpts + synthesis, 1-3s)")
-    p_search.add_argument("--output-schema", help="JSON Schema for structured extraction (JSON string or @file.json)")
-    p_search.add_argument("--system-prompt", help="Guidance for synthesis (e.g., 'Prefer official sources')")
+    p_search.add_argument(
+        "--limit", "-l", type=int, default=5, help="Max results (default: 5)"
+    )
+    p_search.add_argument(
+        "--scrape-results",
+        action="store_true",
+        help="Also scrape each result for full content",
+    )
+    p_search.add_argument(
+        "--sources",
+        nargs="+",
+        choices=["web", "news", "images", "video", "social"],
+        help="Source types to search (Firecrawl v2)",
+    )
+    p_search.add_argument(
+        "--categories",
+        nargs="+",
+        help="Content categories: research, github, pdf, news, science, it (mapped to SearXNG equivalents)",
+    )
+    p_search.add_argument(
+        "--search-type",
+        default="fast",
+        choices=["fast", "rich"],
+        help="Search mode: fast (default, <1s) or rich (scraped excerpts + synthesis, 1-3s)",
+    )
+    p_search.add_argument(
+        "--output-schema",
+        help="JSON Schema for structured extraction (JSON string or @file.json)",
+    )
+    p_search.add_argument(
+        "--system-prompt",
+        help="Guidance for synthesis (e.g., 'Prefer official sources')",
+    )
 
     p_map = subparsers.add_parser("map", help="Discover URLs on a site")
     p_map.add_argument("url", help="Site URL to map")
-    p_map.add_argument("--limit", "-l", type=int, default=200, help="Max URLs to return (default: 200)")
+    p_map.add_argument(
+        "--limit", "-l", type=int, default=200, help="Max URLs to return (default: 200)"
+    )
     p_map.add_argument("--search", "-s", help="Filter mapped URLs by search term")
 
     p_crawl = subparsers.add_parser("crawl", help="Crawl a website")
     p_crawl.add_argument("url", help="Site URL to crawl")
-    p_crawl.add_argument("--limit", "-l", type=int, default=50, help="Max pages to crawl (default: 50)")
-    p_crawl.add_argument("--max-depth", "-d", type=int, default=2, help="Max crawl depth (default: 2)")
-    p_crawl.add_argument("--include-paths", nargs="+", help="URL path patterns to include")
-    p_crawl.add_argument("--exclude-paths", nargs="+", help="URL path patterns to exclude")
-    p_crawl.add_argument("--no-poll", action="store_true", help="Don't poll for completion")
+    p_crawl.add_argument(
+        "--limit", "-l", type=int, default=50, help="Max pages to crawl (default: 50)"
+    )
+    p_crawl.add_argument(
+        "--max-depth", "-d", type=int, default=2, help="Max crawl depth (default: 2)"
+    )
+    p_crawl.add_argument(
+        "--include-paths", nargs="+", help="URL path patterns to include"
+    )
+    p_crawl.add_argument(
+        "--exclude-paths", nargs="+", help="URL path patterns to exclude"
+    )
+    p_crawl.add_argument(
+        "--no-poll", action="store_true", help="Don't poll for completion"
+    )
 
     p_agent = subparsers.add_parser("agent", help="Start an autonomous research agent")
     p_agent.add_argument("prompt", help="Research prompt/question")
     p_agent.add_argument("--urls", nargs="+", help="Seed URLs to focus research")
-    p_agent.add_argument("--no-poll", action="store_true", help="Don't poll for results (sync mode only)")
-    p_agent.add_argument("--sync", action="store_true", help="Non-streaming mode (poll for results)")
-    p_agent.add_argument("--pyramid", action="store_true", help="Write artifact-pyramid output to disk (SSE-buffered, prints path on completion)")
-    p_agent.add_argument("-o", "--output-dir", help="Output directory for pyramid (implies --pyramid)")
+    p_agent.add_argument(
+        "--no-poll", action="store_true", help="Don't poll for results (sync mode only)"
+    )
+    p_agent.add_argument(
+        "--sync", action="store_true", help="Non-streaming mode (poll for results)"
+    )
+    p_agent.add_argument(
+        "--pyramid",
+        action="store_true",
+        help="Write artifact-pyramid output to disk (SSE-buffered, prints path on completion)",
+    )
+    p_agent.add_argument(
+        "-o", "--output-dir", help="Output directory for pyramid (implies --pyramid)"
+    )
 
-    p_download = subparsers.add_parser("download", help="Download binary content (PDF, EPUB, image, etc.) to disk")
+    p_download = subparsers.add_parser(
+        "download", help="Download binary content (PDF, EPUB, image, etc.) to disk"
+    )
     p_download.add_argument("url", help="URL to download")
-    p_download.add_argument("-o", "--output", help="Save path (default: auto-derived from URL)")
-    p_download.add_argument("--extract-text", action="store_true", help="Also extract text for supported types (PDF, EPUB)")
+    p_download.add_argument(
+        "-o", "--output", help="Save path (default: auto-derived from URL)"
+    )
+    p_download.add_argument(
+        "--extract-text",
+        action="store_true",
+        help="Also extract text for supported types (PDF, EPUB)",
+    )
 
-    p_extract = subparsers.add_parser("extract", help="Extract structured data from URLs")
+    p_extract = subparsers.add_parser(
+        "extract", help="Extract structured data from URLs"
+    )
     p_extract.add_argument("urls", nargs="+", help="URLs to extract data from")
     p_extract.add_argument("--prompt", help="Extraction prompt")
-    p_extract.add_argument("--no-poll", action="store_true", help="Don't poll for results")
+    p_extract.add_argument(
+        "--no-poll", action="store_true", help="Don't poll for results"
+    )
 
     p_browser = subparsers.add_parser("browser", help="Manage browser sessions")
     p_browser_sub = p_browser.add_subparsers(dest="command_action")
 
-    p_browser_create = p_browser_sub.add_parser("create", help="Create a browser session")
-    p_browser_create.add_argument("--ttl", type=int, default=300, help="Session TTL in seconds")
+    p_browser_create = p_browser_sub.add_parser(
+        "create", help="Create a browser session"
+    )
+    p_browser_create.add_argument(
+        "--ttl", type=int, default=300, help="Session TTL in seconds"
+    )
 
-    p_browser_exec = p_browser_sub.add_parser("exec", help="Execute an action in a session")
+    p_browser_exec = p_browser_sub.add_parser(
+        "exec", help="Execute an action in a session"
+    )
     p_browser_exec.add_argument("session_id", help="Session ID")
-    p_browser_exec.add_argument("action", help="Action: navigate (load URL), click, type, screenshot, scroll, wait, getContent (returns metadata only), executeScript (run JS, e.g. 'document.body.innerText')")
+    p_browser_exec.add_argument(
+        "action",
+        help="Action: navigate (load URL), click, type, screenshot, scroll, wait, getContent (returns metadata only), executeScript (run JS, e.g. 'document.body.innerText')",
+    )
     p_browser_exec.add_argument("--url", help="URL for navigate action")
     p_browser_exec.add_argument("--selector", help="CSS selector for click/type/wait")
     p_browser_exec.add_argument("--text", help="Text for type action")
@@ -1583,7 +1832,11 @@ def make_parser() -> argparse.ArgumentParser:
 
     p_monitor_create = p_monitor_sub.add_parser("create", help="Create a monitor")
     p_monitor_create.add_argument("url", help="URL to monitor for changes")
-    p_monitor_create.add_argument("--schedule", default="0 */6 * * *", help="Cron expression (default: every 6 hours)")
+    p_monitor_create.add_argument(
+        "--schedule",
+        default="0 */6 * * *",
+        help="Cron expression (default: every 6 hours)",
+    )
     p_monitor_create.add_argument("--webhook", help="Webhook URL called on change")
 
     p_monitor_list = p_monitor_sub.add_parser("list", help="List all monitors")
@@ -1595,37 +1848,64 @@ def make_parser() -> argparse.ArgumentParser:
     p_monitor_update.add_argument("id", help="Monitor ID")
     p_monitor_update.add_argument("--url", help="New URL to monitor")
     p_monitor_update.add_argument("--schedule", help="New cron expression")
-    p_monitor_update.add_argument("--webhook", help="New webhook URL (empty string to clear)")
+    p_monitor_update.add_argument(
+        "--webhook", help="New webhook URL (empty string to clear)"
+    )
 
     p_monitor_delete = p_monitor_sub.add_parser("delete", help="Delete a monitor")
     p_monitor_delete.add_argument("id", help="Monitor ID")
 
     # --- Parse ---
-    p_parse = subparsers.add_parser("parse", help="Parse a document file (PDF, EPUB, DOCX, etc.) to markdown via the server")
+    p_parse = subparsers.add_parser(
+        "parse",
+        help="Parse a document file (PDF, EPUB, DOCX, etc.) to markdown via the server",
+    )
     p_parse.add_argument("filepath", help="Path to the file to parse")
-    p_parse.add_argument("-o", "--output", help="Write output to file instead of stdout")
+    p_parse.add_argument(
+        "-o", "--output", help="Write output to file instead of stdout"
+    )
 
     # --- Generate llms.txt ---
     # --- Answer ---
     p_answer = subparsers.add_parser("answer", help="Grounded Q&A with citations")
     p_answer.add_argument("query", help="Natural language question")
-    p_answer.add_argument("-n", "--num-sources", type=int, default=5, help="Number of sources (1-20, default: 5)")
-    p_answer.add_argument("--sync", action="store_true", help="Non-streaming mode (wait for full answer)")
-    p_answer.add_argument("--pyramid", action="store_true", help="Write artifact-pyramid output to disk (SSE-buffered, prints path on completion)")
-    p_answer.add_argument("-o", "--output-dir", help="Output directory for pyramid (implies --pyramid)")
-    p_llmstxt = subparsers.add_parser("generate-llmstxt", help="Generate an llms.txt for a website")
+    p_answer.add_argument(
+        "-n",
+        "--num-sources",
+        type=int,
+        default=5,
+        help="Number of sources (1-20, default: 5)",
+    )
+    p_answer.add_argument(
+        "--sync", action="store_true", help="Non-streaming mode (wait for full answer)"
+    )
+    p_answer.add_argument(
+        "--pyramid",
+        action="store_true",
+        help="Write artifact-pyramid output to disk (SSE-buffered, prints path on completion)",
+    )
+    p_answer.add_argument(
+        "-o", "--output-dir", help="Output directory for pyramid (implies --pyramid)"
+    )
+    p_llmstxt = subparsers.add_parser(
+        "generate-llmstxt", help="Generate an llms.txt for a website"
+    )
     p_llmstxt.add_argument("url", help="Site URL to generate llms.txt for")
-    p_llmstxt.add_argument("--max-pages", type=int, default=50, help="Max pages to scan (default: 50)")
-    p_llmstxt.add_argument("--no-poll", action="store_true", help="Don't poll for completion")
+    p_llmstxt.add_argument(
+        "--max-pages", type=int, default=50, help="Max pages to scan (default: 50)"
+    )
+    p_llmstxt.add_argument(
+        "--no-poll", action="store_true", help="Don't poll for completion"
+    )
 
     return parser
 
 
-def global_pre_parse(argv: List[str]) -> Tuple[Dict[str, Any], List[str]]:
+def global_pre_parse(argv: list[str]) -> tuple[dict[str, Any], list[str]]:
     GLOBAL_BOOLS = {"--json", "--dry-run", "--quiet", "--verbose"}
     GLOBAL_VALUES = {"--server"}
-    globals_map: Dict[str, Any] = {}
-    filtered: List[str] = []
+    globals_map: dict[str, Any] = {}
+    filtered: list[str] = []
     skip = 0
     for i, arg in enumerate(argv):
         if skip > 0:
