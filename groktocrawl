@@ -402,6 +402,9 @@ class Client:
         self.server = (server or DEFAULT_SERVER).rstrip("/")
         self.dry_run = dry_run
         self.api_version = API_VERSION
+        # Read API key from env. Primary: API_KEY (matches server-side auth);
+        # fallback: GROKTOCRAWL_API_KEY (namespaced alias).
+        self.api_key = os.getenv("API_KEY", "") or os.getenv("GROKTOCRAWL_API_KEY", "")
 
     def _url(self, path: str) -> str:
         return f"{self.server}/{self.api_version}{path}"
