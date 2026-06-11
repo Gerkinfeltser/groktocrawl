@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 """groktocrawl — CLI for GroktoCrawl self-hosted web scraping API.
 
 Usage: groktocrawl <command> [OPTIONS]
