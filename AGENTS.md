@@ -51,8 +51,8 @@ Tier 3: Playwright render + readability extraction
 
 **Adapters run before tier 1.** When a URL matches a registered adapter, the adapter handles extraction with its own optimized fallback chain. If the adapter fails, the standard tier pipeline runs as normal. See `scraper-svc/scraper/adapters/base.py` for the adapter framework and `scraper-svc/scraper/adapters/` for available adapters.
 
-**Current adapter categories (20 total):**
-- **Social/media:** bluesky, substack, youtube
+**Current adapter categories (21 total):**
+- **File/structured:** gutenberg (Project Gutenberg books as chapter-structured markdown), youtube, bluesky, substack
 - **Code:** github (file/repo), github-social (issues/PRs/discussions/releases)
 - **Vulnerability/CVE:** nvd (NVD API, enriched), cveorg (MITRE CVE Program, authoritative)
 - **Security/threat intelligence:** abuseipdb, censys, crtsh, exploitdb, hibp, mitreattack, otx, shodan, virustotal, vulncheck
