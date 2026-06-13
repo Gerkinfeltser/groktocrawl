@@ -18,9 +18,10 @@ if [ -f "$SETTINGS_SRC" ] && [ -n "$BRAVE_API_KEY" ]; then
         if cat "$TMPFILE" > "$SETTINGS_SRC" 2>/dev/null; then
             echo "entrypoint: BRAVE_API_KEY substituted in settings.yml"
         else
-            # Fall back to mounting the temp file if settings.yml is read-only
-            cp "$TMPFILE" /etc/searxng/settings-unsubstituted.yml
-            echo "entrypoint: warning - could not write to settings.yml (read-only mount), substitution skipped"
+            # Fall back: write substituted settings to /tmp/ and tell SearXNG to read it
+            cp "$TMPFILE" /tmp/searxng-settings-substituted.yml
+            export SEARXNG_SETTINGS_PATH=/tmp/searxng-settings-substituted.yml
+            echo "entrypoint: wrote substituted settings to SEARXNG_SETTINGS_PATH"
         fi
         rm -f "$TMPFILE"
     else
