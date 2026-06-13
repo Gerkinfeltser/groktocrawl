@@ -9,3 +9,4 @@ __pypackages__/
 .hermes/
 .opencode/
 .planning/
+.coverage
