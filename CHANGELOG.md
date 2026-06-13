@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Project Gutenberg adapter** — extracts books as chapter-structured markdown. Three-tier fallback chain: EPUB → plain text → generic pipeline. Zero new dependencies. Enriches metadata via Gutendex API (title, author, subjects, language). Registered at priority 200. See `scraper-svc/scraper/adapters/gutenberg.py`. (closes #181)
+
 - **Batch vector ingestion via Qdrant gRPC (ADR-0030)** — adds `POST /index/batch` to semantic-svc for batched embedding and Qdrant upsert. Batch scrape and crawl workers now accumulate pages and fire a single batch call instead of N per-page calls. Expected: 500-page crawl indexing drops from ~50s to ~250ms (200x). New tests: `test_batch_index_endpoint`, `test_batch_index_empty`. Legacy flat-vector Qdrant collections auto-migrate to named vectors on startup. See `docs/adr/0030-batch-vector-ingestion.md`. (closes #154)
 
 - **Service-level metrics for semantic-svc (ADR-0029)** — adds Prometheus-compatible `/metrics` endpoint to semantic-svc with stdlib-based OpenMetrics format (no new dependencies). Metrics tracked: document count gauge (`groktocrawl_index_docs_total`), eviction counter (`groktocrawl_index_evictions_total`), request latency histogram per endpoint (`groktocrawl_index_query_duration_seconds`), embedding inference duration (`groktocrawl_index_embeddings_duration_seconds`), and request counter per endpoint (`groktocrawl_search_requests_total`). ASGI middleware instruments all 11 existing endpoints automatically. Eviction counter tracks cumulative evictions via `_evict_if_needed()`. See `docs/adr/0029-service-level-metrics-for-semantic-svc.md`. (closes #153)
