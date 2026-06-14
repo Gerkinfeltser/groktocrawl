@@ -56,3 +56,9 @@ class SearchError(GroktoCrawlError):
     status_code = 502
     error_code = "SEARCH_ERROR"
     detail = "Search failed"
+
+
+class RateLimitedError(GroktoCrawlError):
+    status_code = 429
+    error_code = "RATE_LIMITED"
+    detail = "Rate limit exceeded"

@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Search volume controls for agent-svc (ADR-0033)** — two independent mechanisms to prevent runaway Brave API consumption: (1) per-request max-searches cap (`AGENT_MAX_SEARCHES_PER_REQUEST`, default 5) enforced inside `SearXNGClient` before each search call, raises `RateLimitedError` (429) when exceeded; (2) per-client sliding-window rate limit (`AGENT_SEARCH_RATE_LIMIT`, default `10/60s`) using Valkey `INCR`/`EXPIRE`. New `X-Search-Budget` and `X-Search-Rate-Remaining` response headers. Search volume observable via new `search_calls_total` metrics counter. Backward compatible — existing callers see 429s only if they exceed limits. No new dependencies. See `docs/adr/0033-search-volume-controls.md`. (closes #213)
+
 - **Project Gutenberg adapter** — extracts books as chapter-structured markdown. Three-tier fallback chain: EPUB → plain text → generic pipeline. Zero new dependencies. Enriches metadata via Gutendex API (title, author, subjects, language). Registered at priority 200. See `scraper-svc/scraper/adapters/gutenberg.py`. (closes #181)
 
 - **Batch vector ingestion via Qdrant gRPC (ADR-0030)** — adds `POST /index/batch` to semantic-svc for batched embedding and Qdrant upsert. Batch scrape and crawl workers now accumulate pages and fire a single batch call instead of N per-page calls. Expected: 500-page crawl indexing drops from ~50s to ~250ms (200x). New tests: `test_batch_index_endpoint`, `test_batch_index_empty`. Legacy flat-vector Qdrant collections auto-migrate to named vectors on startup. See `docs/adr/0030-batch-vector-ingestion.md`. (closes #154)

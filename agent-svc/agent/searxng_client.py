@@ -27,6 +27,7 @@ class SearchHealth:
     degraded: bool = False
     detail: str = ""
 
+
 # ── Firecrawl v2 → SearXNG category translation ────────────────
 # Maps Firecrawl v2 search dimensions (sources, categories) to
 # SearXNG-native category names. Unknown values pass through for
@@ -54,12 +55,18 @@ _CATEGORIES_MAP = {
 class SearXNGClient:
     """Client for the SearXNG search engine JSON API."""
 
-    def __init__(self, base_url: str = "http://searxng:8080"):
+    def __init__(self, base_url: str = "http://searxng:8080", max_searches: int = 5):
         self.base_url = base_url.rstrip("/")
         self._client = httpx.AsyncClient(
             timeout=15,
-            headers={"User-Agent": "GroktoCrawl/0.1", "Accept": "text/html,application/json", "X-Forwarded-For": "127.0.0.1"},
+            headers={
+                "User-Agent": "GroktoCrawl/0.1",
+                "Accept": "text/html,application/json",
+                "X-Forwarded-For": "127.0.0.1",
+            },
         )
+        self._search_count = 0
+        self._max_searches = max_searches
 
     @staticmethod
     def _translate(
@@ -83,7 +90,7 @@ class SearXNGClient:
                 mapped = _CATEGORIES_MAP.get(c, c)
                 if mapped and mapped not in result:
                     result.append(mapped)
-        return result if result else ["general"]
+        return result or ["general"]
 
     @staticmethod
     def _parse_engine_health(data: dict, results: list[dict]) -> SearchHealth:
@@ -95,18 +102,12 @@ class SearXNGClient:
         """
         engines = data.get("engines", [])
         engines_total = len(engines)
-        engines_responding = sum(
-            1 for e in engines if e.get("results", 0) > 0
-        )
+        engines_responding = sum(1 for e in engines if e.get("results", 0) > 0)
 
         empty_result = bool(
-            engines_responding > 0
-            and not any(r.get("url") for r in results)
+            engines_responding > 0 and not any(r.get("url") for r in results)
         )
-        degraded = bool(
-            engines_total > 0
-            and engines_responding < engines_total / 2
-        )
+        degraded = bool(engines_total > 0 and engines_responding < engines_total / 2)
 
         # Build a human-readable detail string
         if engines_total == 0:
@@ -117,10 +118,7 @@ class SearXNGClient:
                 f"returned results"
             )
         elif empty_result:
-            detail = (
-                f"All {engines_total} engines responded but returned "
-                f"no results"
-            )
+            detail = f"All {engines_total} engines responded but returned no results"
         else:
             detail = (
                 f"Healthy: {engines_responding}/{engines_total} engines "
@@ -148,10 +146,28 @@ class SearXNGClient:
         ``sources`` and ``categories`` are merged via ``_translate()`` before
         being passed to SearXNG.
 
+        Enforces a per-request search budget. Raises ``RateLimitedError``
+        when the budget is exhausted.
+
         Returns a tuple of (results, health) where:
         - results: list of dicts with keys: url, title, description, engine.
         - health: SearchHealth dataclass with engine status information.
         """
+        # ── Per-request search budget check ────────────────────
+        if self._search_count >= self._max_searches:
+            from .exceptions import RateLimitedError
+
+            raise RateLimitedError(
+                detail=(
+                    f"Search budget exceeded: {self._search_count}/{self._max_searches}"
+                ),
+                details={
+                    "budget_used": self._search_count,
+                    "budget_max": self._max_searches,
+                },
+            )
+        self._search_count += 1
+
         effective_categories = self._translate(sources, categories)
         params = {
             "q": query,
@@ -167,18 +183,24 @@ class SearXNGClient:
                 params=params,
             )
             if resp.status_code != 200:
-                logger.warning("SearXNG returned %d: %s", resp.status_code, resp.text[:200])
-                return [], SearchHealth(detail=f"SearXNG returned HTTP {resp.status_code}")
+                logger.warning(
+                    "SearXNG returned %d: %s", resp.status_code, resp.text[:200]
+                )
+                return [], SearchHealth(
+                    detail=f"SearXNG returned HTTP {resp.status_code}"
+                )
 
             data = resp.json()
             results = []
             for item in data.get("results", []):
-                results.append({
-                    "url": item.get("url", ""),
-                    "title": item.get("title", ""),
-                    "description": item.get("content", ""),
-                    "engine": item.get("engine", ""),
-                })
+                results.append(
+                    {
+                        "url": item.get("url", ""),
+                        "title": item.get("title", ""),
+                        "description": item.get("content", ""),
+                        "engine": item.get("engine", ""),
+                    }
+                )
 
             results = results[:limit]
 

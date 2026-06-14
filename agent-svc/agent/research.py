@@ -94,9 +94,10 @@ async def run_research(
     llm_api_key: str = "",
     llm_model: str = "gpt-4o-mini",
     requested_model: str | None = None,
+    max_searches_per_request: int = 5,
 ) -> dict:
     """Execute the research loop: search → scrape → think → answer."""
-    searxng = SearXNGClient(searxng_url)
+    searxng = SearXNGClient(searxng_url, max_searches=max_searches_per_request)
     scraper = ScraperClient(scraper_url)
     effective_model = (
         requested_model
@@ -176,6 +177,7 @@ async def run_research_stream(
     llm_api_key: str = "",
     llm_model: str = "gpt-4o-mini",
     requested_model: str | None = None,
+    max_searches_per_request: int = 5,
 ):
     """Streaming version of run_research. Yields SSE-suitable dicts.
 
@@ -193,7 +195,7 @@ async def run_research_stream(
 
     start = time.monotonic()
 
-    searxng = SearXNGClient(searxng_url)
+    searxng = SearXNGClient(searxng_url, max_searches=max_searches_per_request)
     scraper = ScraperClient(scraper_url)
     effective_model = (
         requested_model
@@ -667,6 +669,7 @@ async def run_answer(
     llm_api_key: str = "",
     llm_model: str = "gpt-4o-mini",
     requested_model: str | None = None,
+    max_searches_per_request: int = 5,
 ) -> dict:
     """Run a grounded Q&A pipeline: search → scrape → LLM → citations.
 
@@ -677,7 +680,7 @@ async def run_answer(
 
     start = time.monotonic()
 
-    searxng = SearXNGClient(searxng_url)
+    searxng = SearXNGClient(searxng_url, max_searches=max_searches_per_request)
     scraper = ScraperClient(scraper_url)
     effective_model = (
         requested_model
@@ -820,6 +823,7 @@ async def run_answer_stream(
     llm_api_key: str = "",
     llm_model: str = "gpt-4o-mini",
     requested_model: str | None = None,
+    max_searches_per_request: int = 5,
 ):
     """Streaming version of run_answer. Yields SSE-suitable dicts.
 
@@ -833,7 +837,7 @@ async def run_answer_stream(
 
     start = time.monotonic()
 
-    searxng = SearXNGClient(searxng_url)
+    searxng = SearXNGClient(searxng_url, max_searches=max_searches_per_request)
     scraper = ScraperClient(scraper_url)
     effective_model = (
         requested_model
