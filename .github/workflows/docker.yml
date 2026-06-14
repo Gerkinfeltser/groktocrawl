@@ -98,3 +98,46 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  integration-tests:
+    name: Integration Tests
+    needs: build-and-push
+    runs-on: [self-hosted, groktocrawl, docker]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .env
+        run: cp .env.sample .env
+
+      - name: Start the Docker stack
+        run: docker compose up --build -d
+        timeout-minutes: 10
+
+      - name: Wait for services to be healthy
+        run: |
+          python3 -c "
+          import time, httpx
+          deadline = time.time() + 180
+          while time.time() < deadline:
+              try:
+                  r = httpx.get('http://localhost:8080/health', timeout=5)
+                  if r.status_code == 200:
+                      print('Stack healthy')
+                      break
+              except Exception:
+                  pass
+              time.sleep(3)
+          else:
+              raise RuntimeError('Timed out waiting for stack')
+          "
+
+      - name: Run integration tests
+        run: |
+          docker compose exec -T agent-svc mkdir -p /app/tests
+          docker cp tests/test_stack.py $(docker compose ps -q agent-svc):/app/tests/test_stack.py
+          docker compose exec -T agent-svc python3 /app/tests/test_stack.py
+        timeout-minutes: 10
+
+      - name: Collect logs on failure
+        if: failure()
+        run: docker compose logs --tail 50
