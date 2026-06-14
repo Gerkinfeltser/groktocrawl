@@ -1,6 +1,6 @@
 # ADR-0033: Search Volume Controls for Agent Service
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Deciders:** Magnus Hedemark, Jasper (AI Agent)
 
