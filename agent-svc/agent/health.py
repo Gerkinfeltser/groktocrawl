@@ -36,61 +36,33 @@ async def check_valkey(url: str) -> dict[str, Any]:
 
 
 async def check_searxng(url: str) -> dict[str, Any]:
-    """Probe SearXNG by requesting its search endpoint.
+    """Probe SearXNG via its /health endpoint.
 
-    Uses a minimal health-check query (``groktocrawl-healthcheck``) to avoid
-    polluting search analytics. Also returns engine health if available.
+    Does NOT send a real search query. The /health endpoint reports
+    server liveness and Valkey connectivity without hitting any
+    external search API, so this probe has zero cost.
     """
     start = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(
-                f"{url.rstrip('/')}/search",
-                params={
-                    "q": "groktocrawl-healthcheck",
-                    "format": "json",
-                    "pageno": 1,
-                    "categories": "general",
-                },
-                headers={"User-Agent": "GroktoCrawl/0.1", "Accept": "application/json"},
+                f"{url.rstrip('/')}/health",
             )
             elapsed = (time.monotonic() - start) * 1000
             if resp.status_code == 200:
-                data = resp.json()
-                engines = data.get("engines", [])
-                engines_total = len(engines)
-                engines_ok = sum(1 for e in engines if e.get("results", 0) > 0)
-                if engines_total > 0 and engines_ok < engines_total / 2:
-                    return {
-                        "status": "degraded",
-                        "latency_ms": round(elapsed, 1),
-                        "detail": f"SearXNG degraded: {engines_ok}/{engines_total} engines responding",
-                    }
                 return {
                     "status": "ok",
                     "latency_ms": round(elapsed, 1),
-                    "detail": f"SearXNG ok ({engines_ok}/{engines_total} engines)",
+                    "detail": "SearXNG health ok",
                 }
             elapsed = (time.monotonic() - start) * 1000
-            return {
-                "status": "down",
-                "latency_ms": round(elapsed, 1),
-                "detail": f"SearXNG returned HTTP {resp.status_code}",
-            }
-    except TimeoutError:
+            return {"status": "down", "latency_ms": round(elapsed, 1), "detail": f"SearXNG health returned HTTP {resp.status_code}"}
+    except asyncio.TimeoutError:
         elapsed = (time.monotonic() - start) * 1000
-        return {
-            "status": "down",
-            "latency_ms": round(elapsed, 1),
-            "detail": "SearXNG connection timed out",
-        }
+        return {"status": "down", "latency_ms": round(elapsed, 1), "detail": "SearXNG connection timed out"}
     except Exception as e:
         elapsed = (time.monotonic() - start) * 1000
-        return {
-            "status": "down",
-            "latency_ms": round(elapsed, 1),
-            "detail": f"SearXNG error: {e}",
-        }
+        return {"status": "down", "latency_ms": round(elapsed, 1), "detail": f"SearXNG error: {e}"}
 
 
 async def check_scraper(url: str) -> dict[str, Any]:
