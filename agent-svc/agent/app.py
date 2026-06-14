@@ -23,6 +23,7 @@ from .health import check_all
 from .llm import LLMClient
 from .metrics import METRICS
 from .models import ErrorDetail, ErrorResponse
+from .rate_limiter import SlidingWindowRateLimiter
 from .scraper_client import ScraperClient
 from .searxng_client import SearXNGClient
 from .settings import load_settings
@@ -111,6 +112,15 @@ def create_app() -> FastAPI:
         model=settings.llm_model,
     )
 
+    # ── Rate limiter ──────────────────────────────────────────────
+    rate_limit_count, rate_limit_window = SlidingWindowRateLimiter.parse_limit(
+        settings.search_rate_limit
+    )
+    rate_limiter = SlidingWindowRateLimiter(conn, rate_limit_count, rate_limit_window)
+
+    # ── Metrics initialization ────────────────────────────────────
+    METRICS.counter("search_calls_total", "Total search calls", ["status"])
+
     # ── App state ───────────────────────────────────────────────
     app.state.redis = conn
     app.state.queue = queue
@@ -125,6 +135,8 @@ def create_app() -> FastAPI:
     app.state.llm_api_key = settings.llm_api_key
     app.state.llm_model = settings.llm_model
     app.state.semantic_url = settings.semantic_url
+    app.state.rate_limiter = rate_limiter
+    app.state.max_searches_per_request = settings.max_searches_per_request
 
     # ── Middleware: request_id ───────────────────────────────────
     @app.middleware("http")

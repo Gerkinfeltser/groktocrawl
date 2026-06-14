@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 from bs4 import BeautifulSoup
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from rq import Queue
 
 from common.url import extract_domain, is_same_origin
@@ -71,6 +71,20 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _get_client_ip(request: Request) -> str:
+    """Extract the client IP address from the request.
+
+    Respects the ``X-Forwarded-For`` header for reverse-proxy deployments.
+    Falls back to ``request.client.host`` when the header is absent.
+    """
+    xff = request.headers.get("X-Forwarded-For")
+    if xff:
+        return xff.split(",")[0].strip()
+    if request.client:
+        return request.client.host
+    return "unknown"
+
+
 def _enqueue(queue: Queue, func: str, **kwargs: Any) -> None:
     queue.enqueue(func, **kwargs)
 
@@ -126,7 +140,31 @@ async def scrape(request: Request, body: ScrapeRequest):
 
 
 @router.post("/v2/agent", response_model=AgentCreateResponse)
-async def create_agent(request: Request, body: AgentRequest):
+async def create_agent(request: Request, body: AgentRequest, response: Response):
+    # ── Per-client rate limit check ────────────────────────────
+    client_ip = _get_client_ip(request)
+    rate_limiter = request.app.state.rate_limiter
+    allowed, rate_remaining = await rate_limiter.check(f"{client_ip}:search")
+    if not allowed:
+        from .exceptions import RateLimitedError
+        from .metrics import METRICS
+
+        METRICS.counter("search_calls_total", "Total search calls", ["status"]).inc(
+            {"status": "rate_limited"}
+        )
+        raise RateLimitedError(
+            detail=f"Per-client rate limit exceeded ({rate_limiter.limit}/{rate_limiter.window}s)"
+        )
+
+    max_searches = request.app.state.max_searches_per_request
+
+    # ── Metrics ──────────────────────────────────────────────────
+    from .metrics import METRICS
+
+    METRICS.counter("search_calls_total", "Total search calls", ["status"]).inc(
+        {"status": "allowed"}
+    )
+
     # Streaming path — run inline, return SSE
     if body.stream:
         from fastapi.responses import StreamingResponse
@@ -144,6 +182,7 @@ async def create_agent(request: Request, body: AgentRequest):
                 llm_api_key=request.app.state.llm_api_key,
                 llm_model=request.app.state.llm_model,
                 requested_model=body.model if body.model != "default" else None,
+                max_searches_per_request=max_searches,
             ):
                 import json
 
@@ -161,7 +200,13 @@ async def create_agent(request: Request, body: AgentRequest):
                     yield f"data: {json.dumps({'type': 'error', 'content': event['content']})}\n\n"
             yield "data: [DONE]\n\n"
 
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
+        headers = {
+            "X-Search-Budget": f"{max_searches}/{max_searches}",
+            "X-Search-Rate-Remaining": f"{rate_remaining}/{rate_limiter.limit}",
+        }
+        return StreamingResponse(
+            event_stream(), media_type="text/event-stream", headers=headers
+        )
 
     # Sync path — create job, process in background
     store: JobStore = request.app.state.job_store
@@ -189,6 +234,11 @@ async def create_agent(request: Request, body: AgentRequest):
             webhook_config=body.webhook,
             requested_model=body.model,
         )
+    )
+
+    response.headers["X-Search-Budget"] = f"{max_searches}/{max_searches}"
+    response.headers["X-Search-Rate-Remaining"] = (
+        f"{rate_remaining}/{rate_limiter.limit}"
     )
     return AgentCreateResponse(id=job_id)
 
@@ -495,12 +545,36 @@ async def search(request: Request, body: SearchRequest):
 
 
 @router.post("/v2/answer", response_model=AnswerResponse)
-async def answer(request: Request, body: AnswerRequest):
+async def answer(request: Request, body: AnswerRequest, response: Response):
     """Grounded Q&A: search → scrape → LLM → citations.
 
     Synchronous single-turn endpoint. For streaming, set ``stream: true``
     to receive Server-Sent Events.
     """
+    # ── Per-client rate limit check ────────────────────────────
+    client_ip = _get_client_ip(request)
+    rate_limiter = request.app.state.rate_limiter
+    allowed, rate_remaining = await rate_limiter.check(f"{client_ip}:search")
+    if not allowed:
+        from .exceptions import RateLimitedError
+        from .metrics import METRICS
+
+        METRICS.counter("search_calls_total", "Total search calls", ["status"]).inc(
+            {"status": "rate_limited"}
+        )
+        raise RateLimitedError(
+            detail=f"Per-client rate limit exceeded ({rate_limiter.limit}/{rate_limiter.window}s)"
+        )
+
+    max_searches = request.app.state.max_searches_per_request
+
+    # ── Metrics ──────────────────────────────────────────────────
+    from .metrics import METRICS
+
+    METRICS.counter("search_calls_total", "Total search calls", ["status"]).inc(
+        {"status": "allowed"}
+    )
+
     if body.stream:
         from fastapi.responses import StreamingResponse
 
@@ -519,6 +593,7 @@ async def answer(request: Request, body: AnswerRequest):
                 llm_api_key=request.app.state.llm_api_key,
                 llm_model=request.app.state.llm_model,
                 requested_model=body.model if body.model != "default" else None,
+                max_searches_per_request=max_searches,
             ):
                 if event["type"] == "sources_pending":
                     import json
@@ -542,7 +617,13 @@ async def answer(request: Request, body: AnswerRequest):
                     yield f"data: {json.dumps({'type': 'error', 'content': event['content']})}\n\n"
             yield "data: [DONE]\n\n"
 
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
+        headers = {
+            "X-Search-Budget": f"{max_searches}/{max_searches}",
+            "X-Search-Rate-Remaining": f"{rate_remaining}/{rate_limiter.limit}",
+        }
+        return StreamingResponse(
+            event_stream(), media_type="text/event-stream", headers=headers
+        )
 
     # Sync path
     from .research import run_answer
@@ -559,6 +640,11 @@ async def answer(request: Request, body: AnswerRequest):
         llm_api_key=request.app.state.llm_api_key,
         llm_model=request.app.state.llm_model,
         requested_model=body.model if body.model != "default" else None,
+        max_searches_per_request=max_searches,
+    )
+    response.headers["X-Search-Budget"] = f"{max_searches}/{max_searches}"
+    response.headers["X-Search-Rate-Remaining"] = (
+        f"{rate_remaining}/{rate_limiter.limit}"
     )
     return AnswerResponse(
         success=True,

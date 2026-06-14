@@ -22,6 +22,10 @@ class AgentSettings(BaseModel):
     llm_enable_thinking: bool = Field(default=False, alias="LLM_ENABLE_THINKING")
     api_key: str = Field(default="", alias="API_KEY")
     webhook_secret: str = Field(default="", alias="WEBHOOK_SECRET")
+    max_searches_per_request: int = Field(
+        default=5, alias="AGENT_MAX_SEARCHES_PER_REQUEST"
+    )
+    search_rate_limit: str = Field(default="10/60s", alias="AGENT_SEARCH_RATE_LIMIT")
 
 
 @functools.cache
