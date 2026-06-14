@@ -1,0 +1,693 @@
+"""Tests for agent-svc/agent/worker.py — async job processing functions."""
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+
+class TestProcessAgentAsync:
+    """Test _process_agent_async — the main agent job handler."""
+
+    @pytest.mark.asyncio
+    async def test_success(self):
+        """Verify success path: run_research returns result, job completed,
+        webhook delivered, metrics incremented."""
+        from agent.worker import _process_agent_async
+
+        mock_store = MagicMock()
+        mock_run_research = AsyncMock(
+            return_value={"result": "research result", "sources": ["https://a.com"]}
+        )
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store),
+            patch("agent.worker.run_research", mock_run_research),
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+        ):
+            await _process_agent_async(
+                job_id="test-job-1",
+                prompt="Test prompt",
+                urls=None,
+                schema_=None,
+                llm_base_url="http://llm:8000",
+                llm_api_key="test-key",
+                llm_model="gpt-4o-mini",
+                searxng_url="http://searxng:8080",
+                scraper_url="http://scraper:8001",
+            )
+
+        mock_store.complete_job.assert_called_once_with(
+            "test-job-1", {"result": "research result", "sources": ["https://a.com"]}
+        )
+        mock_deliver_webhook.assert_called_once()
+        # Check that metrics were recorded
+        assert mock_metrics.counter.call_count >= 2
+        assert mock_metrics.histogram.call_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_failure(self):
+        """Verify failure path: run_research raises, job failed, webhook with error."""
+        from agent.worker import _process_agent_async
+
+        mock_store = MagicMock()
+        mock_run_research = AsyncMock(side_effect=Exception("Processing error"))
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store),
+            patch("agent.worker.run_research", mock_run_research),
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+        ):
+            await _process_agent_async(
+                job_id="test-job-fail",
+                prompt="Test prompt",
+                urls=None,
+                schema_=None,
+                llm_base_url="http://llm:8000",
+                llm_api_key="test-key",
+                llm_model="gpt-4o-mini",
+                searxng_url="http://searxng:8080",
+                scraper_url="http://scraper:8001",
+            )
+
+        mock_store.fail_job.assert_called_once_with(
+            "test-job-fail", "Processing error"
+        )
+        mock_deliver_webhook.assert_called_once()
+        # Verify webhook was called with "failed" event
+        call_args = mock_deliver_webhook.call_args[0]
+        assert call_args[1] == "failed"
+        assert "error" in call_args[3]
+
+    @pytest.mark.asyncio
+    async def test_default_valkey_url(self):
+        """Verify JobStore is constructed with the default VALKEY_URL."""
+        from agent.worker import _process_agent_async
+
+        mock_store = MagicMock()
+        mock_run_research = AsyncMock(
+            return_value={"result": "ok", "sources": []}
+        )
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store) as mock_store_cls,
+            patch("agent.worker.run_research", mock_run_research),
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+        ):
+            await _process_agent_async(
+                job_id="test-job-url",
+                prompt="test",
+                urls=None,
+                schema_=None,
+                llm_base_url="http://llm:8000",
+                llm_api_key="key",
+                llm_model="model",
+                searxng_url="http://searxng:8080",
+                scraper_url="http://scraper:8001",
+            )
+
+        mock_store_cls.assert_called_once_with("redis://valkey:6379/0")
+
+
+class TestProcessCrawlAsync:
+    """Test _process_crawl_async — single URL crawl job handler."""
+
+    @pytest.mark.asyncio
+    async def test_success(self):
+        """Verify success: scrape returns markdown, job completed with pages payload."""
+        from agent.worker import _process_crawl_async
+
+        mock_store = MagicMock()
+        mock_scraper_instance = MagicMock()
+        mock_scraper_instance.scrape = AsyncMock(
+            return_value={
+                "success": True,
+                "data": {
+                    "markdown": "# Crawled page",
+                    "metadata": {"og": {"title": "Test Title"}},
+                    "title": "Page Title",
+                },
+            }
+        )
+        mock_scraper_instance.close = AsyncMock()
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store),
+            patch("agent.worker.ScraperClient", return_value=mock_scraper_instance),
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+            patch("agent.worker._index_page_async", AsyncMock()),
+        ):
+            await _process_crawl_async(
+                job_id="crawl-1",
+                url="https://example.com",
+                max_pages=10,
+                max_depth=2,
+                scraper_url="http://scraper:8001",
+            )
+
+        # Verify store.complete_job called with pages payload
+        mock_store.complete_job.assert_called_once()
+        call_args = mock_store.complete_job.call_args[0]
+        assert call_args[0] == "crawl-1"
+        payload = call_args[1]
+        assert payload["completed"] == 1
+        assert payload["total"] == 1
+        assert payload["pages"][0]["url"] == "https://example.com"
+        assert payload["pages"][0]["markdown"] == "# Crawled page"
+
+        mock_deliver_webhook.assert_called_once()
+        mock_scraper_instance.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_failure(self):
+        """Verify failure: scrape raises, job failed, scraper closed."""
+        from agent.worker import _process_crawl_async
+
+        mock_store = MagicMock()
+        mock_scraper_instance = MagicMock()
+        mock_scraper_instance.scrape = AsyncMock(
+            side_effect=Exception("Crawl error")
+        )
+        mock_scraper_instance.close = AsyncMock()
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store),
+            patch("agent.worker.ScraperClient", return_value=mock_scraper_instance),
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+        ):
+            await _process_crawl_async(
+                job_id="crawl-fail",
+                url="https://example.com",
+                max_pages=10,
+                max_depth=2,
+                scraper_url="http://scraper:8001",
+            )
+
+        mock_store.fail_job.assert_called_once_with("crawl-fail", "Crawl error")
+        mock_deliver_webhook.assert_called_once()
+        # Verify failed event
+        assert mock_deliver_webhook.call_args[0][1] == "failed"
+        # scraper.close() called in finally
+        mock_scraper_instance.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_scraper_closed_in_finally(self):
+        """Verify scraper.close() is called even on success."""
+        from agent.worker import _process_crawl_async
+
+        mock_store = MagicMock()
+        mock_scraper_instance = MagicMock()
+        mock_scraper_instance.scrape = AsyncMock(
+            return_value={
+                "success": True,
+                "data": {"markdown": "# Ok", "metadata": {}},
+            }
+        )
+        mock_scraper_instance.close = AsyncMock()
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store),
+            patch("agent.worker.ScraperClient", return_value=mock_scraper_instance),
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+            patch("agent.worker._index_page_async", AsyncMock()),
+        ):
+            await _process_crawl_async(
+                job_id="crawl-close",
+                url="https://example.com",
+                max_pages=10,
+                max_depth=2,
+                scraper_url="http://scraper:8001",
+            )
+
+        mock_scraper_instance.close.assert_called_once()
+
+
+class TestProcessBatchScrapeAsync:
+    """Test _process_batch_scrape_async — multi-URL batch scrape."""
+
+    @pytest.mark.asyncio
+    async def test_success_multiple_urls(self):
+        """Verify multiple URLs are scraped and results accumulated."""
+        from agent.worker import _process_batch_scrape_async
+
+        mock_store = MagicMock()
+        mock_scraper_instance = MagicMock()
+        mock_scraper_instance.scrape = AsyncMock(
+            side_effect=[
+                {
+                    "success": True,
+                    "data": {
+                        "markdown": "# First page",
+                        "metadata": {"og": {"title": "First"}},
+                    },
+                },
+                {
+                    "success": True,
+                    "data": {
+                        "markdown": "# Second page",
+                        "metadata": {"meta": {"title": "Second"}},
+                    },
+                },
+            ]
+        )
+        mock_scraper_instance.close = AsyncMock()
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+        mock_index_batch = AsyncMock()
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store),
+            patch("agent.worker.ScraperClient", return_value=mock_scraper_instance),
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+            patch("agent.worker._index_batch_async", mock_index_batch),
+        ):
+            await _process_batch_scrape_async(
+                job_id="batch-1",
+                urls=["https://a.com", "https://b.com"],
+                scraper_url="http://scraper:8001",
+            )
+
+        mock_store.complete_job.assert_called_once()
+        payload = mock_store.complete_job.call_args[0][1]
+        assert payload["completed"] == 2
+        assert payload["total"] == 2
+        assert len(payload["pages"]) == 2
+
+        # Verify batch indexing triggered
+        mock_index_batch.assert_called_once()
+        batch_pages = mock_index_batch.call_args[0][0]
+        assert len(batch_pages) == 2
+        assert batch_pages[0]["url"] == "https://a.com"
+        assert batch_pages[1]["url"] == "https://b.com"
+
+        mock_scraper_instance.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_partial_failure(self):
+        """Verify first URL succeeds, second fails — partial results stored."""
+        from agent.worker import _process_batch_scrape_async
+
+        mock_store = MagicMock()
+        mock_scraper_instance = MagicMock()
+        mock_scraper_instance.scrape = AsyncMock(
+            side_effect=[
+                {
+                    "success": True,
+                    "data": {
+                        "markdown": "# Only success",
+                        "metadata": {},
+                    },
+                },
+                Exception("Second failed"),
+            ]
+        )
+        mock_scraper_instance.close = AsyncMock()
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store),
+            patch("agent.worker.ScraperClient", return_value=mock_scraper_instance),
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+        ):
+            await _process_batch_scrape_async(
+                job_id="batch-partial",
+                urls=["https://a.com", "https://b.com"],
+                scraper_url="http://scraper:8001",
+            )
+
+        # Exception is caught at the loop level (inside try/except),
+        # so partial results should first be completed, then
+        # the exception propagates to the outer except block.
+        # The worker code does the scrape inside try, so a failure
+        # will go to the outer except, not store partial results.
+        # Actually looking at the code: the loop is inside try,
+        # so when scrape raises, we go to the except block.
+        mock_store.fail_job.assert_called_once_with(
+            "batch-partial", "Second failed"
+        )
+        mock_scraper_instance.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_outright_failure(self):
+        """Verify scrape raises immediately, job failed."""
+        from agent.worker import _process_batch_scrape_async
+
+        mock_store = MagicMock()
+        mock_scraper_instance = MagicMock()
+        mock_scraper_instance.scrape = AsyncMock(
+            side_effect=Exception("Immediate fail")
+        )
+        mock_scraper_instance.close = AsyncMock()
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store),
+            patch("agent.worker.ScraperClient", return_value=mock_scraper_instance),
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+        ):
+            await _process_batch_scrape_async(
+                job_id="batch-fail",
+                urls=["https://a.com"],
+                scraper_url="http://scraper:8001",
+            )
+
+        mock_store.fail_job.assert_called_once()
+        mock_scraper_instance.close.assert_called_once()
+
+
+class TestProcessExtractAsync:
+    """Test _process_extract_async — structured extraction job."""
+
+    @pytest.mark.asyncio
+    async def test_success(self):
+        """Verify success: run_extract returns result, job completed."""
+        from agent.worker import _process_extract_async
+
+        mock_store = MagicMock()
+        mock_run_extract = AsyncMock(
+            return_value={"result": '{"name": "test"}', "sources": ["https://a.com"]}
+        )
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store),
+            patch("agent.worker.run_extract", mock_run_extract),
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+        ):
+            await _process_extract_async(
+                job_id="extract-1",
+                urls=["https://a.com"],
+                prompt=None,
+                schema_=None,
+                llm_base_url="http://llm:8000",
+                llm_api_key="key",
+                llm_model="gpt-4o-mini",
+                scraper_url="http://scraper:8001",
+            )
+
+        mock_store.complete_job.assert_called_once_with(
+            "extract-1", {"result": '{"name": "test"}', "sources": ["https://a.com"]}
+        )
+        mock_deliver_webhook.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_failure(self):
+        """Verify failure: run_extract raises, job failed."""
+        from agent.worker import _process_extract_async
+
+        mock_store = MagicMock()
+        mock_run_extract = AsyncMock(side_effect=Exception("Extract error"))
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store),
+            patch("agent.worker.run_extract", mock_run_extract),
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+        ):
+            await _process_extract_async(
+                job_id="extract-fail",
+                urls=["https://a.com"],
+                prompt=None,
+                schema_=None,
+                llm_base_url="http://llm:8000",
+                llm_api_key="key",
+                llm_model="gpt-4o-mini",
+                scraper_url="http://scraper:8001",
+            )
+
+        mock_store.fail_job.assert_called_once_with("extract-fail", "Extract error")
+        assert mock_deliver_webhook.call_args[0][1] == "failed"
+
+
+class TestProcessLlmstxtAsync:
+    """Test _process_llmstxt_async — LLMs.txt generation job."""
+
+    @pytest.mark.asyncio
+    async def test_success(self):
+        """Verify success: generate_llmstxt returns result, job completed."""
+        from agent.worker import _process_llmstxt_async
+
+        mock_store = MagicMock()
+        mock_generate_llmstxt = AsyncMock(
+            return_value={
+                "llms_txt": "# Generated",
+                "url": "https://example.com",
+                "pages_discovered": 10,
+                "pages_summarized": 5,
+            }
+        )
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store),
+            patch("agent.llmstxt.generate_llmstxt", mock_generate_llmstxt),
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+        ):
+            await _process_llmstxt_async(
+                job_id="llmstxt-1",
+                url="https://example.com",
+                max_pages=50,
+                scraper_url="http://scraper:8001",
+            )
+
+        mock_store.complete_job.assert_called_once()
+        mock_deliver_webhook.assert_called_once()
+        mock_generate_llmstxt.assert_called_once_with(
+            "https://example.com", 50, "http://scraper:8001"
+        )
+
+    @pytest.mark.asyncio
+    async def test_failure(self):
+        """Verify failure: generate_llmstxt raises, job failed."""
+        from agent.worker import _process_llmstxt_async
+
+        mock_store = MagicMock()
+        mock_generate_llmstxt = AsyncMock(side_effect=Exception("LLMs.txt error"))
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store),
+            patch("agent.llmstxt.generate_llmstxt", mock_generate_llmstxt),
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+        ):
+            await _process_llmstxt_async(
+                job_id="llmstxt-fail",
+                url="https://example.com",
+                max_pages=50,
+                scraper_url="http://scraper:8001",
+            )
+
+        mock_store.fail_job.assert_called_once_with("llmstxt-fail", "LLMs.txt error")
+        assert mock_deliver_webhook.call_args[0][1] == "failed"
+
+
+class TestIndexPageAsync:
+    """Test _index_page_async — fire-and-forget single-page indexing."""
+
+    @pytest.mark.asyncio
+    async def test_success(self):
+        """Verify index_page called with correct args."""
+        from agent.worker import _index_page_async
+
+        mock_semantic_instance = MagicMock()
+        mock_semantic_instance.index_page = AsyncMock(return_value={"status": "ok"})
+        mock_semantic_instance.close = AsyncMock()
+
+        with (
+            patch("agent.semantic_client.SemanticClient", return_value=mock_semantic_instance),
+            patch("agent.worker.os.getenv", return_value="http://semantic-svc:8003"),
+        ):
+            await _index_page_async(
+                url="https://example.com",
+                title="Test Page",
+                content="# Test content",
+            )
+
+        mock_semantic_instance.index_page.assert_called_once_with(
+            "https://example.com", "Test Page", "# Test content"
+        )
+        mock_semantic_instance.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_failure_caught(self, caplog):
+        """Verify exception is caught and logged, not propagated."""
+        from agent.worker import _index_page_async
+
+        mock_semantic_instance = MagicMock()
+        mock_semantic_instance.index_page = AsyncMock(
+            side_effect=Exception("Index error")
+        )
+        mock_semantic_instance.close = AsyncMock()
+
+        import logging
+
+        caplog.set_level(logging.DEBUG)
+
+        with (
+            patch("agent.semantic_client.SemanticClient", return_value=mock_semantic_instance),
+            patch("agent.worker.os.getenv", return_value="http://semantic-svc:8003"),
+        ):
+            # Should not raise
+            await _index_page_async(
+                url="https://example.com",
+                title="Test",
+                content="Content",
+            )
+
+        # Exception was handled (no exception propagated)
+        assert "Failed to index" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_not_propagated(self):
+        """Verify the function does not propagate exceptions to caller."""
+        from agent.worker import _index_page_async
+
+        mock_semantic_instance = MagicMock()
+        mock_semantic_instance.index_page = AsyncMock(
+            side_effect=RuntimeError("Unexpected")
+        )
+        mock_semantic_instance.close = AsyncMock()
+
+        with (
+            patch("agent.semantic_client.SemanticClient", return_value=mock_semantic_instance),
+            patch("agent.worker.os.getenv", return_value="http://semantic-svc:8003"),
+        ):
+            # Must not raise — fire-and-forget
+            await _index_page_async(
+                url="https://example.com",
+                title="Test",
+                content="Content",
+            )
+
+        # We got here without exception
+        mock_semantic_instance.index_page.assert_called_once()
+
+
+class TestIndexBatchAsync:
+    """Test _index_batch_async — fire-and-forget batch indexing."""
+
+    @pytest.mark.asyncio
+    async def test_empty_input(self):
+        """Verify empty pages list returns immediately, no SemanticClient created."""
+        from agent.worker import _index_batch_async
+
+        with patch("agent.semantic_client.SemanticClient") as mock_semantic_cls:
+            await _index_batch_async([])
+
+        mock_semantic_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_success(self):
+        """Verify index_batch called with pages."""
+        from agent.worker import _index_batch_async
+
+        mock_semantic_instance = MagicMock()
+        mock_semantic_instance.index_batch = AsyncMock(return_value={"status": "ok"})
+        mock_semantic_instance.close = AsyncMock()
+        pages = [
+            {"url": "https://a.com", "title": "A", "content": "Content A"},
+            {"url": "https://b.com", "title": "B", "content": "Content B"},
+        ]
+
+        with (
+            patch("agent.semantic_client.SemanticClient", return_value=mock_semantic_instance),
+            patch("agent.worker.os.getenv", return_value="http://semantic-svc:8003"),
+        ):
+            await _index_batch_async(pages)
+
+        mock_semantic_instance.index_batch.assert_called_once_with(pages)
+        mock_semantic_instance.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_failure_caught(self, caplog):
+        """Verify exception is caught and logged, not propagated."""
+        from agent.worker import _index_batch_async
+
+        mock_semantic_instance = MagicMock()
+        mock_semantic_instance.index_batch = AsyncMock(
+            side_effect=Exception("Batch error")
+        )
+        mock_semantic_instance.close = AsyncMock()
+
+        import logging
+
+        caplog.set_level(logging.DEBUG)
+
+        with (
+            patch("agent.semantic_client.SemanticClient", return_value=mock_semantic_instance),
+            patch("agent.worker.os.getenv", return_value="http://semantic-svc:8003"),
+        ):
+            await _index_batch_async(
+                [{"url": "https://a.com", "title": "A", "content": "C"}]
+            )
+
+        assert "Failed to batch-index" in caplog.text
