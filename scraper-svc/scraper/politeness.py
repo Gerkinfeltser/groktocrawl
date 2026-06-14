@@ -201,7 +201,7 @@ class PolitenessManager:
     async def _robots_cache_store(self, domain: str, text: str) -> None:
         """Store robots.txt content in Valkey cache."""
         try:
-            from .fetch import _get_cache_client
+            from .cache import _get_cache_client
 
             client = await _get_cache_client()
             if client:
@@ -213,7 +213,7 @@ class PolitenessManager:
     async def _robots_cache_load(self, domain: str) -> str | None:
         """Load robots.txt content from Valkey cache."""
         try:
-            from .fetch import _get_cache_client
+            from .cache import _get_cache_client
 
             client = await _get_cache_client()
             if client:

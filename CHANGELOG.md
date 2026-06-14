@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Split `scraper-svc/scraper/fetch.py` (1751 lines → 25 lines)** — extracted 5 focused modules: `cache.py` (Valkey cache client + freshness revalidation), `proxy.py` (httpx + Playwright proxy config), `dns_guard.py` (DNS rebinding + SSRF protection), `barrier.py` (bot challenge detection), and `fetch_strategy.py` (three-tier fetch pipeline). `fetch.py` is now a thin re-export. Updated `politeness.py` and `recovery.py` imports. No behavioral changes, no new dependencies. (closes #188)
+
 - **Consolidated urlparse imports into shared `common/url.py`** — new module with `normalize_url()`, `extract_domain()`, `is_same_origin()`, and `is_private_host()`. Refactored 17+ inline `urlparse` call sites across agent-svc, scraper-svc, and browser-svc. Pure refactor — no behavior changes. Dockerfiles updated with `COPY common/ common/`. 28 new unit tests. (closes #194)
 
 ### Added
