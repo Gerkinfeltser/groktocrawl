@@ -85,7 +85,11 @@ def _extract_ldjson(html: str) -> dict | None:
         # Handle both direct object and @graph wrappers
         candidates = []
         if isinstance(data, dict):
-            candidates.append(data)
+            graph = data.get("@graph")
+            if isinstance(graph, list):
+                candidates.extend(item for item in graph if isinstance(item, dict))
+            else:
+                candidates.append(data)
         elif isinstance(data, list):
             candidates.extend(data)
 
@@ -180,10 +184,12 @@ def _format_job(ld_json: dict, url: str) -> tuple[str, dict]:
     employment_type_raw = ld_json.get("employmentType", "")
     if isinstance(employment_type_raw, list):
         employment_type = ", ".join(
-            _normalize_employment_type(et) for et in employment_type_raw
+            _normalize_employment_type(et) for et in employment_type_raw if et
         )
-    else:
+    elif employment_type_raw:
         employment_type = _normalize_employment_type(employment_type_raw)
+    else:
+        employment_type = ""
 
     # Salary
     salary_min = ""
