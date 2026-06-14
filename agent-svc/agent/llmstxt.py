@@ -50,10 +50,7 @@ def _is_boilerplate(line: str) -> bool:
     lower = line.lower().strip()
     if len(lower) < 30:
         return True  # Very short lines are rarely good descriptions
-    for signal in _BOILERPLATE_SIGNALS:
-        if signal in lower:
-            return True
-    return False
+    return any(signal in lower for signal in _BOILERPLATE_SIGNALS)
 
 
 def _extract_description(text: str, max_chars: int = 300) -> str:
@@ -139,19 +136,19 @@ async def discover_pages(url: str, max_pages: int = 50) -> list[str]:
                 return [url]  # fallback: just return the input URL
 
             soup = BeautifulSoup(resp.text, "html.parser")
-            base_domain = extract_domain(url)
+            from urllib.parse import urlparse
+
+            base_netloc = urlparse(url).netloc.lower()
             base_url = extract_domain(url, include_scheme=True)
             for a in soup.find_all("a", href=True):
                 href = a["href"].strip()
                 full_url = urljoin(base_url, href)
 
                 # Skip external links, anchors, mailto, etc.
-                fd = extract_domain(full_url)
-                if fd and fd != base_domain:
+                full_parsed = urlparse(full_url)
+                if full_parsed.netloc and full_parsed.netloc.lower() != base_netloc:
                     continue
-                from urllib.parse import urlparse
-
-                if not urlparse(full_url).scheme.startswith("http"):
+                if not full_parsed.scheme.startswith("http"):
                     continue
                 if full_url in seen:
                     continue
@@ -250,7 +247,7 @@ def generate_llms_txt(site_url: str, pages: list[dict]) -> str:
     )
     lines.append("")
 
-    for i, page in enumerate(pages):
+    for _i, page in enumerate(pages):
         title = page.get("title", "")
         url = page.get("url", "")
         desc = page.get("description", "")

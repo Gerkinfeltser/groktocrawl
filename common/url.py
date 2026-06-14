@@ -16,6 +16,10 @@ _PRIVATE_NETWORKS: list[ip_network] = [
     ip_network("192.168.0.0/16"),
     ip_network("127.0.0.0/8"),  # loopback
     ip_network("169.254.0.0/16"),  # link-local
+    ip_network("0.0.0.0/8"),  # "this" network (RFC 1122)
+    ip_network("100.64.0.0/10"),  # Carrier-grade NAT (RFC 6598)
+    ip_network("198.18.0.0/15"),  # Benchmarking (RFC 2544)
+    ip_network("240.0.0.0/4"),  # Reserved / future use
     ip_network("::1/128"),  # IPv6 loopback
     ip_network("fc00::/7"),  # IPv6 unique-local (ULA)
     ip_network("fe80::/10"),  # IPv6 link-local
@@ -76,7 +80,8 @@ def extract_domain(url: str, include_scheme: bool = False) -> str:
         return ""
     if include_scheme:
         port = f":{parsed.port}" if parsed.port is not None else ""
-        return f"{parsed.scheme}://{hostname}{port}"
+        host = f"[{hostname}]" if ":" in hostname else hostname
+        return f"{parsed.scheme}://{host}{port}"
     return hostname
 
 
@@ -137,10 +142,8 @@ def is_private_host(url: str) -> bool:
         for net in _PRIVATE_NETWORKS:
             if addr in net:
                 return True
-        if addr in _METADATA_IPS:
-            return True
         # It's a valid, non-private IP literal — safe to navigate
-        return False
+        return addr in _METADATA_IPS
     except ValueError:
         pass  # Not an IP literal, treat as hostname
 
