@@ -7,8 +7,6 @@ Each session is an isolated Chromium instance with its own context.
 import asyncio
 import json
 import logging
-import os
-import re
 import socket
 import time
 import uuid
@@ -17,8 +15,10 @@ from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 from playwright.async_api import async_playwright
+from pydantic import BaseModel
+
+from .settings import load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +50,12 @@ async def _inject_cookies(url: str, context, redis_client) -> None:
             await context.add_cookies(data["cookies"])
             remaining = data.get("ttl", 0) - (time.time() - data.get("resolved_at", 0))
             if remaining > 0:
-                logger.info("Injected %d stored cookies for %s (%.0fs remaining)",
-                            len(data["cookies"]), url, remaining)
+                logger.info(
+                    "Injected %d stored cookies for %s (%.0fs remaining)",
+                    len(data["cookies"]),
+                    url,
+                    remaining,
+                )
     except Exception as e:
         logger.debug("Cookie injection failed for %s: %s", url, e)
 
@@ -65,11 +69,13 @@ async def _store_cookies(url: str, context, redis_client) -> None:
         cf_cookies = [c for c in cookies if c.get("name") == "cf_clearance"]
         if cf_cookies:
             key = _cookie_key(url)
-            payload = json.dumps({
-                "cookies": cf_cookies,
-                "resolved_at": time.time(),
-                "ttl": COOKIE_TTL_SECONDS,
-            })
+            payload = json.dumps(
+                {
+                    "cookies": cf_cookies,
+                    "resolved_at": time.time(),
+                    "ttl": COOKIE_TTL_SECONDS,
+                }
+            )
             await redis_client.setex(key, COOKIE_TTL_SECONDS, payload)
             logger.info("Stored %d cf_clearance cookies for %s", len(cf_cookies), url)
     except Exception as e:
@@ -125,18 +131,18 @@ _PRIVATE_NETWORKS = [
     ip_network("10.0.0.0/8"),
     ip_network("172.16.0.0/12"),
     ip_network("192.168.0.0/16"),
-    ip_network("127.0.0.0/8"),          # loopback
-    ip_network("::1/128"),               # IPv6 loopback
-    ip_network("169.254.0.0/16"),       # link-local
-    ip_network("0.0.0.0/8"),            # "this" network
-    ip_network("100.64.0.0/10"),        # Carrier-grade NAT (RFC 6598)
-    ip_network("198.18.0.0/15"),        # Benchmarking (RFC 2544)
-    ip_network("240.0.0.0/4"),          # Reserved / future use
+    ip_network("127.0.0.0/8"),  # loopback
+    ip_network("::1/128"),  # IPv6 loopback
+    ip_network("169.254.0.0/16"),  # link-local
+    ip_network("0.0.0.0/8"),  # "this" network
+    ip_network("100.64.0.0/10"),  # Carrier-grade NAT (RFC 6598)
+    ip_network("198.18.0.0/15"),  # Benchmarking (RFC 2544)
+    ip_network("240.0.0.0/4"),  # Reserved / future use
 ]
 
 _METADATA_IPS = {
-    ip_address("169.254.169.254"),      # AWS/GCP/Azure metadata
-    ip_address("fd00:ec2::254"),        # AWS IMDSv2 IPv6
+    ip_address("169.254.169.254"),  # AWS/GCP/Azure metadata
+    ip_address("fd00:ec2::254"),  # AWS IMDSv2 IPv6
 }
 
 # Docker-internal hostnames that resolve to the host machine
@@ -200,7 +206,10 @@ def _is_private_url(url: str) -> tuple[bool, str]:
     for addr in ips:
         for net in _PRIVATE_NETWORKS:
             if addr in net:
-                return True, f"Hostname '{hostname}' resolves to private IP {addr} ({net})"
+                return (
+                    True,
+                    f"Hostname '{hostname}' resolves to private IP {addr} ({net})",
+                )
         if addr in _METADATA_IPS:
             return True, f"Hostname '{hostname}' resolves to metadata endpoint {addr}"
 
@@ -266,18 +275,26 @@ class BrowserListResponse(BaseModel):
 @app.on_event("startup")
 async def startup():
     # Connect to Valkey/Redis for cookie persistence
-    valkey_host = os.getenv("VALKEY_HOST", "valkey")
-    valkey_port = int(os.getenv("VALKEY_PORT", "6379"))
+    _br_settings = load_settings()
+    valkey_host = _br_settings.valkey_host
+    valkey_port = _br_settings.valkey_port
     try:
         import redis.asyncio as aioredis
+
         app.state.redis = aioredis.Redis(
-            host=valkey_host, port=valkey_port, decode_responses=True,
+            host=valkey_host,
+            port=valkey_port,
+            decode_responses=True,
         )
         await app.state.redis.ping()
         logger.info("Connected to Valkey at %s:%s", valkey_host, valkey_port)
     except Exception as e:
-        logger.warning("Valkey not available at %s:%s — cookie persistence disabled (%s)",
-                       valkey_host, valkey_port, e)
+        logger.warning(
+            "Valkey not available at %s:%s — cookie persistence disabled (%s)",
+            valkey_host,
+            valkey_port,
+            e,
+        )
         app.state.redis = None
     asyncio.create_task(_cleanup_loop())
 
@@ -345,7 +362,9 @@ async def create_browser(req: BrowserCreateRequest):
         return BrowserCreateResponse(id=session_id)
     except Exception as e:
         logger.error("Failed to create browser session: %s", e)
-        raise HTTPException(status_code=500, detail=f"Failed to create browser session: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to create browser session: {e}"
+        )
 
 
 @app.post("/browsers/{session_id}/execute", response_model=BrowserExecuteResponse)
@@ -364,7 +383,9 @@ async def execute_action(session_id: str, req: BrowserExecuteRequest):
     try:
         if req.action == "navigate":
             if not req.url:
-                raise HTTPException(status_code=400, detail="url required for navigate action")
+                raise HTTPException(
+                    status_code=400, detail="url required for navigate action"
+                )
             # Security: reject private/internal destination URLs
             is_private, reason = _is_private_url(req.url)
             if is_private:
@@ -381,7 +402,10 @@ async def execute_action(session_id: str, req: BrowserExecuteRequest):
             title = await page.title()
             current_url = page.url
             if _is_bot_challenge(title, current_url):
-                logger.info("Cloudflare challenge detected on %s, waiting for resolution...", req.url)
+                logger.info(
+                    "Cloudflare challenge detected on %s, waiting for resolution...",
+                    req.url,
+                )
                 await page.wait_for_timeout(8000)
                 title = await page.title()
                 current_url = page.url
@@ -395,19 +419,24 @@ async def execute_action(session_id: str, req: BrowserExecuteRequest):
 
         elif req.action == "click":
             if not req.selector:
-                raise HTTPException(status_code=400, detail="selector required for click action")
+                raise HTTPException(
+                    status_code=400, detail="selector required for click action"
+                )
             await page.click(req.selector, timeout=req.timeout)
             return BrowserExecuteResponse(result={"clicked": req.selector})
 
         elif req.action == "type":
             if not req.selector or req.text is None:
-                raise HTTPException(status_code=400, detail="selector and text required for type action")
+                raise HTTPException(
+                    status_code=400, detail="selector and text required for type action"
+                )
             await page.fill(req.selector, req.text, timeout=req.timeout)
             return BrowserExecuteResponse(result={"typed": req.selector})
 
         elif req.action == "screenshot":
             buf = await page.screenshot(full_page=True)
             import base64
+
             b64 = base64.b64encode(buf).decode()
             return BrowserExecuteResponse(result={"screenshot": b64, "format": "png"})
 
@@ -426,11 +455,15 @@ async def execute_action(session_id: str, req: BrowserExecuteRequest):
             html = await page.content()
             title = await page.title()
             url = page.url
-            return BrowserExecuteResponse(result={"url": url, "title": title, "html_length": len(html)})
+            return BrowserExecuteResponse(
+                result={"url": url, "title": title, "html_length": len(html)}
+            )
 
         elif req.action == "executeScript":
             if not req.script:
-                raise HTTPException(status_code=400, detail="script required for executeScript action")
+                raise HTTPException(
+                    status_code=400, detail="script required for executeScript action"
+                )
             result = await page.evaluate(req.script)
             return BrowserExecuteResponse(result={"script_result": result})
 
@@ -452,12 +485,14 @@ async def list_browsers():
         if s.expired:
             await _destroy_session(sid)
         else:
-            sessions.append({
-                "id": sid,
-                "age_seconds": int(time.time() - s.created_at),
-                "ttl": s.ttl,
-                "idle_seconds": int(s.idle_seconds),
-            })
+            sessions.append(
+                {
+                    "id": sid,
+                    "age_seconds": int(time.time() - s.created_at),
+                    "ttl": s.ttl,
+                    "idle_seconds": int(s.idle_seconds),
+                }
+            )
     return BrowserListResponse(sessions=sessions)
 
 

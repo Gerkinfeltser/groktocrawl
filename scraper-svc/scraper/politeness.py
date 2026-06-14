@@ -12,25 +12,25 @@ Architecture:
     before proceeding.
 """
 
-import asyncio
 import hashlib
-import json
 import logging
-import os
 import re
 import time
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
+from .settings import load_settings
+
 logger = logging.getLogger(__name__)
 
 # ── Env toggle ──────────────────────────────────────────────────
-POLITENESS_ENABLED = os.getenv("SCRAPER_POLITENESS_ENABLED", "false").lower() in ("true", "1", "yes")
+_pol_settings = load_settings()
+POLITENESS_ENABLED = _pol_settings.politeness_enabled
 
 # ── Defaults (overridable via env) ──────────────────────────────
-DEFAULT_CRAWL_DELAY = float(os.getenv("SCRAPER_POLITENESS_CRAWL_DELAY", "1.0"))
-ROBOTS_TTL = int(os.getenv("SCRAPER_POLITENESS_ROBOTS_TTL", "3600"))
-ROBOTS_TIMEOUT = float(os.getenv("SCRAPER_POLITENESS_ROBOTS_TIMEOUT", "5.0"))
+DEFAULT_CRAWL_DELAY = _pol_settings.politeness_crawl_delay
+ROBOTS_TTL = _pol_settings.politeness_robots_ttl
+ROBOTS_TIMEOUT = _pol_settings.politeness_robots_timeout
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -104,7 +104,10 @@ class PolitenessManager:
 
         try:
             import httpx
-            async with httpx.AsyncClient(timeout=ROBOTS_TIMEOUT, follow_redirects=True) as client:
+
+            async with httpx.AsyncClient(
+                timeout=ROBOTS_TIMEOUT, follow_redirects=True
+            ) as client:
                 resp = await client.get(robots_url, headers={"User-Agent": USER_AGENT})
                 if resp.status_code == 200 and resp.text.strip():
                     self._parse_robots_txt(resp.text, state)
@@ -114,7 +117,9 @@ class PolitenessManager:
                     await self._robots_cache_store(domain, resp.text)
                     logger.info(
                         "Robots.txt fetched for %s: %d disallowed paths, %d sitemaps",
-                        domain, len(state.robots_disallowed_paths), len(state.robots_sitemaps),
+                        domain,
+                        len(state.robots_disallowed_paths),
+                        len(state.robots_sitemaps),
                     )
                     return
         except Exception as e:
@@ -197,6 +202,7 @@ class PolitenessManager:
         """Store robots.txt content in Valkey cache."""
         try:
             from .fetch import _get_cache_client
+
             client = await _get_cache_client()
             if client:
                 key = self._robots_cache_key(domain)
@@ -208,6 +214,7 @@ class PolitenessManager:
         """Load robots.txt content from Valkey cache."""
         try:
             from .fetch import _get_cache_client
+
             client = await _get_cache_client()
             if client:
                 key = self._robots_cache_key(domain)
@@ -244,7 +251,8 @@ class PolitenessManager:
             if pattern.search(path):
                 logger.info(
                     "Blocked by robots.txt: %s (disallowed path pattern: %s)",
-                    url, pattern.pattern,
+                    url,
+                    pattern.pattern,
                 )
                 return PolitenessResult(
                     action="blocked",
@@ -259,7 +267,10 @@ class PolitenessManager:
             wait = state.crawl_delay - elapsed
             logger.debug(
                 "Rate limiting %s: %.2fs elapsed, need %.2fs, waiting %.2fs",
-                domain, elapsed, state.crawl_delay, wait,
+                domain,
+                elapsed,
+                state.crawl_delay,
+                wait,
             )
             return PolitenessResult(
                 action="delay",

@@ -6,9 +6,10 @@ Ollama, llama.cpp, vLLM, etc.
 
 import json
 import logging
-import os
 
 import httpx
+
+from .settings import load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,8 @@ class LLMClient:
 
         # Only enable thinking/reasoning for providers that support it
         # (Anthropic/DeepSeek). Default is off; omit the param otherwise.
-        if os.getenv("LLM_ENABLE_THINKING", "false").lower() in ("true", "1"):
+        _llm_settings = load_settings()
+        if _llm_settings.llm_enable_thinking:
             body["enable_thinking"] = True
 
         headers = {
@@ -158,7 +160,8 @@ class LLMClient:
 
         # Only enable thinking/reasoning for providers that support it
         # (Anthropic/DeepSeek). Default is off; omit the param otherwise.
-        if os.getenv("LLM_ENABLE_THINKING", "false").lower() in ("true", "1"):
+        _llm_settings = load_settings()
+        if _llm_settings.llm_enable_thinking:
             body["enable_thinking"] = True
 
         # If schema is provided, request structured JSON output

@@ -5,17 +5,18 @@ and structured breakdown. Non-blocking — consumers set their own tolerance.
 """
 
 import logging
-import os
 import re
-from dataclasses import dataclass, asdict
-from typing import Optional
+from dataclasses import dataclass
+
+from .settings import load_settings
 
 logger = logging.getLogger(__name__)
 
 # Default thresholds — overridable via env vars
-MIN_CONTENT_CHARS = int(os.getenv("QA_MIN_CONTENT_CHARS", "200"))
-MIN_TITLE_CHARS = int(os.getenv("QA_MIN_TITLE_CHARS", "10"))
-MAX_BOILERPLATE_RATIO = float(os.getenv("QA_MAX_BOILERPLATE_RATIO", "0.7"))
+_ext_settings = load_settings()
+MIN_CONTENT_CHARS = _ext_settings.qa_min_content_chars
+MIN_TITLE_CHARS = _ext_settings.qa_min_title_chars
+MAX_BOILERPLATE_RATIO = _ext_settings.qa_max_boilerplate_ratio
 
 # Block page signatures — patterns that indicate a page rendered but isn't useful content.
 # These catch barriers that made it past pre-extraction pattern matching (ADR-0015).
@@ -110,14 +111,12 @@ def _check_boilerplate(markdown: str) -> tuple[float, str]:
         return 0.0, "fail"
 
     # Count link-heavy lines
-    link_lines = sum(1 for l in non_empty if re.search(r'\[.*?\]\(.*?\)', l))
+    link_lines = sum(1 for l in non_empty if re.search(r"\[.*?\]\(.*?\)", l))
     link_ratio = link_lines / len(non_empty)
 
     # Count substantive paragraphs (multi-sentence, non-link lines)
     substantive = sum(
-        1
-        for l in non_empty
-        if len(l) > 60 and not re.search(r'\[.*?\]\(.*?\)', l)
+        1 for l in non_empty if len(l) > 60 and not re.search(r"\[.*?\]\(.*?\)", l)
     )
 
     # Score
@@ -152,7 +151,11 @@ def _check_completeness(markdown: str, title: str = "") -> tuple[float, str]:
     content_len = len(content)
 
     # Check title quality
-    title_ok = len(title.strip()) >= MIN_TITLE_CHARS if title else content_len >= MIN_CONTENT_CHARS
+    title_ok = (
+        len(title.strip()) >= MIN_TITLE_CHARS
+        if title
+        else content_len >= MIN_CONTENT_CHARS
+    )
 
     # Check paragraph structure
     paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
@@ -209,8 +212,14 @@ def _check_block_page(markdown: str, url: str = "") -> tuple[float, str]:
     # Short content with error keywords
     if len(markdown.strip()) < MIN_CONTENT_CHARS:
         error_words = [
-            "error", "not found", "forbidden", "unauthorized",
-            "timeout", "failed", "unavailable", "exception",
+            "error",
+            "not found",
+            "forbidden",
+            "unauthorized",
+            "timeout",
+            "failed",
+            "unavailable",
+            "exception",
         ]
         error_count = sum(1 for w in error_words if w in content_lower)
         if error_count >= 2:

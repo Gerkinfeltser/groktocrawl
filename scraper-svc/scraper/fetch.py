@@ -21,20 +21,20 @@ import httpx
 
 from .extract import assess_quality
 from .metadata import extract_all_metadata
+from .settings import load_settings
 
 logger = logging.getLogger(__name__)
 
-FLARE_SOLVERR_URL = os.getenv("FLARE_SOLVERR_URL", "http://flare-solverr:8191/v1")
+_settings = load_settings()
+FLARE_SOLVERR_URL = _settings.flare_solverr_url
 
 # ── Intelligent scrape cache (ADR-0019) ─────────────────────────
 # Cache freshness revalidation settings
-SCRAPE_CACHE_TTL = int(os.getenv("SCRAPE_CACHE_TTL", "3600"))
-SCRAPE_CACHE_MIN_TTL = int(os.getenv("SCRAPE_CACHE_MIN_TTL", "60"))
-SCRAPE_CACHE_MAX_TTL = int(os.getenv("SCRAPE_CACHE_MAX_TTL", "86400"))
-SCRAPE_CACHE_STABLE_MULTIPLIER = float(
-    os.getenv("SCRAPE_CACHE_STABLE_MULTIPLIER", "2.0")
-)
-SCRAPE_CACHE_VOLATILE_CAP = int(os.getenv("SCRAPE_CACHE_VOLATILE_CAP", "300"))
+SCRAPE_CACHE_TTL = _settings.scrape_cache_ttl
+SCRAPE_CACHE_MIN_TTL = _settings.scrape_cache_min_ttl
+SCRAPE_CACHE_MAX_TTL = _settings.scrape_cache_max_ttl
+SCRAPE_CACHE_STABLE_MULTIPLIER = _settings.scrape_cache_stable_multiplier
+SCRAPE_CACHE_VOLATILE_CAP = _settings.scrape_cache_volatile_cap
 
 # ── Proxy configuration ─────────────────────────────────────────
 # SCRAPER_PROXY_URL is an opt-in env var for residential/mobile IP rotation.
@@ -44,7 +44,7 @@ SCRAPE_CACHE_VOLATILE_CAP = int(os.getenv("SCRAPE_CACHE_VOLATILE_CAP", "300"))
 # If the proxy is unreachable, the scrape retries without proxy and logs a WARN.
 # Format: http://user:pass@host:port
 # Unset or empty = no proxy (default).
-SCRAPER_PROXY_URL = os.getenv("SCRAPER_PROXY_URL", "")
+SCRAPER_PROXY_URL = _settings.scraper_proxy_url
 
 
 def _get_httpx_proxies() -> str | None:
@@ -150,7 +150,9 @@ async def _get_cache_client():
     if _cache_client is not None:
         return _cache_client
 
-    redis_url = os.getenv("VALKEY_URL", "redis://valkey:6379/0")
+    redis_url = (
+        f"redis://{_settings.valkey_host}:{_settings.valkey_port}/{_settings.valkey_db}"
+    )
 
     try:
         import redis.asyncio as aioredis
@@ -251,7 +253,7 @@ def _parse_domain_ttls() -> dict[str, int]:
     Example: {"news.ycombinator.com": 300, "docs.python.org": 86400}
     Returns empty dict on parse failure.
     """
-    raw = os.getenv("SCRAPE_CACHE_DOMAIN_TTLS", "{}")
+    raw = _settings.scrape_cache_domain_ttls
     if not raw or raw == "{}":
         return {}
     try:
@@ -1257,7 +1259,7 @@ async def _fetch_via_browser_svc(url: str) -> dict | None:
 
     Browser-svc is available at http://browser-svc:8012.
     """
-    browser_svc_url = os.getenv("BROWSER_SVC_URL", "http://browser-svc:8012")
+    browser_svc_url = _settings.browser_svc_url
     session_id = None
     try:
         # Create a browser session
@@ -1452,7 +1454,7 @@ def _enrich_with_metadata(result: dict, html: str = "") -> dict:
     return result
 
 
-QA_MIN_QUALITY_THRESHOLD = float(os.getenv("QA_MIN_QUALITY_THRESHOLD", "0.3"))
+QA_MIN_QUALITY_THRESHOLD = _settings.qa_min_quality_threshold
 
 
 def _quality_acceptable(result: dict) -> bool:
@@ -1601,7 +1603,7 @@ async def smart_scrape(url: str) -> dict:
         registry = get_registry()
         if registry._entries:
             ctx = AdapterContext(
-                browser_svc_url=os.getenv("BROWSER_SVC_URL", "http://browser-svc:8012"),
+                browser_svc_url=_settings.browser_svc_url,
                 config=dict(os.environ),
             )
             adapter_result = await registry.dispatch(url, ctx)

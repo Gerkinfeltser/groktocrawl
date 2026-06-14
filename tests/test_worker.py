@@ -81,9 +81,7 @@ class TestProcessAgentAsync:
                 scraper_url="http://scraper:8001",
             )
 
-        mock_store.fail_job.assert_called_once_with(
-            "test-job-fail", "Processing error"
-        )
+        mock_store.fail_job.assert_called_once_with("test-job-fail", "Processing error")
         mock_deliver_webhook.assert_called_once()
         # Verify webhook was called with "failed" event
         call_args = mock_deliver_webhook.call_args[0]
@@ -96,9 +94,7 @@ class TestProcessAgentAsync:
         from agent.worker import _process_agent_async
 
         mock_store = MagicMock()
-        mock_run_research = AsyncMock(
-            return_value={"result": "ok", "sources": []}
-        )
+        mock_run_research = AsyncMock(return_value={"result": "ok", "sources": []})
         mock_deliver_webhook = AsyncMock()
         mock_metrics = MagicMock()
         mock_metrics.counter.return_value.inc = MagicMock()
@@ -188,9 +184,7 @@ class TestProcessCrawlAsync:
 
         mock_store = MagicMock()
         mock_scraper_instance = MagicMock()
-        mock_scraper_instance.scrape = AsyncMock(
-            side_effect=Exception("Crawl error")
-        )
+        mock_scraper_instance.scrape = AsyncMock(side_effect=Exception("Crawl error"))
         mock_scraper_instance.close = AsyncMock()
         mock_deliver_webhook = AsyncMock()
         mock_metrics = MagicMock()
@@ -366,9 +360,7 @@ class TestProcessBatchScrapeAsync:
         # will go to the outer except, not store partial results.
         # Actually looking at the code: the loop is inside try,
         # so when scrape raises, we go to the except block.
-        mock_store.fail_job.assert_called_once_with(
-            "batch-partial", "Second failed"
-        )
+        mock_store.fail_job.assert_called_once_with("batch-partial", "Second failed")
         mock_scraper_instance.close.assert_called_once()
 
     @pytest.mark.asyncio
@@ -563,8 +555,14 @@ class TestIndexPageAsync:
         mock_semantic_instance.close = AsyncMock()
 
         with (
-            patch("agent.semantic_client.SemanticClient", return_value=mock_semantic_instance),
-            patch("agent.worker.os.getenv", return_value="http://semantic-svc:8003"),
+            patch(
+                "agent.semantic_client.SemanticClient",
+                return_value=mock_semantic_instance,
+            ),
+            patch(
+                "agent.worker.load_settings",
+                return_value=_settings_mock,
+            ),
         ):
             await _index_page_async(
                 url="https://example.com",
@@ -593,8 +591,14 @@ class TestIndexPageAsync:
         caplog.set_level(logging.DEBUG)
 
         with (
-            patch("agent.semantic_client.SemanticClient", return_value=mock_semantic_instance),
-            patch("agent.worker.os.getenv", return_value="http://semantic-svc:8003"),
+            patch(
+                "agent.semantic_client.SemanticClient",
+                return_value=mock_semantic_instance,
+            ),
+            patch(
+                "agent.worker.load_settings",
+                return_value=_settings_mock,
+            ),
         ):
             # Should not raise
             await _index_page_async(
@@ -618,8 +622,14 @@ class TestIndexPageAsync:
         mock_semantic_instance.close = AsyncMock()
 
         with (
-            patch("agent.semantic_client.SemanticClient", return_value=mock_semantic_instance),
-            patch("agent.worker.os.getenv", return_value="http://semantic-svc:8003"),
+            patch(
+                "agent.semantic_client.SemanticClient",
+                return_value=mock_semantic_instance,
+            ),
+            patch(
+                "agent.worker.load_settings",
+                return_value=_settings_mock,
+            ),
         ):
             # Must not raise — fire-and-forget
             await _index_page_async(
@@ -659,8 +669,14 @@ class TestIndexBatchAsync:
         ]
 
         with (
-            patch("agent.semantic_client.SemanticClient", return_value=mock_semantic_instance),
-            patch("agent.worker.os.getenv", return_value="http://semantic-svc:8003"),
+            patch(
+                "agent.semantic_client.SemanticClient",
+                return_value=mock_semantic_instance,
+            ),
+            patch(
+                "agent.worker.load_settings",
+                return_value=_settings_mock,
+            ),
         ):
             await _index_batch_async(pages)
 
@@ -683,8 +699,14 @@ class TestIndexBatchAsync:
         caplog.set_level(logging.DEBUG)
 
         with (
-            patch("agent.semantic_client.SemanticClient", return_value=mock_semantic_instance),
-            patch("agent.worker.os.getenv", return_value="http://semantic-svc:8003"),
+            patch(
+                "agent.semantic_client.SemanticClient",
+                return_value=mock_semantic_instance,
+            ),
+            patch(
+                "agent.worker.load_settings",
+                return_value=_settings_mock,
+            ),
         ):
             await _index_batch_async(
                 [{"url": "https://a.com", "title": "A", "content": "C"}]
