@@ -1,6 +1,6 @@
 # Standardized Error Response Model
 
-* Status: proposed
+* Status: accepted
 * Deciders: magnus, jasper
 * Date: 2026-06-14
 
