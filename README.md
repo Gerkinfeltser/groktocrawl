@@ -2,7 +2,7 @@
 
 **Self-hosted Firecrawl alternative with semantic search, grounded Q&A, site adapters, and an autonomous research agent. MIT licensed. One `docker compose up` and you're running.**
 
-GroktoCrawl implements the Firecrawl v2 API surface — scrape, search, map, crawl, extract, browser sessions, and monitors — plus capabilities Firecrawl doesn't offer: a persistent **semantic search engine** with Qdrant vector index, a **grounded Q&A endpoint** with citations, a **web portal** for human users, site **adapters for GitHub/Substack/Reddit/YouTube/Bluesky/Gutenberg**, an **intelligent scrape cache** with ETag/Last-Modified revalidation, and a full **observability stack** with health probes and Prometheus metrics. Runs entirely in Docker on your own hardware. Bring your own LLM or use the built-in fixtures.
+GroktoCrawl implements the Firecrawl v2 API surface — scrape, search, map, crawl, extract, browser sessions, and monitors — plus capabilities Firecrawl doesn't offer: a persistent **semantic search engine** with Qdrant vector index, a **grounded Q&A endpoint** with citations, a **web portal** for human users, site **adapters for GitHub/Substack/Reddit/YouTube/Bluesky/Gutenberg/Greenhouse/AshbyHQ**, an **intelligent scrape cache** with ETag/Last-Modified revalidation, and a full **observability stack** with health probes and Prometheus metrics. Runs entirely in Docker on your own hardware. Bring your own LLM or use the built-in fixtures.
 
 ## Quick Start
 
@@ -456,6 +456,36 @@ The `GITHUB_TOKEN` environment variable enables authenticated access:
 | `GITHUB_TOKEN` | *(none)* | 5,000 API req/hr vs 60/hr unauth; enables GraphQL; always falls back to HTML scrape |
 
 A token with `public_repo` scope is sufficient for public repositories. For private repos, use `repo` scope. Without a token, the file adapter works fully and the social adapter falls back to REST (60 req/hr) then HTML scrape — every URL type returns useful content.
+
+### Greenhouse Adapter
+
+`scrape <boards.greenhouse.io-url>` returns a markdown document with:
+
+- **YAML frontmatter:** title, company, location, department, requisition_id, employment_type, date_posted, apply_url
+- **Markdown body:** full job description converted from HTML to clean markdown
+
+**Fallback chain:** Greenhouse Boards API (`boards-api.greenhouse.io`) → readability-lxml page scrape
+
+**URL patterns:**
+- `boards.greenhouse.io/{company}/jobs/{id}` — individual job page
+- Any URL with `?gh_jid={id}` query parameter (auto-discovers company via embed page)
+
+**Configuration:** None — the public API requires no authentication.
+
+### AshbyHQ Adapter
+
+`scrape <jobs.ashbyhq.com-url>` returns a markdown document with:
+
+- **YAML frontmatter:** id, title, department, team, location, workplace_type, employment_type, published_date, requisition_id, remote status, compensation summary
+- **Markdown body:** job description converted from HTML to clean markdown
+
+**Fallback chain:** SSR-embedded `window.__appData` JSON extraction (no API calls) → readability-lxml page scrape
+
+**URL patterns:**
+- `jobs.ashbyhq.com/{company}` — listing page (renders a table of all postings)
+- `jobs.ashbyhq.com/{company}/{uuid}` — individual job page
+
+**Configuration:** None — AshbyHQ requires no API keys.
 
 ### Adding a New Adapter
 

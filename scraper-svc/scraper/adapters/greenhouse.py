@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 
@@ -119,8 +119,8 @@ def _html_to_markdown(html: str) -> str:
     scraper-svc). Falls back to BeautifulSoup text extraction.
     """
     try:
-        from readability import Document
         from markdownify import markdownify as md
+        from readability import Document
 
         doc = Document(html)
         summary = doc.summary()
@@ -165,9 +165,6 @@ def _format_job_as_markdown(data: dict, board: str, job_id: str) -> tuple[str, d
 
     # Departments
     departments = [d.get("name", "") for d in data.get("departments", []) if d.get("name")]
-
-    # Offices
-    offices = [o.get("name", "") for o in data.get("offices", []) if o.get("name")]
 
     # Employment type from metadata
     employment_type = ""
@@ -250,11 +247,7 @@ class GreenhouseAdapter(SiteAdapter):
 
     async def can_handle(self, url: str) -> bool:
         """Fast pre-check: handle if URL contains gh_jid query param or matches patterns."""
-        if _extract_board_and_job_id(url):
-            return True
-        if _extract_gh_jid_from_query(url):
-            return True
-        return False
+        return bool(_extract_board_and_job_id(url) or _extract_gh_jid_from_query(url))
 
     async def scrape(self, url: str, ctx: AdapterContext) -> AdapterResult:
         parsed = _extract_board_and_job_id(url)
