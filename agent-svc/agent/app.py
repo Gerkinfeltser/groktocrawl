@@ -220,6 +220,7 @@ def create_app() -> FastAPI:
             searxng_url=app.state.searxng_url,
             scraper_url=app.state.scraper_url,
             browser_url="http://browser-svc:8012",
+            portal_url="http://portal-svc:8081",
         )
         # Record health check outcomes as metrics
         dh_gauge = METRICS.gauge(
