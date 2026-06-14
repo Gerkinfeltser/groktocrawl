@@ -117,7 +117,7 @@ flowchart TD
 ```
 groktocrawl/
 ├── docker-compose.yml
-├── .env.example
+├── .env.sample
 ├── LICENSE                    # MIT
 ├── VISION.md                  # This file
 ├── agent-svc/
