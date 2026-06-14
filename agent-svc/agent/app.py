@@ -2,23 +2,28 @@
 
 import json
 import logging
-import os
 import time
 import uuid
 
-from fastapi import FastAPI, Request, Response, Depends
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from redis import Redis
 from rq import Queue
 
 from .api import router
+from .auth import (
+    AUTH_ENABLED,
+    SECURITY_WARNING_BODY,
+    SECURITY_WARNING_HEADER,
+    verify_api_key,
+)
+from .health import check_all
 from .llm import LLMClient
+from .metrics import METRICS
 from .scraper_client import ScraperClient
 from .searxng_client import SearXNGClient
+from .settings import load_settings
 from .store import JobStore
-from .health import check_all
-from .metrics import METRICS
-from .auth import verify_api_key, AUTH_ENABLED, SECURITY_WARNING_HEADER, SECURITY_WARNING_BODY
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +57,8 @@ def setup_logging() -> None:
     Replaces the default log format with JSON lines. Sets the root logger
     to INFO by default, controllable via ``LOG_LEVEL`` env var.
     """
-    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    settings = load_settings()
+    log_level = settings.log_level.upper()
     handler = logging.StreamHandler()
     handler.setFormatter(JSONFormatter())
     root = logging.getLogger()
@@ -68,6 +74,7 @@ def setup_logging() -> None:
 
 
 def create_app() -> FastAPI:
+    settings = load_settings()
     setup_logging()
 
     app = FastAPI(
@@ -87,16 +94,18 @@ def create_app() -> FastAPI:
         },
     )
 
-    redis_url = os.getenv("VALKEY_URL", "redis://valkey:6379/0")
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
     conn = Redis.from_url(redis_url, decode_responses=True)
     queue = Queue(connection=conn)
     store = JobStore(redis_url)
-    scraper_client = ScraperClient(os.getenv("SCRAPER_URL", "http://scraper-svc:8001"))
-    searxng_client = SearXNGClient(os.getenv("SEARXNG_URL", "http://searxng:8080"))
+    scraper_client = ScraperClient(settings.scraper_url)
+    searxng_client = SearXNGClient(settings.searxng_url)
     llm_client = LLMClient(
-        base_url=os.getenv("LLM_BASE_URL", "http://llm-svc:8011/v1"),
-        api_key=os.getenv("LLM_API_KEY", ""),
-        model=os.getenv("LLM_MODEL", "deepseek-v4-flash"),
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        model=settings.llm_model,
     )
 
     # ── App state ───────────────────────────────────────────────
@@ -107,12 +116,12 @@ def create_app() -> FastAPI:
     app.state.searxng_client = searxng_client
     app.state.llm_client = llm_client
     app.state.valkey_url = redis_url
-    app.state.scraper_url = os.getenv("SCRAPER_URL", "http://scraper-svc:8001")
-    app.state.searxng_url = os.getenv("SEARXNG_URL", "http://searxng:8080")
-    app.state.llm_base_url = os.getenv("LLM_BASE_URL", "http://llm-svc:8011/v1")
-    app.state.llm_api_key = os.getenv("LLM_API_KEY", "")
-    app.state.llm_model = os.getenv("LLM_MODEL", "deepseek-v4-flash")
-    app.state.semantic_url = os.getenv("SEMANTIC_URL", "http://semantic-svc:8003")
+    app.state.scraper_url = settings.scraper_url
+    app.state.searxng_url = settings.searxng_url
+    app.state.llm_base_url = settings.llm_base_url
+    app.state.llm_api_key = settings.llm_api_key
+    app.state.llm_model = settings.llm_model
+    app.state.semantic_url = settings.semantic_url
 
     # ── Middleware: request_id ───────────────────────────────────
     @app.middleware("http")
@@ -132,7 +141,13 @@ def create_app() -> FastAPI:
 
         logger.info(
             "Request started",
-            extra={"extra_fields": {"request_id": request_id, "method": request.method, "path": request.url.path}},
+            extra={
+                "extra_fields": {
+                    "request_id": request_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                }
+            },
         )
 
         response = await call_next(request)
@@ -140,9 +155,12 @@ def create_app() -> FastAPI:
         duration_ms = (time.monotonic() - start_time) * 1000
         # Record request latency metric
         METRICS.histogram(
-            "http_request_duration_seconds", "HTTP request latency by path and method",
+            "http_request_duration_seconds",
+            "HTTP request latency by path and method",
             ["method", "path"],
-        ).observe({"method": request.method, "path": request.url.path}, duration_ms / 1000)
+        ).observe(
+            {"method": request.method, "path": request.url.path}, duration_ms / 1000
+        )
 
         logger.info(
             "Request completed",
@@ -189,7 +207,11 @@ def create_app() -> FastAPI:
             browser_url="http://browser-svc:8012",
         )
         # Record health check outcomes as metrics
-        dh_gauge = METRICS.gauge("dependency_health", "Dependency health status (1=ok, 0=down/-1=degraded)", ["dependency"])
+        dh_gauge = METRICS.gauge(
+            "dependency_health",
+            "Dependency health status (1=ok, 0=down/-1=degraded)",
+            ["dependency"],
+        )
         for name, probe in result.get("checks", {}).items():
             status_val = 0.0
             if probe.get("status") == "ok":
@@ -217,10 +239,16 @@ def create_app() -> FastAPI:
         """
         # Update queue depth gauge before exporting
         try:
-            active_jobs = app.state.job_store.list_active_jobs(status="processing", limit=1000)
-            METRICS.gauge("queue_depth", "Current number of processing jobs").set(value=float(len(active_jobs)))
+            active_jobs = app.state.job_store.list_active_jobs(
+                status="processing", limit=1000
+            )
+            METRICS.gauge("queue_depth", "Current number of processing jobs").set(
+                value=float(len(active_jobs))
+            )
         except Exception:
-            METRICS.gauge("queue_depth", "Current number of processing jobs").set(value=-1.0)
+            METRICS.gauge("queue_depth", "Current number of processing jobs").set(
+                value=-1.0
+            )
 
         return PlainTextResponse(
             content=METRICS.generate_openmetrics(),

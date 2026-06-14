@@ -9,13 +9,14 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 
 import httpx
 
+from .settings import load_settings
+
 logger = logging.getLogger(__name__)
 
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+_webhook_settings = load_settings()
 MAX_RETRIES = 3
 TIMEOUT_SECONDS = 5
 
@@ -60,23 +61,49 @@ async def deliver_webhook(
     body = json.dumps(payload).encode()
 
     headers = {"Content-Type": "application/json"}
-    if WEBHOOK_SECRET:
-        headers["X-Webhook-Signature"] = f"sha256={_sign_body(body, WEBHOOK_SECRET)}"
+    if _webhook_settings.webhook_secret:
+        headers["X-Webhook-Signature"] = (
+            f"sha256={_sign_body(body, _webhook_settings.webhook_secret)}"
+        )
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
                 resp = await client.post(url, content=body, headers=headers)
                 if resp.status_code < 500:
-                    logger.info("Webhook delivered %s for job %s (status %d)", event, job_id, resp.status_code)
+                    logger.info(
+                        "Webhook delivered %s for job %s (status %d)",
+                        event,
+                        job_id,
+                        resp.status_code,
+                    )
                     return
-                logger.warning("Webhook attempt %d/%d returned %d for job %s", attempt, MAX_RETRIES, resp.status_code, job_id)
+                logger.warning(
+                    "Webhook attempt %d/%d returned %d for job %s",
+                    attempt,
+                    MAX_RETRIES,
+                    resp.status_code,
+                    job_id,
+                )
         except httpx.TimeoutException:
-            logger.warning("Webhook attempt %d/%d timed out for job %s", attempt, MAX_RETRIES, job_id)
+            logger.warning(
+                "Webhook attempt %d/%d timed out for job %s",
+                attempt,
+                MAX_RETRIES,
+                job_id,
+            )
         except Exception as e:
-            logger.warning("Webhook attempt %d/%d failed for job %s: %s", attempt, MAX_RETRIES, job_id, e)
+            logger.warning(
+                "Webhook attempt %d/%d failed for job %s: %s",
+                attempt,
+                MAX_RETRIES,
+                job_id,
+                e,
+            )
 
         if attempt < MAX_RETRIES:
-            await asyncio.sleep(2 ** attempt)  # 2s, 4s
+            await asyncio.sleep(2**attempt)  # 2s, 4s
 
-    logger.error("Webhook delivery failed for job %s after %d attempts", job_id, MAX_RETRIES)
+    logger.error(
+        "Webhook delivery failed for job %s after %d attempts", job_id, MAX_RETRIES
+    )

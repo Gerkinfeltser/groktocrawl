@@ -9,9 +9,10 @@ Shares the same key prefix (cf:clearance:) and TTL (1500s).
 
 import json
 import logging
-import os
 import time
 from urllib.parse import urlparse
+
+from .settings import load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -31,15 +32,19 @@ async def get_client():
     if _redis_client is not None:
         return _redis_client
 
-    host = os.getenv("VALKEY_HOST", "valkey")
-    port = int(os.getenv("VALKEY_PORT", "6379"))
-    db = int(os.getenv("VALKEY_DB", "0"))
+    _cs_settings = load_settings()
+    host = _cs_settings.valkey_host
+    port = _cs_settings.valkey_port
+    db = _cs_settings.valkey_db
 
     try:
         import redis.asyncio as aioredis
 
         _redis_client = aioredis.Redis(
-            host=host, port=port, db=db, decode_responses=True,
+            host=host,
+            port=port,
+            db=db,
+            decode_responses=True,
         )
         await _redis_client.ping()
         logger.info("Connected to Valkey at %s:%s/%s for cookie store", host, port, db)
@@ -47,7 +52,9 @@ async def get_client():
     except Exception as e:
         logger.warning(
             "Valkey unavailable at %s:%s — cookie persistence disabled (%s)",
-            host, port, e,
+            host,
+            port,
+            e,
         )
         _redis_client = None
         return None
@@ -96,7 +103,9 @@ async def inject_cookies(url: str, context) -> None:
             if remaining > 0:
                 logger.info(
                     "Injected %d stored cookies for %s (%.0fs remaining)",
-                    len(data["cookies"]), url, remaining,
+                    len(data["cookies"]),
+                    url,
+                    remaining,
                 )
     except Exception as e:
         logger.debug("Cookie injection failed for %s: %s", url, e)
@@ -116,11 +125,13 @@ async def store_cookies(url: str, context) -> None:
         cf_cookies = [c for c in cookies if c.get("name") == "cf_clearance"]
         if cf_cookies:
             key = _cookie_key(url)
-            payload = json.dumps({
-                "cookies": cf_cookies,
-                "resolved_at": time.time(),
-                "ttl": COOKIE_TTL_SECONDS,
-            })
+            payload = json.dumps(
+                {
+                    "cookies": cf_cookies,
+                    "resolved_at": time.time(),
+                    "ttl": COOKIE_TTL_SECONDS,
+                }
+            )
             await client.setex(key, COOKIE_TTL_SECONDS, payload)
             logger.info("Stored %d cf_clearance cookies for %s", len(cf_cookies), url)
     except Exception as e:

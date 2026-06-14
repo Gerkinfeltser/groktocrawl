@@ -13,16 +13,18 @@ Configured via env vars:
 
 import json
 import logging
-import os
 
 import httpx
 
+from .settings import load_settings
+
 logger = logging.getLogger(__name__)
 
-RECOVERY_TIMEOUT = int(os.getenv("RECOVERY_LLM_TIMEOUT", "15"))
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://llm-svc:4001/v1")
-LLM_API_KEY = os.getenv("LLM_API_KEY", "")
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+_rec_settings = load_settings()
+RECOVERY_TIMEOUT = _rec_settings.recovery_llm_timeout
+LLM_BASE_URL = _rec_settings.recovery_llm_base_url
+LLM_API_KEY = _rec_settings.recovery_llm_api_key
+LLM_MODEL = _rec_settings.recovery_llm_model
 
 RECOVERY_SYSTEM_PROMPT = """You are a web scraping recovery assistant. The scraper tried to fetch a URL and got a page that is clearly not the target content.
 
@@ -51,7 +53,12 @@ RECOVERY_SCHEMA = {
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["iframe_url", "extracted_content", "bot_challenge", "irrecoverable"],
+            "enum": [
+                "iframe_url",
+                "extracted_content",
+                "bot_challenge",
+                "irrecoverable",
+            ],
         },
         "url": {"type": "string"},
         "content": {"type": "string"},
@@ -97,7 +104,10 @@ async def classify_cloudflare_block(url: str, page_text: str) -> dict | None:
             body = {
                 "model": LLM_MODEL,
                 "messages": [
-                    {"role": "system", "content": CLOUDFLARE_CLASSIFICATION_PROMPT.format(url=url)},
+                    {
+                        "role": "system",
+                        "content": CLOUDFLARE_CLASSIFICATION_PROMPT.format(url=url),
+                    },
                     {
                         "role": "user",
                         "content": (
@@ -129,8 +139,12 @@ async def classify_cloudflare_block(url: str, page_text: str) -> dict | None:
             content = result["choices"][0]["message"]["content"]
             parsed = json.loads(content)
 
-            logger.info("Cloudflare classification for %s: %s (confidence: %s)",
-                        url, parsed.get("block_type", "unknown"), parsed.get("confidence", "low"))
+            logger.info(
+                "Cloudflare classification for %s: %s (confidence: %s)",
+                url,
+                parsed.get("block_type", "unknown"),
+                parsed.get("confidence", "low"),
+            )
 
             return {
                 "markdown": "",
@@ -200,7 +214,9 @@ async def attempt_llm_recovery(url: str, page_text: str) -> dict | None:
             )
 
             if resp.status_code != 200:
-                logger.warning("LLM recovery API error %d for %s", resp.status_code, url)
+                logger.warning(
+                    "LLM recovery API error %d for %s", resp.status_code, url
+                )
                 return None
 
             result = resp.json()
@@ -217,6 +233,7 @@ async def attempt_llm_recovery(url: str, page_text: str) -> dict | None:
                     extracted_url = extracted_url.split("#")[0]
                 logger.info("LLM recovery: retrying on extracted URL %s", extracted_url)
                 from .fetch import smart_scrape
+
                 return await smart_scrape(extracted_url)
 
             elif action == "extracted_content" and parsed.get("content"):
