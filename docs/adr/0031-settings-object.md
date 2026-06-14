@@ -1,6 +1,6 @@
 # ADR-0031: Centralized Settings Object for Service Configuration
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Deciders:** Magnus Hedemark, Jasper (AI Agent)
 
