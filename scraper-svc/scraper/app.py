@@ -6,10 +6,13 @@ Single endpoint: POST /scrape — takes a URL, returns clean markdown.
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, HttpUrl
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from .cookie_store import close_client, get_client
+from .exceptions import GroktoCrawlError, UpstreamError
 from .fetch import smart_scrape
 from .meta import fetch_meta_tags
 
@@ -46,6 +49,7 @@ class ScrapeRequest(BaseModel):
 
 class DownloadData(BaseModel):
     """Binary content metadata for non-HTML responses."""
+
     filename: str
     content_type: str
     size: int
@@ -67,6 +71,64 @@ class MetaResponse(BaseModel):
     error: str | None = None
 
 
+class ErrorResponse(BaseModel):
+    """Standard error response body for the scraper service."""
+
+    success: bool = False
+    error: str = "An unexpected error occurred"
+    error_code: str = "INTERNAL_ERROR"
+    details: list | dict | None = None
+
+
+@app.exception_handler(GroktoCrawlError)
+async def groktocrawl_error_handler(request: Request, exc: GroktoCrawlError):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=ErrorResponse(
+            error=exc.detail,
+            error_code=exc.error_code,
+            details=exc.details,
+        ).model_dump(),
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    status_code = exc.status_code
+    error_code_map = {
+        400: "INVALID_REQUEST",
+        401: "AUTH_ERROR",
+        403: "AUTH_ERROR",
+        404: "NOT_FOUND",
+        422: "INVALID_REQUEST",
+        429: "RATE_LIMITED",
+        502: "UPSTREAM_ERROR",
+    }
+    error_code = error_code_map.get(status_code, "INTERNAL_ERROR")
+    detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+    return JSONResponse(
+        status_code=status_code,
+        content=ErrorResponse(error=detail, error_code=error_code).model_dump(),
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    details_list = []
+    for err in exc.errors():
+        loc = err.get("loc", [])
+        field = ".".join(str(p) for p in loc)
+        details_list.append({"field": field, "message": err.get("msg", "")})
+    return JSONResponse(
+        status_code=422,
+        content=ErrorResponse(
+            error="Validation failed",
+            error_code="INVALID_REQUEST",
+            details=details_list,
+        ).model_dump(),
+    )
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -78,21 +140,21 @@ async def scrape(request: ScrapeRequest):
     try:
         result = await smart_scrape(request.url)
         if result.get("error"):
-            return ScrapeResponse(success=False, error=result["error"])
+            raise UpstreamError(detail=result["error"])
         data = {
             "markdown": result.get("markdown", ""),
             "source": result.get("source", "unknown"),
             "url": request.url,
-            'quality': result.get('quality'),
-            'politeness': result.get('politeness'),
-            'metadata': result.get('metadata'),
+            "quality": result.get("quality"),
+            "politeness": result.get("politeness"),
+            "metadata": result.get("metadata"),
         }
         if result.get("download"):
             data["download"] = result["download"]
         return ScrapeResponse(success=True, data=data)
     except Exception as e:
         logger.exception("Scrape failed for %s", request.url)
-        return ScrapeResponse(success=False, error=str(e))
+        raise UpstreamError(detail=str(e)) from e
 
 
 @app.post("/scrape/meta", response_model=MetaResponse)
@@ -113,4 +175,4 @@ async def scrape_meta(request: ScrapeRequest):
         )
     except Exception as e:
         logger.exception("Meta fetch failed for %s", request.url)
-        return MetaResponse(success=False, error=str(e))
+        raise UpstreamError(detail=str(e)) from e

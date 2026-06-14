@@ -5,8 +5,9 @@ import logging
 import time
 import uuid
 
-from fastapi import Depends, FastAPI, Request
-from fastapi.responses import PlainTextResponse
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, PlainTextResponse
 from redis import Redis
 from rq import Queue
 
@@ -17,9 +18,11 @@ from .auth import (
     SECURITY_WARNING_HEADER,
     verify_api_key,
 )
+from .exceptions import GroktoCrawlError
 from .health import check_all
 from .llm import LLMClient
 from .metrics import METRICS
+from .models import ErrorDetail, ErrorResponse
 from .scraper_client import ScraperClient
 from .searxng_client import SearXNGClient
 from .settings import load_settings
@@ -253,6 +256,55 @@ def create_app() -> FastAPI:
         return PlainTextResponse(
             content=METRICS.generate_openmetrics(),
             media_type="application/openmetrics-text; version=1.0.0",
+        )
+
+    # ── Exception handlers ──────────────────────────────────────
+    @app.exception_handler(GroktoCrawlError)
+    async def groktocrawl_error_handler(request: Request, exc: GroktoCrawlError):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=ErrorResponse(
+                error=exc.detail,
+                error_code=exc.error_code,
+                details=exc.details,
+            ).model_dump(),
+        )
+
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(request: Request, exc: HTTPException):
+        status_code = exc.status_code
+        error_code_map = {
+            400: "INVALID_REQUEST",
+            401: "AUTH_ERROR",
+            403: "AUTH_ERROR",
+            404: "NOT_FOUND",
+            422: "INVALID_REQUEST",
+            429: "RATE_LIMITED",
+            502: "UPSTREAM_ERROR",
+        }
+        error_code = error_code_map.get(status_code, "INTERNAL_ERROR")
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        return JSONResponse(
+            status_code=status_code,
+            content=ErrorResponse(error=detail, error_code=error_code).model_dump(),
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(
+        request: Request, exc: RequestValidationError
+    ):
+        details_list = []
+        for err in exc.errors():
+            loc = err.get("loc", [])
+            field = ".".join(str(p) for p in loc)
+            details_list.append(ErrorDetail(field=field, message=err.get("msg", "")))
+        return JSONResponse(
+            status_code=422,
+            content=ErrorResponse(
+                error="Validation failed",
+                error_code="INVALID_REQUEST",
+                details=details_list,
+            ).model_dump(),
         )
 
     # ── Include API router with auth dependency ─────────────────

@@ -5,6 +5,22 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class ErrorDetail(BaseModel):
+    """A single field-level validation error."""
+
+    field: str
+    message: str
+
+
+class ErrorResponse(BaseModel):
+    """Standard error response body for all API endpoints."""
+
+    success: bool = False
+    error: str = "An unexpected error occurred"
+    error_code: str = "INTERNAL_ERROR"
+    details: list[ErrorDetail] | dict | None = None
+
+
 class ScrapeRequest(BaseModel):
     url: str
     formats: list[str] = ["markdown"]
@@ -14,6 +30,7 @@ class ScrapeRequest(BaseModel):
 
 class DownloadData(BaseModel):
     """Binary content metadata for non-HTML responses."""
+
     filename: str
     content_type: str
     size: int
@@ -34,9 +51,15 @@ class ScrapeResponse(BaseModel):
 
 
 class AgentRequest(BaseModel):
-    prompt: str = Field(..., max_length=10000, description="What the agent should research")
-    urls: list[str] | None = Field(None, description="Optional seed URLs to constrain research")
-    schema_: dict[str, Any] | None = Field(None, alias="schema", description="JSON Schema for structured output")
+    prompt: str = Field(
+        ..., max_length=10000, description="What the agent should research"
+    )
+    urls: list[str] | None = Field(
+        None, description="Optional seed URLs to constrain research"
+    )
+    schema_: dict[str, Any] | None = Field(
+        None, alias="schema", description="JSON Schema for structured output"
+    )
     model: str = Field(default="default", description="Model hint")
     max_credits: int | None = None
     webhook: dict[str, Any] | None = None
@@ -99,7 +122,9 @@ class SearchRequest(BaseModel):
     query: str
     limit: int = 5
     search_type: str = "fast"  # "fast" | "rich"
-    retrieval_mode: str = "keyword"  # "keyword" | "semantic" | "hybrid" | "vector" | "hybrid_vector"
+    retrieval_mode: str = (
+        "keyword"  # "keyword" | "semantic" | "hybrid" | "vector" | "hybrid_vector"
+    )
     categories: list[str] | None = None
     sources: list[str] | None = None
     output_schema: dict[str, Any] | None = None  # JSON Schema for structured extraction
@@ -134,7 +159,10 @@ class BrowserCreateRequest(BaseModel):
 
 
 class BrowserExecuteRequest(BaseModel):
-    action: str = Field(..., description="Action: navigate, click, type, screenshot, scroll, wait, getContent, executeScript")
+    action: str = Field(
+        ...,
+        description="Action: navigate, click, type, screenshot, scroll, wait, getContent, executeScript",
+    )
     url: str | None = None
     selector: str | None = None
     text: str | None = None
@@ -165,8 +193,12 @@ class BrowserDeleteResponse(BaseModel):
 
 class ExtractRequest(BaseModel):
     urls: list[str] = Field(..., min_length=1, description="URLs to extract data from")
-    prompt: str | None = Field(None, max_length=10000, description="Optional instruction for extraction")
-    schema_: dict[str, Any] | None = Field(None, alias="schema", description="JSON Schema for structured output")
+    prompt: str | None = Field(
+        None, max_length=10000, description="Optional instruction for extraction"
+    )
+    schema_: dict[str, Any] | None = Field(
+        None, alias="schema", description="JSON Schema for structured output"
+    )
     model: str = Field(default="default", description="Model hint")
     webhook: dict[str, Any] | None = None
 
@@ -188,7 +220,9 @@ class ExtractStatusResponse(BaseModel):
 
 class MonitorCreateRequest(BaseModel):
     url: str = Field(..., description="URL to monitor for changes")
-    schedule: str = Field(default="0 */6 * * *", description="Cron expression for check frequency")
+    schedule: str = Field(
+        default="0 */6 * * *", description="Cron expression for check frequency"
+    )
     webhook: str | None = Field(None, description="Webhook URL called on change")
 
 
@@ -245,6 +279,7 @@ class LLMsTextStatusResponse(BaseModel):
 
 class Source(BaseModel):
     """A source used to ground an answer."""
+
     url: str
     title: str = ""
     relevance: str = ""
@@ -252,6 +287,7 @@ class Source(BaseModel):
 
 class Citation(BaseModel):
     """An inline citation mapping [N] to a URL."""
+
     index: int
     url: str
 
@@ -259,8 +295,13 @@ class Citation(BaseModel):
 class AnswerRequest(BaseModel):
     query: str = Field(..., max_length=10000, description="Natural language question")
     search_type: str = Field(default="auto", description="Hint for search depth")
-    retrieval_mode: str = Field(default="keyword", description="keyword | semantic | hybrid | vector | hybrid_vector")
-    num_sources: int = Field(default=5, ge=1, le=20, description="How many sources to ground the answer")
+    retrieval_mode: str = Field(
+        default="keyword",
+        description="keyword | semantic | hybrid | vector | hybrid_vector",
+    )
+    num_sources: int = Field(
+        default=5, ge=1, le=20, description="How many sources to ground the answer"
+    )
     model: str = Field(default="default", description="Per-request LLM override")
     stream: bool = Field(default=False, description="SSE streaming response")
 
@@ -276,6 +317,7 @@ class AnswerResponse(BaseModel):
 
 class ActivityItem(BaseModel):
     """A single job entry in the activity feed."""
+
     id: str
     kind: str
     status: str
@@ -286,5 +328,6 @@ class ActivityItem(BaseModel):
 
 class ActivityResponse(BaseModel):
     """Response model for the unified activity endpoint."""
+
     success: bool = True
     data: list[ActivityItem] = Field(default_factory=list)

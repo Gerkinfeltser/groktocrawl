@@ -75,7 +75,56 @@ curl http://localhost:8080/health
 - `test-site/` — fixture website for integration tests
 - `tests/` — integration tests
 
-## Architecture Decision Records
+## Error Handling Conventions
+
+All API endpoints return errors in a consistent format:
+
+```json
+{
+  "success": false,
+  "error": "Human-readable description",
+  "error_code": "NOT_FOUND",
+  "details": null
+}
+```
+
+### Error Codes
+
+| HTTP | Error Code | When |
+|------|-----------|------|
+| 400/422 | `INVALID_REQUEST` | Validation errors, missing fields |
+| 401/403 | `AUTH_ERROR` | Authentication or authorization failure |
+| 404 | `NOT_FOUND` | Resource (job, monitor, session) not found |
+| 429 | `RATE_LIMITED` | Rate limit exceeded |
+| 502 | `SCRAPE_FAILED` | Scraper service failure |
+| 502 | `BROWSER_ERROR` | Browser service failure |
+| 502 | `UPSTREAM_ERROR` | Generic upstream service failure |
+| 500 | `INTERNAL_ERROR` | Unhandled exceptions (traceback logged) |
+
+### Raising Errors
+
+Use the exception hierarchy from `agent-svc/agent/exceptions.py` (or `scraper-svc/scraper/exceptions.py`):
+
+```python
+from agent.exceptions import NotFoundError, InvalidRequestError, ScrapeError
+
+# Resource not found
+raise NotFoundError(detail="Job not found", details={"job_id": "abc"})
+
+# Invalid input
+raise InvalidRequestError(detail="URL is required")
+
+# Upstream failure
+raise ScrapeError(detail="Failed to scrape URL")
+```
+
+### Rules
+
+- Do NOT return 200 with `success: false` — raise an appropriate exception instead
+- Do NOT catch broad `Exception` and return a degraded 200 — let exceptions propagate to the handler
+- Stack traces are automatically logged by the exception handler — do not log + re-raise
+- For fire-and-forget background tasks, silent `except Exception: pass` is acceptable (the error is logged where the task was spawned)
+- FastAPI exception handlers in `app.py` convert all exceptions to the standard error response shape automatically
 
 Significant architectural decisions are documented as ADRs in `docs/adr/`. Each ADR follows the MADR template and covers context, decision drivers, considered options, and consequences.
 

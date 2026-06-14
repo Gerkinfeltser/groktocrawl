@@ -949,3 +949,48 @@ def test_gutenberg_adapter_invalid_id():
     # Either the adapter fails gracefully and the generic pipeline handles it,
     # or the generic pipeline also fails — either way, no crash
     assert not payload.get("error") or payload.get("success") is not None
+
+
+# ── Error response tests ──────────────────────────────────────────
+
+
+def test_non_existent_job_returns_404_with_error_response():
+    """GET /v2/agent/<nonexistent> returns 404 with ErrorResponse format."""
+    r = httpx.get(AGENT + "/v2/agent/nonexistent-job-id", timeout=10)
+    assert r.status_code == 404
+    data = r.json()
+    assert data["success"] is False
+    assert data.get("error")
+    assert "error_code" in data
+    assert data["error_code"] == "NOT_FOUND"
+
+
+def test_non_existent_monitor_returns_404():
+    """GET /v2/monitor/<nonexistent> returns 404 with ErrorResponse."""
+    r = httpx.get(AGENT + "/v2/monitor/nonexistent-monitor", timeout=10)
+    assert r.status_code == 404
+    data = r.json()
+    assert data["success"] is False
+    assert data["error_code"] == "NOT_FOUND"
+
+
+def test_validation_error_returns_422_with_details():
+    """Missing required fields return 422 with field-level details."""
+    r = httpx.post(AGENT + "/v2/scrape", json={}, timeout=10)
+    assert r.status_code == 422
+    data = r.json()
+    assert data["success"] is False
+    assert data["error_code"] == "INVALID_REQUEST"
+    assert "details" in data
+    assert len(data["details"]) > 0
+    assert "field" in data["details"][0]
+    assert "message" in data["details"][0]
+
+
+def test_non_existent_browser_session_returns_404():
+    """DELETE /v2/browser/<nonexistent> returns 404 with ErrorResponse."""
+    r = httpx.delete(AGENT + "/v2/browser/nonexistent-session", timeout=10)
+    assert r.status_code == 404
+    data = r.json()
+    assert data["success"] is False
+    assert data["error_code"] == "NOT_FOUND"
