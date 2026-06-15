@@ -82,6 +82,7 @@ async def _process_crawl_async(
     max_depth: int,
     scraper_url: str,
     webhook_config: dict[str, Any] | None = None,
+    task_tracker: Any = None,
 ) -> None:
     settings = _get_worker_settings()
     store = JobStore(
@@ -103,9 +104,14 @@ async def _process_crawl_async(
             og = metadata.get("og") or {}
             meta = metadata.get("meta") or {}
             title = og.get("title") or meta.get("title") or data.get("title", "")
-            asyncio.create_task(
-                _index_page_async(url, title, data.get("markdown", "")[:2000])
-            )
+            if task_tracker is not None:
+                task_tracker.create_background_task(
+                    _index_page_async(url, title, data.get("markdown", "")[:2000])
+                )
+            else:
+                asyncio.create_task(
+                    _index_page_async(url, title, data.get("markdown", "")[:2000])
+                )
         payload = {"completed": len(pages), "total": 1, "pages": pages}
         store.complete_job(job_id, payload)
         await deliver_webhook(webhook_config, "completed", job_id, payload)
@@ -136,6 +142,7 @@ async def _process_batch_scrape_async(
     urls: list[str],
     scraper_url: str,
     webhook_config: dict[str, Any] | None = None,
+    task_tracker: Any = None,
 ) -> None:
     settings = _get_worker_settings()
     store = JobStore(
@@ -167,7 +174,10 @@ async def _process_batch_scrape_async(
                     }
                 )
         if _index_batch:
-            asyncio.create_task(_index_batch_async(_index_batch))
+            if task_tracker is not None:
+                task_tracker.create_background_task(_index_batch_async(_index_batch))
+            else:
+                asyncio.create_task(_index_batch_async(_index_batch))
         payload = {"completed": len(pages), "total": len(urls), "pages": pages}
         store.complete_job(job_id, payload)
         await deliver_webhook(webhook_config, "completed", job_id, payload)

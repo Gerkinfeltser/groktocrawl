@@ -117,8 +117,6 @@ async def list_activity(request: Request):
 
 @router.post("/v2/scrape", response_model=ScrapeResponse)
 async def scrape(request: Request, body: ScrapeRequest):
-    import asyncio
-
     scraper = request.app.state.scraper_client
     result = await scraper.scrape(body.url)
     if result.get("success"):
@@ -127,7 +125,9 @@ async def scrape(request: Request, body: ScrapeRequest):
         markdown = scraper_data.get("markdown", "")
         if markdown:
             title = scraper_data.get("metadata", {}).get("title", "")
-            asyncio.create_task(_index_scrape(body.url, title, markdown, request))
+            request.app.state.task_tracker.create_background_task(
+                _index_scrape(body.url, title, markdown, request)
+            )
         return ScrapeResponse(
             success=True,
             data=ScrapeData(
@@ -216,11 +216,10 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
 
     # Process inline (synchronous) for MVP — no RQ worker needed.
     # A separate worker container can be added later for proper async.
-    import asyncio
 
     from .worker import _process_agent_async
 
-    asyncio.create_task(
+    request.app.state.task_tracker.create_background_task(
         _process_agent_async(
             job_id=job_id,
             prompt=body.prompt,
@@ -272,11 +271,10 @@ async def cancel_agent(request: Request, job_id: str):
 async def create_crawl(request: Request, body: CrawlRequest):
     store: JobStore = request.app.state.job_store
     job_id = store.create_job(kind="crawl", payload=body.model_dump())
-    import asyncio
 
     from .worker import _process_crawl_async
 
-    asyncio.create_task(
+    request.app.state.task_tracker.create_background_task(
         _process_crawl_async(
             job_id=job_id,
             url=body.url,
@@ -284,6 +282,7 @@ async def create_crawl(request: Request, body: CrawlRequest):
             max_depth=body.max_depth,
             scraper_url=request.app.state.scraper_url,
             webhook_config=body.webhook,
+            task_tracker=request.app.state.task_tracker,
         )
     )
     return CrawlCreateResponse(id=job_id)
@@ -319,16 +318,16 @@ async def cancel_crawl(request: Request, job_id: str):
 async def create_batch_scrape(request: Request, body: BatchScrapeRequest):
     store: JobStore = request.app.state.job_store
     job_id = store.create_job(kind="batch_scrape", payload=body.model_dump())
-    import asyncio
 
     from .worker import _process_batch_scrape_async
 
-    asyncio.create_task(
+    request.app.state.task_tracker.create_background_task(
         _process_batch_scrape_async(
             job_id=job_id,
             urls=body.urls,
             scraper_url=request.app.state.scraper_url,
             webhook_config=body.webhook,
+            task_tracker=request.app.state.task_tracker,
         )
     )
     return CrawlCreateResponse(id=job_id)
@@ -663,11 +662,10 @@ async def create_extract(request: Request, body: ExtractRequest):
     job_id = store.create_job(
         kind="extract", payload=body.model_dump(exclude_none=True, by_alias=True)
     )
-    import asyncio
 
     from .worker import _process_extract_async
 
-    asyncio.create_task(
+    request.app.state.task_tracker.create_background_task(
         _process_extract_async(
             job_id=job_id,
             urls=body.urls,
@@ -933,11 +931,10 @@ async def create_llmstxt(request: Request, body: LLMsTextRequest):
     """Generate an llms.txt file for a website."""
     store: JobStore = request.app.state.job_store
     job_id = store.create_job(kind="llmstxt", payload=body.model_dump())
-    import asyncio
 
     from .worker import _process_llmstxt_async
 
-    asyncio.create_task(
+    request.app.state.task_tracker.create_background_task(
         _process_llmstxt_async(
             job_id=job_id,
             url=body.url,
