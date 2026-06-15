@@ -1,6 +1,6 @@
 # ADR-0035: Graceful Shutdown for Fire-and-Forget Tasks
 
-**Status:** Proposed
+**Status:** Accepted
 
 **Deciders:** Magnus Hedemark, Jasper (AI Agent)
 
