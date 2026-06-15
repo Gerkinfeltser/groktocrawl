@@ -109,6 +109,9 @@ jobs:
       - name: Set up .env
         run: cp .env.sample .env
 
+      - name: Clean up stale containers from previous run
+        run: docker compose down --remove-orphans --timeout 30 || true
+
       - name: Start the Docker stack
         run: docker compose up --build -d
         timeout-minutes: 10
@@ -141,3 +144,7 @@ jobs:
       - name: Collect logs on failure
         if: failure()
         run: docker compose logs --tail 50
+
+      - name: Tear down stack
+        if: always()
+        run: docker compose down --remove-orphans --timeout 30

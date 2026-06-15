@@ -33,18 +33,44 @@ import math
 import os
 import time
 import urllib.parse
+from contextlib import asynccontextmanager
 
+import numpy as np
 from fastapi import FastAPI, HTTPException, Request, Response
+from metrics import METRICS
 from pydantic import BaseModel
 from qdrant_client import QdrantClient, models
-from sentence_transformers import SentenceTransformer, CrossEncoder
-import numpy as np
-
-from metrics import METRICS
+from sentence_transformers import CrossEncoder, SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="semantic-svc")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Load SentenceTransformer and CrossEncoder models at startup."""
+    global _embed_model, _rerank_model, _models_ready
+    logger.info("Loading semantic models (~2.2GB, 2-5s)...")
+    loop = asyncio.get_event_loop()
+    try:
+        _embed_model = await loop.run_in_executor(
+            None, lambda: SentenceTransformer(EMBED_MODEL_NAME)
+        )
+        _rerank_model = await loop.run_in_executor(
+            None, lambda: CrossEncoder(RERANK_MODEL_NAME)
+        )
+        _models_ready = True
+        logger.info("Models loaded — semantic-svc ready")
+    except Exception:
+        logger.exception(
+            "Failed to load semantic models — /health will report 'starting'"
+        )
+    yield
+    _models_ready = False
+    _embed_model = None
+    _rerank_model = None
+
+
+app = FastAPI(title="semantic-svc", lifespan=lifespan)
 
 # ── Model config ──────────────────────────────────────────────────
 # Configurable via env vars so embedding models can be swapped
@@ -60,6 +86,7 @@ ACTIVE_EMBED_MODEL = os.getenv("ACTIVE_EMBED_MODEL", "bge-m3")
 
 _embed_model: SentenceTransformer | None = None
 _rerank_model: CrossEncoder | None = None
+_models_ready: bool = False
 _qdrant: QdrantClient | None = None
 _qdrant_ready: bool = False
 
@@ -89,7 +116,7 @@ _active_override: str | None = None
 
 def _get_active_model() -> str:
     """Return the effective active named vector.
-    
+
     Prefers the in-memory override (set by cutover), falling back
     to the ACTIVE_EMBED_MODEL env var.
     """
@@ -100,33 +127,62 @@ def _get_active_model() -> str:
 
 # Domain patterns for retention categories (unchanged from Phase 3)
 _DOCS_DOMAINS = {
-    "readthedocs.io", "readthedocs.org",
+    "readthedocs.io",
+    "readthedocs.org",
 }
 _REFERENCE_DOMAINS = {
-    "wikipedia.org", "stackoverflow.com", "stackexchange.com",
-    "github.com", "gitlab.com",
+    "wikipedia.org",
+    "stackoverflow.com",
+    "stackexchange.com",
+    "github.com",
+    "gitlab.com",
 }
 _NEWS_DOMAINS = {
-    "reuters.com", "nytimes.com", "cnn.com", "bbc.com", "bbc.co.uk",
-    "bloomberg.com", "apnews.com", "npr.org", "theguardian.com",
-    "wsj.com", "washingtonpost.com", "economist.com",
-    "cnbc.com", "abcnews.go.com", "cbsnews.com", "nbcnews.com",
-    "usatoday.com", "politico.com", "axios.com", "thehill.com",
+    "reuters.com",
+    "nytimes.com",
+    "cnn.com",
+    "bbc.com",
+    "bbc.co.uk",
+    "bloomberg.com",
+    "apnews.com",
+    "npr.org",
+    "theguardian.com",
+    "wsj.com",
+    "washingtonpost.com",
+    "economist.com",
+    "cnbc.com",
+    "abcnews.go.com",
+    "cbsnews.com",
+    "nbcnews.com",
+    "usatoday.com",
+    "politico.com",
+    "axios.com",
+    "thehill.com",
 }
 _SOCIAL_DOMAINS = {
-    "reddit.com", "twitter.com", "x.com", "youtube.com",
-    "instagram.com", "tiktok.com", "threads.net",
-    "bluesky", "bsky.app",
+    "reddit.com",
+    "twitter.com",
+    "x.com",
+    "youtube.com",
+    "instagram.com",
+    "tiktok.com",
+    "threads.net",
+    "bluesky",
+    "bsky.app",
 }
 _BLOG_DOMAINS = {
-    "medium.com", "substack.com", "ghost.io", "wordpress.com",
-    "blogger.com", "blogspot.com",
+    "medium.com",
+    "substack.com",
+    "ghost.io",
+    "wordpress.com",
+    "blogger.com",
+    "blogspot.com",
 }
 
 
 def _compute_domain_category(url: str) -> str:
     """Classify a URL's domain into a retention category.
-    
+
     Categories (in eviction-priority order):
         news (0.3), social (0.4), blog (0.6), api (0.7),
         unknown (0.8), reference (1.0), docs (1.2)
@@ -140,8 +196,7 @@ def _compute_domain_category(url: str) -> str:
         return "unknown"
 
     # Strip leading www. for consistent matching
-    if netloc.startswith("www."):
-        netloc = netloc[4:]
+    netloc = netloc.removeprefix("www.")
 
     # Prefix-based: docs./learn./help./api./developer.
     if netloc.startswith(("docs.", "learn.", "help.")):
@@ -195,7 +250,7 @@ def _compute_retention_score(payload: dict) -> float:
     if raw_date:
         try:
             last_indexed = datetime.datetime.fromisoformat(raw_date)
-            days_since = (datetime.datetime.now(datetime.timezone.utc) - last_indexed).days
+            days_since = (datetime.datetime.now(datetime.UTC) - last_indexed).days
             days_since = max(0, days_since)
             recency_factor = math.exp(-days_since / _RECENCY_HALF_LIFE_DAYS)
             recency_factor = max(0.1, min(1.0, recency_factor))
@@ -215,17 +270,12 @@ def _compute_retention_score(payload: dict) -> float:
 
 # ── Model helpers ─────────────────────────────────────────────────
 
+
 def _get_embed_model() -> SentenceTransformer:
-    global _embed_model
-    if _embed_model is None:
-        _embed_model = SentenceTransformer(EMBED_MODEL_NAME)
     return _embed_model
 
 
 def _get_rerank_model() -> CrossEncoder:
-    global _rerank_model
-    if _rerank_model is None:
-        _rerank_model = CrossEncoder(RERANK_MODEL_NAME)
     return _rerank_model
 
 
@@ -245,7 +295,7 @@ def _named_vector_name(model_name: str) -> str:
 
 def _now_iso() -> str:
     """Return current UTC timestamp as ISO 8601 string."""
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+    return datetime.datetime.now(datetime.UTC).isoformat()
 
 
 async def _ensure_qdrant() -> QdrantClient:
@@ -270,7 +320,9 @@ async def _ensure_qdrant() -> QdrantClient:
                 )
                 logger.info(
                     "Created Qdrant collection '%s' with named vector '%s' (dim=%d)",
-                    COLLECTION_NAME, nv_name, EMBED_DIM,
+                    COLLECTION_NAME,
+                    nv_name,
+                    EMBED_DIM,
                 )
             else:
                 # Validate that the active named vector exists in the collection
@@ -283,7 +335,8 @@ async def _ensure_qdrant() -> QdrantClient:
                         logger.info(
                             "Legacy collection detected (no named vectors). "
                             "Migrating... deleting and recreating '%s' with named vector '%s'.",
-                            COLLECTION_NAME, nv_name,
+                            COLLECTION_NAME,
+                            nv_name,
                         )
                         # Qdrant cannot add named vectors post-creation. Delete and recreate.
                         _qdrant.delete_collection(COLLECTION_NAME)
@@ -296,13 +349,18 @@ async def _ensure_qdrant() -> QdrantClient:
                                 ),
                             },
                         )
-                        logger.info("Recreated '%s' with named vector '%s'", COLLECTION_NAME, nv_name)
+                        logger.info(
+                            "Recreated '%s' with named vector '%s'",
+                            COLLECTION_NAME,
+                            nv_name,
+                        )
                 elif not isinstance(configured_vectors, dict):
                     # Flat vector config — migrate to named vectors
                     nv_name = _named_vector_name(EMBED_MODEL_NAME)
                     logger.info(
                         "Legacy flat-vector collection detected. "
-                        "Migrating to named vector '%s'...", nv_name,
+                        "Migrating to named vector '%s'...",
+                        nv_name,
                     )
                     _qdrant.delete_collection(COLLECTION_NAME)
                     _qdrant.create_collection(
@@ -314,7 +372,11 @@ async def _ensure_qdrant() -> QdrantClient:
                             ),
                         },
                     )
-                    logger.info("Recreated '%s' with named vector '%s'", COLLECTION_NAME, nv_name)
+                    logger.info(
+                        "Recreated '%s' with named vector '%s'",
+                        COLLECTION_NAME,
+                        nv_name,
+                    )
             _qdrant_ready = True
         except Exception as e:
             logger.error("Qdrant init failed: %s", e)
@@ -323,6 +385,7 @@ async def _ensure_qdrant() -> QdrantClient:
 
 
 # ── Scoring-based eviction (Phase 3) ──────────────────────────────
+
 
 async def _evict_if_needed(qdrant: QdrantClient):
     """Scoring-based eviction if the index exceeds MAX_DOCS."""
@@ -335,7 +398,8 @@ async def _evict_if_needed(qdrant: QdrantClient):
 
     logger.info(
         "Index over capacity (%d / %d), scoring eviction candidates...",
-        count, MAX_DOCS,
+        count,
+        MAX_DOCS,
     )
 
     scored_points: list[tuple[float, int]] = []
@@ -381,8 +445,10 @@ async def _evict_if_needed(qdrant: QdrantClient):
             len(to_delete),
             scored_points[0][0] if scored_points else 0,
             scored_points[min(len(scored_points), target_delete) - 1][0]
-            if scored_points else 0,
-            new_count, MAX_DOCS,
+            if scored_points
+            else 0,
+            new_count,
+            MAX_DOCS,
         )
     else:
         logger.info("No eviction candidates found")
@@ -390,15 +456,19 @@ async def _evict_if_needed(qdrant: QdrantClient):
 
 # ── Migration logic ────────────────────────────────────────────────
 
+
 async def _run_backfill(qdrant: QdrantClient, target_name: str, target_dim: int):
     """Background task: scroll all points, re-embed with new model, add named vector.
-    
+
     This runs as an asyncio task and updates _migration state as it progresses.
     """
     global _migration
     logger.info(
         "Migration backfill started: %s (%d) -> %s (%d)",
-        EMBED_MODEL_NAME, EMBED_DIM, target_name, target_dim,
+        EMBED_MODEL_NAME,
+        EMBED_DIM,
+        target_name,
+        target_dim,
     )
 
     # Load the target embedding model
@@ -431,7 +501,9 @@ async def _run_backfill(qdrant: QdrantClient, target_name: str, target_dim: int)
             for point in page:
                 if point.payload is None:
                     continue
-                content = point.payload.get("title", "") + " " + point.payload.get("url", "")
+                content = (
+                    point.payload.get("title", "") + " " + point.payload.get("url", "")
+                )
                 # If we had original content stored, we'd use that. For backfill,
                 # we embed from URL+title as a stopgap. Full re-indexing would
                 # re-scrape the source.
@@ -440,12 +512,14 @@ async def _run_backfill(qdrant: QdrantClient, target_name: str, target_dim: int)
                     # Use a truncated content signal for backfill embedding
                     signal = f"{point.payload.get('title', '')} {point.payload.get('url', '')}"
                     if not signal.strip():
-                        signal = point.payload.get('url', '')
+                        signal = point.payload.get("url", "")
                     embedding = target_model.encode(
                         signal[:2000], normalize_embeddings=True
                     ).tolist()
                 except Exception as e:
-                    logger.warning("Backfill embed failed for point %s: %s", point.id, e)
+                    logger.warning(
+                        "Backfill embed failed for point %s: %s", point.id, e
+                    )
                     continue
 
                 # Update the point: add named vector + update embedding_models list
@@ -487,7 +561,8 @@ async def _run_backfill(qdrant: QdrantClient, target_name: str, target_dim: int)
         _migration["status"] = "dual_write"
         logger.info(
             "Migration backfill complete: %d / %d documents. Entering dual-write phase.",
-            processed, total,
+            processed,
+            total,
         )
 
     except Exception as e:
@@ -497,6 +572,7 @@ async def _run_backfill(qdrant: QdrantClient, target_name: str, target_dim: int)
 
 
 # ── Request/Response models ──────────────────────────────────────
+
 
 class EmbedRequest(BaseModel):
     model: str = "BGE-M3"
@@ -591,6 +667,7 @@ class MigrationStatusResponse(BaseModel):
 
 # ── Payload building ──────────────────────────────────────────────
 
+
 def _build_index_payload(url: str, title: str, existing_payload: dict | None) -> dict:
     """Build enriched payload for a new or updated index entry."""
     now = _now_iso()
@@ -606,7 +683,11 @@ def _build_index_payload(url: str, title: str, existing_payload: dict | None) ->
         embedding_dim = int(existing_payload.get("embedding_dim", EMBED_DIM))
         embedding_models_raw = existing_payload.get("embedding_models", "[]")
         try:
-            embedding_models = json.loads(embedding_models_raw) if isinstance(embedding_models_raw, str) else list(embedding_models_raw)
+            embedding_models = (
+                json.loads(embedding_models_raw)
+                if isinstance(embedding_models_raw, str)
+                else list(embedding_models_raw)
+            )
         except (json.JSONDecodeError, TypeError):
             embedding_models = [_named_vector_name(embedding_model)]
     else:
@@ -638,6 +719,7 @@ def _build_index_payload(url: str, title: str, existing_payload: dict | None) ->
 
 # ── Metrics middleware ──────────────────────────────────────────────
 
+
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
     """Record request count and duration for all endpoints except /metrics."""
@@ -665,14 +747,22 @@ async def metrics_middleware(request: Request, call_next):
 
 # ── Endpoints ────────────────────────────────────────────────────
 
+
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok" if _models_ready else "starting",
+        "models": "loaded" if _models_ready else "loading",
+    }
 
 
 @app.post("/embed", response_model=EmbedResponse)
 async def embed(body: EmbedRequest):
     """Embed one or more texts into normalized vectors."""
+    if not _models_ready:
+        raise HTTPException(
+            503, "Models are still loading — please retry in a few seconds"
+        )
     model = _get_embed_model()
     embed_start = time.time()
     loop = asyncio.get_event_loop()
@@ -692,18 +782,20 @@ async def embed(body: EmbedRequest):
 @app.post("/rerank", response_model=RerankResponse)
 async def rerank(body: RerankRequest):
     """Cross-encode a query against documents, returning top-k."""
+    if not _models_ready:
+        raise HTTPException(
+            503, "Models are still loading — please retry in a few seconds"
+        )
     model = _get_rerank_model()
     pairs = [[body.query, doc] for doc in body.documents]
     scores = model.predict(pairs)
-    indices = np.argsort(scores)[::-1][:body.top_k]
-    results = [
-        RerankResult(index=int(i), score=float(scores[i]))
-        for i in indices
-    ]
+    indices = np.argsort(scores)[::-1][: body.top_k]
+    results = [RerankResult(index=int(i), score=float(scores[i])) for i in indices]
     return RerankResponse(results=results)
 
 
 # ── Phase 2/3/4: Vector Index ────────────────────────────────────
+
 
 @app.post("/index", response_model=IndexResponse, status_code=201)
 async def index_page(body: IndexRequest):
@@ -712,6 +804,10 @@ async def index_page(body: IndexRequest):
     Phase 4: Uses named vectors. During dual-write migration,
     indexes with both the active model and the target model.
     """
+    if not _models_ready:
+        raise HTTPException(
+            503, "Models are still loading — please retry in a few seconds"
+        )
     qdrant = await _ensure_qdrant()
     model = _get_embed_model()
 
@@ -789,6 +885,10 @@ async def index_batch(body: IndexBatchRequest):
     SentenceTransformer call and upserts via Qdrant gRPC batch.
     Best-effort: failure is logged but never propagated.
     """
+    if not _models_ready:
+        raise HTTPException(
+            503, "Models are still loading — please retry in a few seconds"
+        )
     qdrant = await _ensure_qdrant()
     model = _get_embed_model()
 
@@ -838,9 +938,11 @@ async def index_batch(body: IndexBatchRequest):
                     loop = asyncio.get_event_loop()
                     target_embedding = await loop.run_in_executor(
                         None,
-                        lambda: SentenceTransformer(target_name).encode(
-                            page.content[:2000], normalize_embeddings=True
-                        ).tolist(),
+                        lambda: (
+                            SentenceTransformer(target_name)
+                            .encode(page.content[:2000], normalize_embeddings=True)
+                            .tolist()
+                        ),
                     )
                     target_nv = _named_vector_name(target_name)
                     vectors[target_nv] = target_embedding
@@ -850,13 +952,17 @@ async def index_batch(body: IndexBatchRequest):
                             existing_models.append(nv)
                     payload["embedding_models"] = json.dumps(existing_models)
                 except Exception as e:
-                    logger.warning("Batch dual-write embed failed for target model: %s", e)
+                    logger.warning(
+                        "Batch dual-write embed failed for target model: %s", e
+                    )
 
-        points.append(models.PointStruct(
-            id=point_id,
-            vector=vectors,
-            payload=payload,
-        ))
+        points.append(
+            models.PointStruct(
+                id=point_id,
+                vector=vectors,
+                payload=payload,
+            )
+        )
 
     # Single batch upsert via Qdrant gRPC
     qdrant.upsert(collection_name=COLLECTION_NAME, points=points)
@@ -879,6 +985,10 @@ async def search_vector(body: VectorSearchRequest):
     is determined by _get_active_model() — defaults to env var,
     overridable via /migrate/cutover.
     """
+    if not _models_ready:
+        raise HTTPException(
+            503, "Models are still loading — please retry in a few seconds"
+        )
     qdrant = await _ensure_qdrant()
     model = _get_embed_model()
 
@@ -950,11 +1060,14 @@ async def index_stats():
     """Return index size and configuration."""
     qdrant = await _ensure_qdrant()
     count = qdrant.count(COLLECTION_NAME).count
-    METRICS.gauge("groktocrawl_index_docs_total", "Current document count in the vector index").set(value=float(count))
+    METRICS.gauge(
+        "groktocrawl_index_docs_total", "Current document count in the vector index"
+    ).set(value=float(count))
     return IndexStatsResponse(total_docs=count, max_docs=MAX_DOCS)
 
 
 # ── Phase 4: Model info and migration endpoints ──────────────────
+
 
 @app.get("/index/model", response_model=ModelInfoResponse)
 async def index_model():
@@ -989,7 +1102,9 @@ async def migrate_start(body: MigrationStartRequest):
     global _migration_task, _migration
 
     if _migration["status"] != "idle":
-        raise HTTPException(409, f"Migration already in progress: {_migration['status']}")
+        raise HTTPException(
+            409, f"Migration already in progress: {_migration['status']}"
+        )
 
     qdrant = await _ensure_qdrant()
 
@@ -1045,7 +1160,9 @@ async def migrate_cutover():
     global _active_override
 
     if _migration["status"] not in ("dual_write", "backfilling"):
-        raise HTTPException(409, f"Cannot cutover: migration status is '{_migration['status']}'")
+        raise HTTPException(
+            409, f"Cannot cutover: migration status is '{_migration['status']}'"
+        )
 
     if not _migration["target_model"]:
         raise HTTPException(400, "No target model configured")
@@ -1057,14 +1174,15 @@ async def migrate_cutover():
 
     logger.info(
         "Migration cutover: active model switched to '%s' (named vector: '%s')",
-        _migration["target_model"], target_nv,
+        _migration["target_model"],
+        target_nv,
     )
 
     return {
         "status": "cutover",
         "active_named_vector": target_nv,
         "message": f"Queries now using '{target_nv}'. "
-                   f"Update ACTIVE_EMBED_MODEL env var and restart to persist.",
+        f"Update ACTIVE_EMBED_MODEL env var and restart to persist.",
     }
 
 
