@@ -517,6 +517,8 @@ async def search(request: Request, body: SearchRequest):
             "keyword",
             "semantic",
             "hybrid",
+            "vector",
+            "hybrid_vector",
         ):
             from .research import run_rich_search
 
