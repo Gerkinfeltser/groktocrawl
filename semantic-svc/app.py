@@ -45,10 +45,57 @@ from sentence_transformers import CrossEncoder, SentenceTransformer
 logger = logging.getLogger(__name__)
 
 
+# ── TaskTracker (copied from agent-svc; avoids cross-service import) ──
+
+
+class TaskTracker:
+    """Tracks background tasks for graceful shutdown."""
+
+    def __init__(self) -> None:
+        self._tasks: set[asyncio.Task] = set()
+        self._shutdown_event = asyncio.Event()
+
+    def create_background_task(self, coro) -> asyncio.Task:
+        """Create, track, and return a background task."""
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+    @property
+    def shutdown_requested(self) -> bool:
+        return self._shutdown_event.is_set()
+
+    async def shutdown(self, grace_period: float = 5.0) -> None:
+        """Signal shutdown, cancel tracked tasks after grace period."""
+        self._shutdown_event.set()
+        if not self._tasks:
+            return
+
+        logger.info(
+            "Shutting down %d background tasks (grace=%ss)",
+            len(self._tasks),
+            grace_period,
+        )
+
+        _, pending = await asyncio.wait(self._tasks, timeout=grace_period)
+
+        if pending:
+            logger.warning(
+                "Cancelling %d tasks after %ss grace period",
+                len(pending),
+                grace_period,
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load SentenceTransformer and CrossEncoder models at startup."""
     global _embed_model, _rerank_model, _models_ready
+    app.state.task_tracker = TaskTracker()
     logger.info("Loading semantic models (~2.2GB, 2-5s)...")
     loop = asyncio.get_event_loop()
     try:
@@ -65,6 +112,7 @@ async def lifespan(app: FastAPI):
             "Failed to load semantic models — /health will report 'starting'"
         )
     yield
+    await app.state.task_tracker.shutdown(grace_period=5.0)
     _models_ready = False
     _embed_model = None
     _rerank_model = None
@@ -1123,7 +1171,7 @@ async def migrate_start(body: MigrationStartRequest):
         "completed_at": "",
     }
 
-    _migration_task = asyncio.create_task(
+    _migration_task = app.state.task_tracker.create_background_task(
         _run_backfill(qdrant, target_model_id, target_dim)
     )
 

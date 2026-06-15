@@ -28,6 +28,7 @@ from .scraper_client import ScraperClient
 from .searxng_client import SearXNGClient
 from .settings import load_settings
 from .store import JobStore
+from .tasks import TaskTracker
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +138,7 @@ def create_app() -> FastAPI:
     app.state.semantic_url = settings.semantic_url
     app.state.rate_limiter = rate_limiter
     app.state.max_searches_per_request = settings.max_searches_per_request
+    app.state.task_tracker = TaskTracker()
 
     # ── Middleware: request_id ───────────────────────────────────
     @app.middleware("http")
@@ -325,6 +327,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def shutdown_event():
+        await app.state.task_tracker.shutdown(grace_period=5.0)
         await app.state.scraper_client.close()
         await app.state.searxng_client.close()
         await app.state.llm_client.close()
