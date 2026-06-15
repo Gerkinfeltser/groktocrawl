@@ -9,7 +9,6 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
 from redis import Redis
-from rq import Queue
 
 from .api import router
 from .auth import (
@@ -103,7 +102,6 @@ def create_app() -> FastAPI:
         f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
     )
     conn = Redis.from_url(redis_url, decode_responses=True)
-    queue = Queue(connection=conn)
     store = JobStore(redis_url)
     scraper_client = ScraperClient(settings.scraper_url)
     searxng_client = SearXNGClient(settings.searxng_url)
@@ -124,7 +122,6 @@ def create_app() -> FastAPI:
 
     # ── App state ───────────────────────────────────────────────
     app.state.redis = conn
-    app.state.queue = queue
     app.state.job_store = store
     app.state.scraper_client = scraper_client
     app.state.searxng_client = searxng_client

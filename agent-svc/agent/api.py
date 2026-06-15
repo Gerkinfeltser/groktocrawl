@@ -5,12 +5,10 @@ Targets Firecrawl v2 API compatibility where possible.
 
 import logging
 from datetime import UTC
-from typing import Any
 
 import httpx
 from bs4 import BeautifulSoup
 from fastapi import APIRouter, Request, Response
-from rq import Queue
 
 from common.url import extract_domain, is_same_origin
 
@@ -83,10 +81,6 @@ def _get_client_ip(request: Request) -> str:
     if request.client:
         return request.client.host
     return "unknown"
-
-
-def _enqueue(queue: Queue, func: str, **kwargs: Any) -> None:
-    queue.enqueue(func, **kwargs)
 
 
 @router.get("/v2/activity", response_model=ActivityResponse)
