@@ -804,6 +804,10 @@ async def index_page(body: IndexRequest):
     Phase 4: Uses named vectors. During dual-write migration,
     indexes with both the active model and the target model.
     """
+    if not _models_ready:
+        raise HTTPException(
+            503, "Models are still loading — please retry in a few seconds"
+        )
     qdrant = await _ensure_qdrant()
     model = _get_embed_model()
 
@@ -881,6 +885,10 @@ async def index_batch(body: IndexBatchRequest):
     SentenceTransformer call and upserts via Qdrant gRPC batch.
     Best-effort: failure is logged but never propagated.
     """
+    if not _models_ready:
+        raise HTTPException(
+            503, "Models are still loading — please retry in a few seconds"
+        )
     qdrant = await _ensure_qdrant()
     model = _get_embed_model()
 
@@ -977,6 +985,10 @@ async def search_vector(body: VectorSearchRequest):
     is determined by _get_active_model() — defaults to env var,
     overridable via /migrate/cutover.
     """
+    if not _models_ready:
+        raise HTTPException(
+            503, "Models are still loading — please retry in a few seconds"
+        )
     qdrant = await _ensure_qdrant()
     model = _get_embed_model()
 

@@ -134,5 +134,5 @@ flowchart TD
 
 ## Links
 
-- Follows [ADR-0001](0001-adapter-registry-pre-pipeline-hook.md) (lifespan pattern from scraper-svc)
+- Follows the lifespan pattern established in scraper-svc (`scraper-svc/scraper/app.py` lines 23-43) — FastAPI `lifespan` handler loading adapters and Valkey at startup
 - Relates to [ADR-0029](0029-service-level-metrics-for-semantic-svc.md) (referenced `/health` before it was meaningful)
