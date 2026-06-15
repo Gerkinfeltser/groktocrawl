@@ -1,5 +1,6 @@
 """Worker entrypoint and processing functions for GroktoCrawl jobs."""
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -103,9 +104,14 @@ async def _process_crawl_async(
             og = metadata.get("og") or {}
             meta = metadata.get("meta") or {}
             title = og.get("title") or meta.get("title") or data.get("title", "")
-            task_tracker.create_background_task(
-                _index_page_async(url, title, data.get("markdown", "")[:2000])
-            )
+            if task_tracker is not None:
+                task_tracker.create_background_task(
+                    _index_page_async(url, title, data.get("markdown", "")[:2000])
+                )
+            else:
+                asyncio.create_task(
+                    _index_page_async(url, title, data.get("markdown", "")[:2000])
+                )
         payload = {"completed": len(pages), "total": 1, "pages": pages}
         store.complete_job(job_id, payload)
         await deliver_webhook(webhook_config, "completed", job_id, payload)
@@ -168,7 +174,10 @@ async def _process_batch_scrape_async(
                     }
                 )
         if _index_batch:
-            task_tracker.create_background_task(_index_batch_async(_index_batch))
+            if task_tracker is not None:
+                task_tracker.create_background_task(_index_batch_async(_index_batch))
+            else:
+                asyncio.create_task(_index_batch_async(_index_batch))
         payload = {"completed": len(pages), "total": len(urls), "pages": pages}
         store.complete_job(job_id, payload)
         await deliver_webhook(webhook_config, "completed", job_id, payload)
