@@ -517,11 +517,16 @@ async def search(request: Request, body: SearchRequest):
             "keyword",
             "semantic",
             "hybrid",
+            "vector",
+            "hybrid_vector",
         ):
             from .research import run_rich_search
 
             output = await run_rich_search(
-                search_results=results,
+                search_results=[
+                    {"url": r.url, "title": r.title, "description": r.description}
+                    for r in search_results
+                ],
                 query=body.query,
                 limit=body.limit,
                 output_schema=body.output_schema,
