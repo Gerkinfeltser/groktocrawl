@@ -11,10 +11,8 @@ import json
 import logging
 import os
 import re
-import socket
 import time
 from dataclasses import dataclass
-from ipaddress import ip_address, ip_network
 
 import httpx
 
@@ -881,44 +879,6 @@ async def fetch_via_content_negotiation(
         logger.debug("Tier 2 miss for %s: %s", url, e)
     return None
 
-
-# ── Private IP / SSRF protection ─────────────────────────────────
-
-_PRIVATE_NETWORKS = [
-    ip_network("10.0.0.0/8"),
-    ip_network("172.16.0.0/12"),
-    ip_network("192.168.0.0/16"),
-    ip_network("127.0.0.0/8"),
-    ip_network("::1/128"),
-    ip_network("169.254.0.0/16"),
-    ip_network("0.0.0.0/8"),
-    ip_network("100.64.0.0/10"),
-    ip_network("198.18.0.0/15"),
-    ip_network("240.0.0.0/4"),
-]
-
-_METADATA_IPS = {
-    ip_address("169.254.169.254"),
-    ip_address("fd00:ec2::254"),
-}
-
-_PRIVATE_HOSTNAME_SUFFIXES = [
-    ".docker.internal",
-]
-
-
-def _resolve_to_ips(hostname: str) -> list:
-    try:
-        addrinfo = socket.getaddrinfo(hostname, None)
-        ips = set()
-        for _family, _, _, _, sockaddr in addrinfo:
-            try:
-                ips.add(ip_address(sockaddr[0]))
-            except ValueError:
-                continue
-        return list(ips)
-    except socket.gaierror:
-        return []
 
 
 def _is_private_url(url: str) -> tuple[bool, str]:

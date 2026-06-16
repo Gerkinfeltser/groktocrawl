@@ -28,7 +28,7 @@ from .cache import (
     _make_download_payload,
     _set_cache,
 )
-from .dns_guard import _is_private_url
+from common.url import is_private_host
 from .extract import assess_quality
 from .metadata import extract_all_metadata
 from .proxy import (
@@ -139,9 +139,8 @@ async def _playwright_fetch_with_proxy(
         page = await context.new_page()
         try:
             # Security: reject private/internal destination URLs
-            is_private, reason = _is_private_url(url)
-            if is_private:
-                logger.warning("Blocked navigation to private URL %s: %s", url, reason)
+            if is_private_host(url):
+                logger.warning("Blocked navigation to private URL %s", url)
                 return None
 
             # Inject cached Cloudflare clearance cookies before navigation
