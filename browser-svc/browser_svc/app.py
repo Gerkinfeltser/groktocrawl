@@ -7,17 +7,15 @@ Each session is an isolated Chromium instance with its own context.
 import asyncio
 import json
 import logging
-import socket
 import time
 import uuid
-from ipaddress import ip_address, ip_network
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from playwright.async_api import async_playwright
 from pydantic import BaseModel
 
-from common.url import extract_domain
+from common.url import extract_domain, is_private_host
 
 from .settings import load_settings
 
@@ -123,62 +121,6 @@ def _is_bot_challenge(title: str, url: str) -> bool:
     if "ddos-guard" in url.lower() or "/.well-known/ddos-guard" in url.lower():
         return True
     return False
-
-
-# ── Private IP / SSRF protection ─────────────────────────────────
-
-# Private and special-purpose IP ranges that should never be navigated to
-_PRIVATE_NETWORKS = [
-    ip_network("10.0.0.0/8"),
-    ip_network("172.16.0.0/12"),
-    ip_network("192.168.0.0/16"),
-    ip_network("127.0.0.0/8"),  # loopback
-    ip_network("::1/128"),  # IPv6 loopback
-    ip_network("169.254.0.0/16"),  # link-local
-    ip_network("0.0.0.0/8"),  # "this" network
-    ip_network("100.64.0.0/10"),  # Carrier-grade NAT (RFC 6598)
-    ip_network("198.18.0.0/15"),  # Benchmarking (RFC 2544)
-    ip_network("240.0.0.0/4"),  # Reserved / future use
-]
-
-_METADATA_IPS = {
-    ip_address("169.254.169.254"),  # AWS/GCP/Azure metadata
-    ip_address("fd00:ec2::254"),  # AWS IMDSv2 IPv6
-}
-
-# Docker-internal hostnames that resolve to the host machine
-_PRIVATE_HOSTNAME_SUFFIXES = [
-    ".docker.internal",
-]
-
-
-def _resolve_to_ips(hostname: str) -> list:
-    """Resolve a hostname to all IP addresses (IPv4 and IPv6)."""
-    try:
-        addrinfo = socket.getaddrinfo(hostname, None)
-        ips = set()
-        for family, _, _, _, sockaddr in addrinfo:
-            try:
-                ips.add(ip_address(sockaddr[0]))
-            except ValueError:
-                continue
-        return list(ips)
-    except socket.gaierror:
-        return []
-
-
-def _is_private_url(url: str) -> tuple[bool, str]:
-    """Check if a URL targets a private/internal IP or hostname.
-
-    Returns (is_private, reason) tuple.
-
-    Delegates to the shared ``common.url.is_private_host``
-    for the actual check, then maps the boolean result back to the
-    ``(bool, str)`` tuple format.
-    """
-    from common.url import is_private_host as _shared_is_private
-
-    return (True, "Private or internal URL") if _shared_is_private(url) else (False, "")
 
 
 app = FastAPI(title="GroktoCrawl Browser Service", version="0.1.0")
@@ -352,11 +294,10 @@ async def execute_action(session_id: str, req: BrowserExecuteRequest):
                     status_code=400, detail="url required for navigate action"
                 )
             # Security: reject private/internal destination URLs
-            is_private, reason = _is_private_url(req.url)
-            if is_private:
+            if is_private_host(req.url):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Navigation to private or internal destination blocked: {reason}",
+                    detail="Navigation to private or internal destination blocked",
                 )
             # Inject stored Cloudflare clearance cookies before navigation
             redis_client = getattr(app.state, "redis", None)
