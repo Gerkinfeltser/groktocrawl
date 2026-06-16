@@ -84,6 +84,64 @@ Rules:
   in clean markdown with structure (tables, lists, sections as appropriate)."""
 
 
+async def _run_research_discover_and_scrape(
+    prompt: str,
+    urls: list[str] | None,
+    searxng: SearXNGClient,
+    scraper: ScraperClient,
+    max_searches_per_request: int = 5,
+) -> dict:
+    """Search → filter → scrape → context-building phase for research.
+
+    Shared by ``run_research`` and ``run_research_stream``. Uses
+    ``_scrape_urls()`` for batch scraping; the stream variant yields
+    progress events from the returned source_details after the call.
+    """
+    target_urls = list(urls) if urls else []
+    search_results: list[dict] = []
+    if not target_urls:
+        logger.info("No URLs provided. Searching for: %s", prompt)
+        search_results, _health = await searxng.search(prompt, limit=10)
+        target_urls = [r["url"] for r in search_results if r.get("url")]
+
+    preferred = [u for u in target_urls if not _is_video_platform_url(u)]
+    deprioritized = [u for u in target_urls if _is_video_platform_url(u)]
+
+    documents, source_details = await _scrape_urls(
+        preferred,
+        scraper,
+        min_sources=3,
+        max_attempts=len(preferred) or 10,
+    )
+    logger.info(
+        "run_research: scraped %d docs from %d preferred URLs (attempts=%d)",
+        len(documents),
+        len(preferred),
+        len(preferred) or 10,
+    )
+
+    if len(documents) < 3 and deprioritized:
+        remaining = 3 - len(documents)
+        extra_docs, extra_details = await _scrape_urls(
+            deprioritized,
+            scraper,
+            min_sources=remaining,
+            max_attempts=remaining * 2,
+        )
+        documents.extend(extra_docs)
+        source_details.extend(extra_details)
+
+    context = "\n\n---\n\n".join(documents) if documents else ""
+
+    return {
+        "search_results": search_results,
+        "target_urls": target_urls,
+        "documents": documents,
+        "source_details": source_details,
+        "context": context,
+    }
+
+
 async def run_research(
     prompt: str,
     urls: list[str] | None = None,
@@ -107,41 +165,14 @@ async def run_research(
     llm = LLMClient(llm_base_url, llm_api_key, effective_model)
 
     try:
-        target_urls = list(urls) if urls else []
-        if not target_urls:
-            logger.info("No URLs provided. Searching for: %s", prompt)
-            search_results, _health = await searxng.search(prompt, limit=10)
-            target_urls = [r["url"] for r in search_results if r.get("url")]
-
-        preferred = [u for u in target_urls if not _is_video_platform_url(u)]
-        deprioritized = [u for u in target_urls if _is_video_platform_url(u)]
-
-        documents, source_details = await _scrape_urls(
-            preferred,
-            scraper,
-            min_sources=3,
-            max_attempts=len(preferred) or 10,
-        )
-        logger.info(
-            "run_research: scraped %d docs from %d preferred URLs (attempts=%d)",
-            len(documents),
-            len(preferred),
-            len(preferred) or 10,
+        discovered = await _run_research_discover_and_scrape(
+            prompt=prompt,
+            urls=urls,
+            searxng=searxng,
+            scraper=scraper,
         )
 
-        if len(documents) < 3 and deprioritized:
-            remaining = 3 - len(documents)
-            extra_docs, extra_details = await _scrape_urls(
-                deprioritized,
-                scraper,
-                min_sources=remaining,
-                max_attempts=remaining * 2,
-            )
-            documents.extend(extra_docs)
-            source_details.extend(extra_details)
-
-        context = "\n\n---\n\n".join(documents) if documents else ""
-
+        context = discovered["context"]
         if not context:
             return {
                 "result": "I was unable to find or scrape any relevant web pages to answer your question.",
@@ -158,8 +189,8 @@ async def run_research(
         _validate_json_if_schema(answer, schema)
         return {
             "result": answer,
-            "sources": [s["url"] for s in source_details],
-            "source_details": source_details,
+            "sources": [s["url"] for s in discovered["source_details"]],
+            "source_details": discovered["source_details"],
         }
     finally:
         await searxng.close()
@@ -205,15 +236,17 @@ async def run_research_stream(
     llm = LLMClient(llm_base_url, llm_api_key, effective_model)
 
     try:
-        target_urls = list(urls) if urls else []
-        search_results = []
-        if not target_urls:
-            logger.info("Research stream: searching for: %s", prompt)
-            search_results, _health = await searxng.search(prompt, limit=10)
-            target_urls = [r["url"] for r in search_results if r.get("url")]
+        discovered = await _run_research_discover_and_scrape(
+            prompt=prompt,
+            urls=urls,
+            searxng=searxng,
+            scraper=scraper,
+        )
 
-        preferred = [u for u in target_urls if not _is_video_platform_url(u)]
-        deprioritized = [u for u in target_urls if _is_video_platform_url(u)]
+        search_results = discovered["search_results"]
+        discovered["documents"]
+        source_details = discovered["source_details"]
+        context = discovered["context"]
 
         # Yield pending sources for progress visibility
         pending_sources = (
@@ -231,97 +264,14 @@ async def run_research_stream(
         )
         yield {"type": "sources_pending", "sources": pending_sources}
 
-        # Phase 1: Scrape with progress events
-        logger.info("Research stream: scraping URLs")
-        documents: list[str] = []
-        source_details: list[dict] = []
-        import asyncio
-
-        semaphore = asyncio.Semaphore(2)
-        url_timeout = 20
-
-        async def _scrape_one(url: str) -> tuple[str | None, dict | None]:
-            async with semaphore:
-                try:
-                    result = await asyncio.wait_for(
-                        scraper.scrape(url), timeout=url_timeout
-                    )
-                    if result.get("success") and result.get("data", {}).get("markdown"):
-                        md = result["data"]["markdown"]
-                        domain = extract_domain(url)
-                        doc = f"Source: {url} (domain: {domain})\n\n{md[:8000]}"
-                        src = {
-                            "url": url,
-                            "source": result["data"].get("source", "unknown"),
-                            "char_count": len(md),
-                        }
-                        return doc, src
-                    else:
-                        logger.warning(
-                            "Failed to scrape %s: %s", url, result.get("error")
-                        )
-                        return None, None
-                except TimeoutError:
-                    logger.warning("Timeout scraping %s after %ss", url, url_timeout)
-                    return None, None
-                except Exception as e:
-                    logger.warning("Error scraping %s: %s", url, e)
-                    return None, None
-
-        pending = list(preferred)
-        tasks: set[asyncio.Task] = set()
-        task_to_url: dict[asyncio.Task, str] = {}
-
-        while pending or tasks:
-            while len(tasks) < 2 and pending:
-                url = pending.pop(0)
-                task = asyncio.create_task(_scrape_one(url))
-                task_to_url[task] = url
-                tasks.add(task)
-
-            if not tasks:
-                break
-
-            done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-
-            for task in done:
-                doc, src = task.result()
-                url = task_to_url.pop(task, "")
-                if doc and src:
-                    documents.append(doc)
-                    source_details.append(src)
-                    yield {
-                        "type": "source_scraped",
-                        "url": src["url"],
-                        "source": src["source"],
-                        "chars": src["char_count"],
-                    }
-
-        # Fall back to deprioritized (video-platform) URLs if we don't have enough sources
-        if len(documents) < 3 and deprioritized:
-            remaining = 3 - len(documents)
-            logger.info(
-                "Research stream: %d/3 from preferred sources, falling back to %d video-platform URLs",
-                len(documents),
-                min(remaining, len(deprioritized)),
-            )
-            extra_docs, extra_details = await _scrape_urls(
-                deprioritized,
-                scraper,
-                min_sources=remaining,
-                max_attempts=remaining * 2,
-            )
-            for extra_doc, extra_src in zip(extra_docs, extra_details, strict=False):
-                documents.append(extra_doc)
-                source_details.append(extra_src)
-                yield {
-                    "type": "source_scraped",
-                    "url": extra_src["url"],
-                    "source": extra_src["source"],
-                    "chars": extra_src["char_count"],
-                }
-
-        context = "\n\n---\n\n".join(documents) if documents else ""
+        # Yield scraped source progress events
+        for src in source_details:
+            yield {
+                "type": "source_scraped",
+                "url": src["url"],
+                "source": src["source"],
+                "chars": src["char_count"],
+            }
 
         if not context:
             elapsed = int((time.monotonic() - start) * 1000)
@@ -608,9 +558,9 @@ async def _rerank_answer_sources(
                     contents.append("")
 
             if retrieval_mode == "semantic":
-                embeddings = await semantic.embed([query] + contents)
+                embeddings = await semantic.embed([query, *contents])
                 similarities = [
-                    sum(a * b for a, b in zip(embeddings[0], emb))
+                    sum(a * b for a, b in zip(embeddings[0], emb, strict=False))
                     for emb in embeddings[1:]
                 ]
                 ranked = sorted(
@@ -657,6 +607,110 @@ async def _rerank_answer_sources(
         await scraper.close()
 
 
+async def _run_answer_discover_and_scrape(
+    query: str,
+    num_sources: int,
+    retrieval_mode: str,
+    searxng: SearXNGClient,
+    scraper: ScraperClient,
+    semantic_url: str,
+    llm_base_url: str,
+    llm_api_key: str,
+    llm_model: str,
+    requested_model: str | None,
+    max_searches_per_request: int = 5,
+) -> dict:
+    """Search → rerank → filter → scrape → context-building for answer.
+
+    Shared by ``run_answer`` and ``run_answer_stream``. Returns all
+    intermediate data needed by both callers to proceed to LLM synthesis
+    and citation parsing.
+    """
+    search_results: list[dict] = []
+    logger.info("Answer: searching for: %s", query)
+    search_results, _health = await searxng.search(query, limit=num_sources * 2)
+
+    if retrieval_mode != "keyword":
+        search_results = await _rerank_answer_sources(
+            search_results,
+            query,
+            retrieval_mode,
+            semantic_url,
+            scraper.base_url,
+            num_sources,
+        )
+
+    target_urls = [r["url"] for r in search_results if r.get("url")]
+
+    # Step 2: Scrape (prefer text sources, use video platforms as fallback)
+    preferred = [u for u in target_urls if not _is_video_platform_url(u)]
+    deprioritized = [u for u in target_urls if _is_video_platform_url(u)]
+
+    if deprioritized:
+        logger.info(
+            "Answer: %d preferred + %d video-platform URLs (deprioritized)",
+            len(preferred),
+            len(deprioritized),
+        )
+
+    documents, source_details = await _scrape_urls(
+        preferred,
+        scraper,
+        min_sources=num_sources,
+        max_attempts=num_sources * 2,
+    )
+
+    if len(documents) < num_sources and deprioritized:
+        logger.info(
+            "Answer: %d/%d from preferred sources, falling back to video-platform URLs",
+            len(documents),
+            num_sources,
+        )
+        remaining = num_sources - len(documents)
+        more_docs, more_details = await _scrape_urls(
+            deprioritized,
+            scraper,
+            min_sources=remaining,
+            max_attempts=remaining * 2,
+        )
+        documents.extend(more_docs)
+        source_details.extend(more_details)
+
+    # Step 3: Build context with source markers
+    context_parts = []
+    for i, (doc, detail) in enumerate(
+        zip(documents, source_details, strict=False), start=1
+    ):
+        url = detail["url"]
+        title = next(
+            (r.get("title", "") for r in search_results if r.get("url") == url), ""
+        )
+        context_parts.append(f"[{i}] Source: {url}\nTitle: {title}\n\n{doc}")
+
+    context = "\n\n---\n\n".join(context_parts) if context_parts else ""
+
+    # Step 4: Build source_map for citation resolution
+    source_map: list[dict[str, str]] = []
+    for r in search_results:
+        if r.get("url") in [s["url"] for s in source_details]:
+            source_map.append(
+                {
+                    "url": r["url"],
+                    "title": r.get("title", ""),
+                    "relevance": r.get("description", ""),
+                }
+            )
+
+    return {
+        "search_results": search_results,
+        "context_parts": context_parts,
+        "documents": documents,
+        "source_details": source_details,
+        "context": context,
+        "source_map": source_map,
+    }
+
+
 async def run_answer(
     query: str,
     num_sources: int = 5,
@@ -690,66 +744,21 @@ async def run_answer(
     llm = LLMClient(llm_base_url, llm_api_key, effective_model)
 
     try:
-        # Step 1: Search (fetch extra results to allow for scrape failures)
-        logger.info("Answer: searching for: %s", query)
-        search_results, _health = await searxng.search(query, limit=num_sources * 2)
-
-        if retrieval_mode != "keyword":
-            search_results = await _rerank_answer_sources(
-                search_results,
-                query,
-                retrieval_mode,
-                semantic_url,
-                scraper_url,
-                num_sources,
-            )
-
-        target_urls = [r["url"] for r in search_results if r.get("url")]
-
-        # Step 2: Scrape (prefer text sources, use video platforms as fallback)
-        preferred = [u for u in target_urls if not _is_video_platform_url(u)]
-        deprioritized = [u for u in target_urls if _is_video_platform_url(u)]
-
-        if deprioritized:
-            logger.info(
-                "Answer: %d preferred + %d video-platform URLs (deprioritized)",
-                len(preferred),
-                len(deprioritized),
-            )
-
-        documents, source_details = await _scrape_urls(
-            preferred,
-            scraper,
-            min_sources=num_sources,
-            max_attempts=num_sources * 2,
+        discovered = await _run_answer_discover_and_scrape(
+            query=query,
+            num_sources=num_sources,
+            retrieval_mode=retrieval_mode,
+            searxng=searxng,
+            scraper=scraper,
+            semantic_url=semantic_url,
+            llm_base_url=llm_base_url,
+            llm_api_key=llm_api_key,
+            llm_model=llm_model,
+            requested_model=requested_model,
         )
 
-        if len(documents) < num_sources and deprioritized:
-            logger.info(
-                "Answer: %d/%d from preferred sources, falling back to video-platform URLs",
-                len(documents),
-                num_sources,
-            )
-            remaining = num_sources - len(documents)
-            more_docs, more_details = await _scrape_urls(
-                deprioritized,
-                scraper,
-                min_sources=remaining,
-                max_attempts=remaining * 2,
-            )
-            documents.extend(more_docs)
-            source_details.extend(more_details)
-
-        # Step 3: Build context with source markers
-        context_parts = []
-        for i, (doc, detail) in enumerate(zip(documents, source_details), start=1):
-            url = detail["url"]
-            title = next(
-                (r.get("title", "") for r in search_results if r.get("url") == url), ""
-            )
-            context_parts.append(f"[{i}] Source: {url}\nTitle: {title}\n\n{doc}")
-
-        context = "\n\n---\n\n".join(context_parts) if context_parts else ""
+        context = discovered["context"]
+        source_map = discovered["source_map"]
 
         if not context:
             elapsed = int((time.monotonic() - start) * 1000)
@@ -761,19 +770,7 @@ async def run_answer(
                 "latency_ms": elapsed,
             }
 
-        # Step 4: Build source_map for citation resolution
-        source_map: list[dict[str, str]] = []
-        for r in search_results:
-            if r.get("url") in [s["url"] for s in source_details]:
-                source_map.append(
-                    {
-                        "url": r["url"],
-                        "title": r.get("title", ""),
-                        "relevance": r.get("description", ""),
-                    }
-                )
-
-        # Step 5: Call LLM
+        # Call LLM
         user_prompt = (
             f"Answer the following question using ONLY the sources provided above.\n\n"
             f"Question: {query}\n\n"
@@ -785,7 +782,7 @@ async def run_answer(
             context=context,
         )
 
-        # Step 6: Parse citations [N] from the answer
+        # Parse citations [N] from the answer
         citations: list[dict] = []
         seen_indices: set[int] = set()
         import re
@@ -911,7 +908,9 @@ async def run_answer_stream(
         # Step 3: Build context
         context_parts = []
         source_map: list[dict[str, str]] = []
-        for i, (doc, detail) in enumerate(zip(documents, source_details), start=1):
+        for i, (doc, detail) in enumerate(
+            zip(documents, source_details, strict=False), start=1
+        ):
             url = detail["url"]
             title = next(
                 (r.get("title", "") for r in search_results if r.get("url") == url), ""

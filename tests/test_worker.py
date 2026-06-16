@@ -28,7 +28,12 @@ class TestProcessAgentAsync:
             patch("agent.worker.run_research", mock_run_research),
             patch("agent.worker.deliver_webhook", mock_deliver_webhook),
             patch("agent.worker.METRICS", mock_metrics),
-            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey", valkey_port=6379, valkey_db=0
+                ),
+            ),
         ):
             await _process_agent_async(
                 job_id="test-job-1",
@@ -67,7 +72,12 @@ class TestProcessAgentAsync:
             patch("agent.worker.run_research", mock_run_research),
             patch("agent.worker.deliver_webhook", mock_deliver_webhook),
             patch("agent.worker.METRICS", mock_metrics),
-            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey", valkey_port=6379, valkey_db=0
+                ),
+            ),
         ):
             await _process_agent_async(
                 job_id="test-job-fail",
@@ -105,7 +115,12 @@ class TestProcessAgentAsync:
             patch("agent.worker.run_research", mock_run_research),
             patch("agent.worker.deliver_webhook", mock_deliver_webhook),
             patch("agent.worker.METRICS", mock_metrics),
-            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey", valkey_port=6379, valkey_db=0
+                ),
+            ),
         ):
             await _process_agent_async(
                 job_id="test-job-url",
@@ -153,7 +168,12 @@ class TestProcessCrawlAsync:
             patch("agent.worker.ScraperClient", return_value=mock_scraper_instance),
             patch("agent.worker.deliver_webhook", mock_deliver_webhook),
             patch("agent.worker.METRICS", mock_metrics),
-            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey", valkey_port=6379, valkey_db=0
+                ),
+            ),
             patch("agent.worker._index_page_async", AsyncMock()),
         ):
             await _process_crawl_async(
@@ -196,7 +216,12 @@ class TestProcessCrawlAsync:
             patch("agent.worker.ScraperClient", return_value=mock_scraper_instance),
             patch("agent.worker.deliver_webhook", mock_deliver_webhook),
             patch("agent.worker.METRICS", mock_metrics),
-            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey", valkey_port=6379, valkey_db=0
+                ),
+            ),
         ):
             await _process_crawl_async(
                 job_id="crawl-fail",
@@ -237,7 +262,12 @@ class TestProcessCrawlAsync:
             patch("agent.worker.ScraperClient", return_value=mock_scraper_instance),
             patch("agent.worker.deliver_webhook", mock_deliver_webhook),
             patch("agent.worker.METRICS", mock_metrics),
-            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey", valkey_port=6379, valkey_db=0
+                ),
+            ),
             patch("agent.worker._index_page_async", AsyncMock()),
         ):
             await _process_crawl_async(
@@ -291,7 +321,12 @@ class TestProcessBatchScrapeAsync:
             patch("agent.worker.ScraperClient", return_value=mock_scraper_instance),
             patch("agent.worker.deliver_webhook", mock_deliver_webhook),
             patch("agent.worker.METRICS", mock_metrics),
-            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey", valkey_port=6379, valkey_db=0
+                ),
+            ),
             patch("agent.worker._index_batch_async", mock_index_batch),
         ):
             await _process_batch_scrape_async(
@@ -345,7 +380,12 @@ class TestProcessBatchScrapeAsync:
             patch("agent.worker.ScraperClient", return_value=mock_scraper_instance),
             patch("agent.worker.deliver_webhook", mock_deliver_webhook),
             patch("agent.worker.METRICS", mock_metrics),
-            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey", valkey_port=6379, valkey_db=0
+                ),
+            ),
         ):
             await _process_batch_scrape_async(
                 job_id="batch-partial",
@@ -384,7 +424,12 @@ class TestProcessBatchScrapeAsync:
             patch("agent.worker.ScraperClient", return_value=mock_scraper_instance),
             patch("agent.worker.deliver_webhook", mock_deliver_webhook),
             patch("agent.worker.METRICS", mock_metrics),
-            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey", valkey_port=6379, valkey_db=0
+                ),
+            ),
         ):
             await _process_batch_scrape_async(
                 job_id="batch-fail",
@@ -418,7 +463,12 @@ class TestProcessExtractAsync:
             patch("agent.worker.run_extract", mock_run_extract),
             patch("agent.worker.deliver_webhook", mock_deliver_webhook),
             patch("agent.worker.METRICS", mock_metrics),
-            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey", valkey_port=6379, valkey_db=0
+                ),
+            ),
         ):
             await _process_extract_async(
                 job_id="extract-1",
@@ -453,7 +503,12 @@ class TestProcessExtractAsync:
             patch("agent.worker.run_extract", mock_run_extract),
             patch("agent.worker.deliver_webhook", mock_deliver_webhook),
             patch("agent.worker.METRICS", mock_metrics),
-            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey", valkey_port=6379, valkey_db=0
+                ),
+            ),
         ):
             await _process_extract_async(
                 job_id="extract-fail",
@@ -497,7 +552,12 @@ class TestProcessLlmstxtAsync:
             patch("agent.llmstxt.generate_llmstxt", mock_generate_llmstxt),
             patch("agent.worker.deliver_webhook", mock_deliver_webhook),
             patch("agent.worker.METRICS", mock_metrics),
-            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey", valkey_port=6379, valkey_db=0
+                ),
+            ),
         ):
             await _process_llmstxt_async(
                 job_id="llmstxt-1",
@@ -529,7 +589,12 @@ class TestProcessLlmstxtAsync:
             patch("agent.llmstxt.generate_llmstxt", mock_generate_llmstxt),
             patch("agent.worker.deliver_webhook", mock_deliver_webhook),
             patch("agent.worker.METRICS", mock_metrics),
-            patch("agent.worker.get_env", return_value="redis://valkey:6379/0"),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey", valkey_port=6379, valkey_db=0
+                ),
+            ),
         ):
             await _process_llmstxt_async(
                 job_id="llmstxt-fail",
@@ -561,7 +626,9 @@ class TestIndexPageAsync:
             ),
             patch(
                 "agent.worker.load_settings",
-                return_value=_settings_mock,
+                return_value=MagicMock(
+                    valkey_host="valkey", valkey_port=6379, valkey_db=0
+                ),
             ),
         ):
             await _index_page_async(
@@ -597,7 +664,9 @@ class TestIndexPageAsync:
             ),
             patch(
                 "agent.worker.load_settings",
-                return_value=_settings_mock,
+                return_value=MagicMock(
+                    valkey_host="valkey", valkey_port=6379, valkey_db=0
+                ),
             ),
         ):
             # Should not raise
@@ -628,7 +697,9 @@ class TestIndexPageAsync:
             ),
             patch(
                 "agent.worker.load_settings",
-                return_value=_settings_mock,
+                return_value=MagicMock(
+                    valkey_host="valkey", valkey_port=6379, valkey_db=0
+                ),
             ),
         ):
             # Must not raise — fire-and-forget
@@ -675,7 +746,9 @@ class TestIndexBatchAsync:
             ),
             patch(
                 "agent.worker.load_settings",
-                return_value=_settings_mock,
+                return_value=MagicMock(
+                    valkey_host="valkey", valkey_port=6379, valkey_db=0
+                ),
             ),
         ):
             await _index_batch_async(pages)
@@ -705,7 +778,9 @@ class TestIndexBatchAsync:
             ),
             patch(
                 "agent.worker.load_settings",
-                return_value=_settings_mock,
+                return_value=MagicMock(
+                    valkey_host="valkey", valkey_port=6379, valkey_db=0
+                ),
             ),
         ):
             await _index_batch_async(
