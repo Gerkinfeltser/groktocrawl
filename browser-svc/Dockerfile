@@ -4,6 +4,7 @@ WORKDIR /app
 COPY browser-svc/pyproject.toml .
 RUN pip install --no-cache-dir -e .
 RUN python -m playwright install chromium
+RUN python -m playwright install-deps chromium
 
 COPY browser-svc/browser_svc/ browser_svc/
 COPY common/ common/

@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -e .
 # Install with playwright extras for Tier 3
 RUN pip install --no-cache-dir -e ".[playwright]"
 RUN python -m playwright install chromium
+RUN python -m playwright install-deps chromium
 
 COPY scraper-svc/scraper/ scraper/
 COPY common/ common/
