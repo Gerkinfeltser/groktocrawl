@@ -7,6 +7,8 @@ any remaining tasks get a grace period to finish before cancellation.
 
 import asyncio
 import logging
+from collections.abc import Coroutine
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -21,16 +23,18 @@ class TaskTracker:
     """
 
     def __init__(self) -> None:
-        self._tasks: set[asyncio.Task] = set()
+        self._tasks: set[asyncio.Task[Any]] = set()
         self._shutdown_event = asyncio.Event()
 
-    def create_background_task(self, coro) -> asyncio.Task:
+    def create_background_task(
+        self, coro: Coroutine[Any, Any, Any]
+    ) -> asyncio.Task[Any]:
         """Create, track, and return a background task.
 
         The task is automatically removed from tracking when it
         completes (whether successful, failed, or cancelled).
         """
-        task = asyncio.create_task(coro)
+        task: asyncio.Task[Any] = asyncio.create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task

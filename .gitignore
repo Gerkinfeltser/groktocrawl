@@ -11,3 +11,14 @@ __pypackages__/
 .planning/
 .coverage
 graphify-out/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE configs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

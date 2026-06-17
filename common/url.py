@@ -6,14 +6,21 @@ testable module. Uses only stdlib plus socket I/O for DNS resolution.
 
 import logging
 import socket
-from ipaddress import ip_address, ip_network
+from ipaddress import (
+    IPv4Address,
+    IPv4Network,
+    IPv6Address,
+    IPv6Network,
+    ip_address,
+    ip_network,
+)
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
 # ── Private/hostile network definitions (SSRF guard) ────────────────
 
-_PRIVATE_NETWORKS: list[ip_network] = [
+_PRIVATE_NETWORKS: list[IPv4Network | IPv6Network] = [
     ip_network("10.0.0.0/8"),
     ip_network("172.16.0.0/12"),
     ip_network("192.168.0.0/16"),
@@ -28,7 +35,7 @@ _PRIVATE_NETWORKS: list[ip_network] = [
     ip_network("fe80::/10"),  # IPv6 link-local
 ]
 
-_METADATA_IPS: list[ip_address] = [
+_METADATA_IPS: list[IPv4Address | IPv6Address] = [
     ip_address("169.254.169.254"),  # AWS/GCP/Azure metadata
     ip_address("100.100.100.200"),  # Alibaba Cloud metadata
     ip_address("fd00:ec2::254"),  # AWS IMDSv2 IPv6
@@ -101,11 +108,11 @@ def is_same_origin(url1: str, url2: str) -> bool:
     )
 
 
-def _resolve_to_ips(hostname: str) -> list[ip_address]:
+def _resolve_to_ips(hostname: str) -> list[IPv4Address | IPv6Address]:
     """Resolve a hostname to all IP addresses (IPv4 and IPv6)."""
     try:
         addrinfo = socket.getaddrinfo(hostname, None)
-        ips: set[ip_address] = set()
+        ips: set[IPv4Address | IPv6Address] = set()
         for _family, _stype, _proto, _canonname, sockaddr in addrinfo:
             try:
                 ips.add(ip_address(sockaddr[0]))

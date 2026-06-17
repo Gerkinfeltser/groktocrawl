@@ -34,18 +34,21 @@ from contextlib import asynccontextmanager
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request, Response
-from qdrant_client import QdrantClient, models
-from sentence_transformers import CrossEncoder, SentenceTransformer
-
 from metrics import METRICS
 from models import (
     EmbedRequest,
     EmbedResponse,
     RerankRequest,
-    RerankResult,
     RerankResponse,
+    RerankResult,
 )
+from qdrant_client import QdrantClient, models
+from sentence_transformers import CrossEncoder, SentenceTransformer
 
+from common.logging import setup_logging
+from common.middleware import add_request_id_middleware
+
+setup_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -123,6 +126,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="semantic-svc", lifespan=lifespan)
+
+# ── Instrumentation ──────────────────────────────────────────
+add_request_id_middleware(
+    app,
+    record_metric=lambda labels, val: METRICS.histogram(
+        "http_request_duration_seconds",
+        "HTTP request latency by path and method",
+        ["method", "path"],
+    ).observe(labels, val),
+)
 
 # ── Model config ──────────────────────────────────────────────────
 # Configurable via env vars so embedding models can be swapped
@@ -299,7 +312,7 @@ async def _ensure_qdrant() -> QdrantClient:
             _qdrant_ready = True
         except Exception as e:
             logger.error("Qdrant init failed: %s", e)
-            raise HTTPException(503, "Vector index unavailable")
+            raise HTTPException(503, "Vector index unavailable")  # noqa: B904
     return _qdrant
 
 
@@ -401,9 +414,9 @@ async def metrics():
 # Import routers at module bottom to avoid circular imports.
 # All module-level symbols needed by routers are defined above.
 
-from router_index import router_index  # noqa: E402
-from router_migration import router_migration  # noqa: E402
-from router_search import router_search  # noqa: E402
+from router_index import router_index
+from router_migration import router_migration
+from router_search import router_search
 
 app.include_router(router_index, prefix="/index")
 app.include_router(router_search, prefix="/search")

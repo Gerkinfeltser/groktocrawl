@@ -6,6 +6,7 @@ Ollama, llama.cpp, vLLM, etc.
 
 import json
 import logging
+from collections.abc import AsyncGenerator
 
 import httpx
 
@@ -33,7 +34,7 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         context: str | None = None,
-    ):
+    ) -> AsyncGenerator[dict[str, str], None]:
         """Generate a streaming response from the LLM (SSE).
 
         Yields dicts with keys:
@@ -191,7 +192,7 @@ class LLMClient:
 
             result = resp.json()
             content = result["choices"][0]["message"]["content"]
-            return content
+            return content  # type: ignore[no-any-return]
 
         except Exception as e:
             logger.error("LLM call failed: %s", e)
@@ -232,5 +233,5 @@ class LLMClient:
             logger.error("LLM health check failed: %s", e)
             return False
 
-    async def close(self):
+    async def close(self) -> None:
         await self._client.aclose()

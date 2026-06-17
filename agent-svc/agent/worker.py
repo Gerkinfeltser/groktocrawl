@@ -16,7 +16,7 @@ from .webhook import deliver_webhook
 logger = logging.getLogger(__name__)
 
 
-def _get_worker_settings():
+def _get_worker_settings() -> Any:
     return load_settings()
 
 
@@ -84,7 +84,7 @@ async def _process_agent_async(
         f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
     )
 
-    async def work_fn():
+    async def work_fn() -> dict[str, Any]:
         return await run_research(
             prompt=prompt,
             urls=urls,
@@ -115,7 +115,7 @@ async def _process_crawl_async(
     )
     scraper = ScraperClient(scraper_url)
 
-    async def work_fn():
+    async def work_fn() -> dict[str, Any]:
         result = await scraper.scrape(url)
         pages = []
         if result.get("success"):
@@ -155,7 +155,7 @@ async def _process_batch_scrape_async(
     )
     scraper = ScraperClient(scraper_url)
 
-    async def work_fn():
+    async def work_fn() -> dict[str, Any]:
         pages = []
         _index_batch = []
         for url in urls:
@@ -204,7 +204,7 @@ async def _process_extract_async(
         f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
     )
 
-    async def work_fn():
+    async def work_fn() -> dict[str, Any]:
         return await run_extract(
             urls=urls,
             prompt=prompt,
@@ -230,7 +230,7 @@ async def _process_llmstxt_async(
         f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
     )
 
-    async def work_fn():
+    async def work_fn() -> dict[str, Any]:
         from .llmstxt import generate_llmstxt
 
         return await generate_llmstxt(url, max_pages, scraper_url)

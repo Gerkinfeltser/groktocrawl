@@ -5,6 +5,7 @@ Targets Firecrawl v2 API compatibility where possible.
 
 import logging
 from datetime import UTC
+from typing import Any
 
 import httpx
 from bs4 import BeautifulSoup
@@ -84,7 +85,7 @@ def _get_client_ip(request: Request) -> str:
 
 
 @router.get("/v2/activity", response_model=ActivityResponse)
-async def list_activity(request: Request):
+async def list_activity(request: Request) -> ActivityResponse:
     """List all active/processing jobs across all job types.
 
     Returns jobs with status ``processing``, ordered by creation time.
@@ -110,7 +111,7 @@ async def list_activity(request: Request):
 
 
 @router.post("/v2/scrape", response_model=ScrapeResponse)
-async def scrape(request: Request, body: ScrapeRequest):
+async def scrape(request: Request, body: ScrapeRequest) -> ScrapeResponse:
     scraper = request.app.state.scraper_client
     result = await scraper.scrape(body.url)
     if result.get("success"):
@@ -134,7 +135,7 @@ async def scrape(request: Request, body: ScrapeRequest):
 
 
 @router.post("/v2/agent", response_model=AgentCreateResponse)
-async def create_agent(request: Request, body: AgentRequest, response: Response):
+async def create_agent(request: Request, body: AgentRequest, response: Response) -> Any:
     # ── Per-client rate limit check ────────────────────────────
     client_ip = _get_client_ip(request)
     rate_limiter = request.app.state.rate_limiter
@@ -166,7 +167,8 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
 
         health_logger = logging.getLogger(__name__)
         effective_model = (
-            body.model if body.model and body.model != "default"
+            body.model
+            if body.model and body.model != "default"
             else request.app.state.llm_model
         )
         llm_check = LLMClient(
@@ -186,7 +188,7 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
         await llm_check.close()
         from fastapi.responses import StreamingResponse
 
-        async def event_stream():
+        async def event_stream() -> Any:
             from .research import run_research_stream
 
             async for event in run_research_stream(
@@ -262,7 +264,7 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
 
 
 @router.get("/v2/agent/{job_id}", response_model=AgentStatusResponse)
-async def get_agent_status(request: Request, job_id: str):
+async def get_agent_status(request: Request, job_id: str) -> AgentStatusResponse:
     store: JobStore = request.app.state.job_store
     job = store.get_job(job_id)
     if job is None:
@@ -277,7 +279,7 @@ async def get_agent_status(request: Request, job_id: str):
 
 
 @router.delete("/v2/agent/{job_id}", response_model=AgentCancelResponse)
-async def cancel_agent(request: Request, job_id: str):
+async def cancel_agent(request: Request, job_id: str) -> AgentCancelResponse:
     store: JobStore = request.app.state.job_store
     if not store.cancel_job(job_id):
         raise NotFoundError(
@@ -287,7 +289,7 @@ async def cancel_agent(request: Request, job_id: str):
 
 
 @router.post("/v2/crawl", response_model=CrawlCreateResponse)
-async def create_crawl(request: Request, body: CrawlRequest):
+async def create_crawl(request: Request, body: CrawlRequest) -> CrawlCreateResponse:
     store: JobStore = request.app.state.job_store
     job_id = store.create_job(kind="crawl", payload=body.model_dump())
 
@@ -308,7 +310,7 @@ async def create_crawl(request: Request, body: CrawlRequest):
 
 
 @router.get("/v2/crawl/{job_id}", response_model=CrawlStatusResponse)
-async def get_crawl_status(request: Request, job_id: str):
+async def get_crawl_status(request: Request, job_id: str) -> CrawlStatusResponse:
     store: JobStore = request.app.state.job_store
     job = store.get_job(job_id)
     if job is None:
@@ -324,7 +326,7 @@ async def get_crawl_status(request: Request, job_id: str):
 
 
 @router.delete("/v2/crawl/{job_id}", response_model=AgentCancelResponse)
-async def cancel_crawl(request: Request, job_id: str):
+async def cancel_crawl(request: Request, job_id: str) -> AgentCancelResponse:
     store: JobStore = request.app.state.job_store
     if not store.cancel_job(job_id):
         raise NotFoundError(
@@ -334,7 +336,9 @@ async def cancel_crawl(request: Request, job_id: str):
 
 
 @router.post("/v2/batch/scrape", response_model=CrawlCreateResponse)
-async def create_batch_scrape(request: Request, body: BatchScrapeRequest):
+async def create_batch_scrape(
+    request: Request, body: BatchScrapeRequest
+) -> CrawlCreateResponse:
     store: JobStore = request.app.state.job_store
     job_id = store.create_job(kind="batch_scrape", payload=body.model_dump())
 
@@ -353,7 +357,7 @@ async def create_batch_scrape(request: Request, body: BatchScrapeRequest):
 
 
 @router.post("/v1/search")
-async def search_v1(request: Request, body: SearchRequest):
+async def search_v1(request: Request, body: SearchRequest) -> dict[str, Any]:
     """Firecrawl v1-compatible search endpoint.
 
     Returns a flat data array (v1 format) rather than the nested
@@ -385,7 +389,7 @@ async def search_v1(request: Request, body: SearchRequest):
 
 
 @router.post("/v2/search", response_model=SearchResponse)
-async def search(request: Request, body: SearchRequest):
+async def search(request: Request, body: SearchRequest) -> SearchResponse:
     from .searxng_client import SearXNGClient
 
     searxng = SearXNGClient(request.app.state.searxng_url)
@@ -489,7 +493,7 @@ async def search(request: Request, body: SearchRequest):
                         contents.append("")
 
                 # Embed query + document contents
-                texts = [body.query] + contents
+                texts = [body.query, *contents]
                 embeddings = await semantic.embed(texts)
                 query_embedding = embeddings[0]
                 doc_embeddings = embeddings[1:]
@@ -509,7 +513,10 @@ async def search(request: Request, body: SearchRequest):
                 else:
                     # Cosine similarity reranking (vectors are L2-normalized, so cosine = dot product)
                     similarities = [
-                        sum(a * b for a, b in zip(query_embedding, doc_emb))
+                        sum(
+                            a * b
+                            for a, b in zip(query_embedding, doc_emb, strict=False)
+                        )
                         for doc_emb in doc_embeddings
                     ]
                     ranked_indices = sorted(
@@ -568,7 +575,7 @@ async def search(request: Request, body: SearchRequest):
 
 
 @router.post("/v2/answer", response_model=AnswerResponse)
-async def answer(request: Request, body: AnswerRequest, response: Response):
+async def answer(request: Request, body: AnswerRequest, response: Response) -> Any:
     """Grounded Q&A: search → scrape → LLM → citations.
 
     Synchronous single-turn endpoint. For streaming, set ``stream: true``
@@ -601,7 +608,7 @@ async def answer(request: Request, body: AnswerRequest, response: Response):
     if body.stream:
         from fastapi.responses import StreamingResponse
 
-        async def event_stream():
+        async def event_stream() -> Any:
             from .research import run_answer_stream
 
             async for event in run_answer_stream(
@@ -680,7 +687,9 @@ async def answer(request: Request, body: AnswerRequest, response: Response):
 
 
 @router.post("/v2/extract", response_model=ExtractCreateResponse)
-async def create_extract(request: Request, body: ExtractRequest):
+async def create_extract(
+    request: Request, body: ExtractRequest
+) -> ExtractCreateResponse:
     """Extract structured data from provided URLs."""
     store: JobStore = request.app.state.job_store
     job_id = store.create_job(
@@ -706,7 +715,7 @@ async def create_extract(request: Request, body: ExtractRequest):
 
 
 @router.get("/v2/extract/{job_id}", response_model=ExtractStatusResponse)
-async def get_extract_status(request: Request, job_id: str):
+async def get_extract_status(request: Request, job_id: str) -> ExtractStatusResponse:
     """Get extract job status and results."""
     store: JobStore = request.app.state.job_store
     job = store.get_job(job_id)
@@ -725,7 +734,7 @@ async def get_extract_status(request: Request, job_id: str):
 
 
 @router.post("/v2/map", response_model=MapResponse)
-async def map_site(request: Request, body: MapRequest):
+async def map_site(request: Request, body: MapRequest) -> MapResponse:
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
             resp = await client.get(body.url)
@@ -734,18 +743,18 @@ async def map_site(request: Request, body: MapRequest):
             soup = BeautifulSoup(resp.text, "html.parser")
             links: list[str] = []
             for a in soup.find_all("a", href=True):
-                href = a["href"]
+                href: str = a["href"]  # type: ignore[assignment,union-attr]
                 if href.startswith("/"):
                     href = f"{extract_domain(body.url, include_scheme=True)}{href}"
-                if href.startswith(body.url.rstrip("/")) or is_same_origin(
+                href_start = href.startswith(body.url.rstrip("/")) or is_same_origin(
                     body.url, href
-                ):
-                    if href not in links:
-                        links.append(href)
-                        if len(links) >= body.limit:
-                            break
+                )
+                if href_start and href not in links:
+                    links.append(href)
+                    if len(links) >= body.limit:
+                        break
             if body.search:
-                links = [l for l in links if body.search.lower() in l.lower()]
+                links = [link for link in links if body.search.lower() in link.lower()]
             return MapResponse(links=links)
     except Exception as e:
         logger.error("Map failed for %s: %s", body.url, e)
@@ -758,8 +767,8 @@ BROWSER_SVC_URL = "http://browser-svc:8012"
 
 
 async def _browser_proxy(
-    path: str, method: str = "POST", json_data: dict | None = None
-) -> dict:
+    path: str, method: str = "POST", json_data: dict[str, Any] | None = None
+) -> Any:
     """Proxy a request to the browser service."""
     async with httpx.AsyncClient(timeout=120) as client:
         if method == "GET":
@@ -775,7 +784,7 @@ async def _browser_proxy(
 
 
 @router.post("/v2/browser", response_model=BrowserCreateResponse)
-async def create_browser(body: BrowserCreateRequest):
+async def create_browser(body: BrowserCreateRequest) -> BrowserCreateResponse:
     result = await _browser_proxy("/browsers", json_data=body.model_dump())
     if not result.get("success"):
         raise BrowserError(
@@ -785,7 +794,9 @@ async def create_browser(body: BrowserCreateRequest):
 
 
 @router.post("/v2/browser/{session_id}/execute", response_model=BrowserExecuteResponse)
-async def execute_browser(session_id: str, body: BrowserExecuteRequest):
+async def execute_browser(
+    session_id: str, body: BrowserExecuteRequest
+) -> BrowserExecuteResponse:
     result = await _browser_proxy(
         f"/browsers/{session_id}/execute", json_data=body.model_dump()
     )
@@ -795,13 +806,13 @@ async def execute_browser(session_id: str, body: BrowserExecuteRequest):
 
 
 @router.get("/v2/browser", response_model=BrowserListResponse)
-async def list_browsers():
+async def list_browsers() -> BrowserListResponse:
     result = await _browser_proxy("/browsers", method="GET")
     return BrowserListResponse(sessions=result.get("sessions", []))
 
 
 @router.delete("/v2/browser/{session_id}", response_model=BrowserDeleteResponse)
-async def destroy_browser(session_id: str):
+async def destroy_browser(session_id: str) -> BrowserDeleteResponse:
     result = await _browser_proxy(f"/browsers/{session_id}", method="DELETE")
     if not result.get("success"):
         raise NotFoundError(
@@ -814,7 +825,7 @@ async def destroy_browser(session_id: str):
 
 
 @router.post("/v2/monitor", response_model=MonitorResponse)
-async def create_monitor(body: MonitorCreateRequest):
+async def create_monitor(body: MonitorCreateRequest) -> MonitorResponse:
     import uuid
     from datetime import datetime
 
@@ -832,12 +843,12 @@ async def create_monitor(body: MonitorCreateRequest):
         url=body.url,
         schedule=body.schedule,
         webhook=body.webhook,
-        created_at=config["created_at"],
+        created_at=config["created_at"],  # type: ignore[arg-type]
     )
 
 
 @router.get("/v2/monitor", response_model=MonitorListResponse)
-async def list_monitors():
+async def list_monitors() -> MonitorListResponse:
     monitors = get_all_monitors()
     items = []
     for mid, cfg in monitors.items():
@@ -849,14 +860,14 @@ async def list_monitors():
                 webhook=cfg.get("webhook"),
                 last_checked=cfg.get("last_checked"),
                 last_result=cfg.get("last_result"),
-                created_at=cfg.get("created_at", ""),
+                created_at=cfg.get("created_at") or "",  # type: ignore[arg-type]
             )
         )
     return MonitorListResponse(monitors=items)
 
 
 @router.get("/v2/monitor/{monitor_id}", response_model=MonitorResponse)
-async def get_monitor_status(monitor_id: str):
+async def get_monitor_status(monitor_id: str) -> MonitorResponse:
     cfg = get_monitor(monitor_id)
     if cfg is None:
         raise NotFoundError(
@@ -869,12 +880,14 @@ async def get_monitor_status(monitor_id: str):
         webhook=cfg.get("webhook"),
         last_checked=cfg.get("last_checked"),
         last_result=cfg.get("last_result"),
-        created_at=cfg.get("created_at", ""),
+        created_at=cfg.get("created_at") or "",  # type: ignore[arg-type]
     )
 
 
 @router.patch("/v2/monitor/{monitor_id}", response_model=MonitorResponse)
-async def update_monitor(monitor_id: str, body: MonitorUpdateRequest):
+async def update_monitor(
+    monitor_id: str, body: MonitorUpdateRequest
+) -> MonitorResponse:
     cfg = get_monitor(monitor_id)
     if cfg is None:
         raise NotFoundError(
@@ -894,12 +907,12 @@ async def update_monitor(monitor_id: str, body: MonitorUpdateRequest):
         webhook=cfg.get("webhook"),
         last_checked=cfg.get("last_checked"),
         last_result=cfg.get("last_result"),
-        created_at=cfg.get("created_at", ""),
+        created_at=cfg.get("created_at") or "",  # type: ignore[arg-type]
     )
 
 
 @router.delete("/v2/monitor/{monitor_id}", response_model=MonitorDeleteResponse)
-async def delete_monitor_route(monitor_id: str):
+async def delete_monitor_route(monitor_id: str) -> MonitorDeleteResponse:
     cfg = get_monitor(monitor_id)
     if cfg is None:
         raise NotFoundError(
@@ -915,7 +928,7 @@ PARSE_SVC_URL = "http://parse-svc:8013"
 
 
 @router.post("/v2/parse", response_model=ParseResponse)
-async def parse_file(request: Request):
+async def parse_file(request: Request) -> Any:
     """Upload a file and get its content as markdown."""
     import httpx
 
@@ -925,17 +938,17 @@ async def parse_file(request: Request):
             detail="No file provided. Use multipart form with 'file' field."
         )
 
-    upload = form["file"]
-    content = await upload.read()
+    upload = form["file"]  # type: ignore[union-attr]
+    content = await upload.read()  # type: ignore[union-attr]
 
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(
             f"{PARSE_SVC_URL}/parse",
             files={
                 "file": (
-                    upload.filename or "file",
+                    upload.filename or "file",  # type: ignore[union-attr]
                     content,
-                    upload.content_type or "application/octet-stream",
+                    upload.content_type or "application/octet-stream",  # type: ignore[union-attr]
                 )
             },
         )
@@ -951,7 +964,9 @@ async def parse_file(request: Request):
 
 
 @router.post("/v2/generate-llmstxt", response_model=LLMsTextCreateResponse)
-async def create_llmstxt(request: Request, body: LLMsTextRequest):
+async def create_llmstxt(
+    request: Request, body: LLMsTextRequest
+) -> LLMsTextCreateResponse:
     """Generate an llms.txt file for a website."""
     store: JobStore = request.app.state.job_store
     job_id = store.create_job(kind="llmstxt", payload=body.model_dump())
@@ -971,7 +986,7 @@ async def create_llmstxt(request: Request, body: LLMsTextRequest):
 
 
 @router.get("/v2/generate-llmstxt/{job_id}", response_model=LLMsTextStatusResponse)
-async def get_llmstxt_status(request: Request, job_id: str):
+async def get_llmstxt_status(request: Request, job_id: str) -> LLMsTextStatusResponse:
     """Get llms.txt generation job status and results."""
     store: JobStore = request.app.state.job_store
     job = store.get_job(job_id)
@@ -986,7 +1001,7 @@ async def get_llmstxt_status(request: Request, job_id: str):
     )
 
 
-async def _index_scrape(url: str, title: str, content: str, request) -> None:
+async def _index_scrape(url: str, title: str, content: str, request: Request) -> None:
     """Fire-and-forget index a scraped page in the vector index."""
     semantic = None
     try:

@@ -141,7 +141,7 @@ async def discover_pages(url: str, max_pages: int = 50) -> list[str]:
             base_netloc = urlparse(url).netloc.lower()
             base_url = extract_domain(url, include_scheme=True)
             for a in soup.find_all("a", href=True):
-                href = a["href"].strip()
+                href = a["href"].strip()  # type: ignore[union-attr]
                 full_url = urljoin(base_url, href)
 
                 # Skip external links, anchors, mailto, etc.

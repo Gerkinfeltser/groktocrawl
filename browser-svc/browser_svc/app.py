@@ -12,13 +12,18 @@ import uuid
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import PlainTextResponse
 from playwright.async_api import async_playwright
 from pydantic import BaseModel
 
+from common.logging import setup_logging
+from common.metrics import METRICS
+from common.middleware import add_request_id_middleware
 from common.url import extract_domain, is_private_host
 
 from .settings import load_settings
 
+setup_logging()
 logger = logging.getLogger(__name__)
 
 # ── Cookie persistence ─────────────────────────────────────────
@@ -118,12 +123,17 @@ def _is_bot_challenge(title: str, url: str) -> bool:
     for indicator in DDOS_GUARD_INDICATORS:
         if indicator.lower() in title.lower():
             return True
-    if "ddos-guard" in url.lower() or "/.well-known/ddos-guard" in url.lower():
+    if "ddos-guard" in url.lower() or "/.well-known/ddos-guard" in url.lower():  # noqa: SIM103
         return True
     return False
 
 
 app = FastAPI(title="GroktoCrawl Browser Service", version="0.1.0")
+
+# ── Instrumentation ──────────────────────────────────────────
+add_request_id_middleware(app)
+METRICS.counter("browser_sessions_created_total", "Total browser sessions created")
+METRICS.counter("browser_sessions_expired_total", "Total browser sessions expired")
 
 # In-memory session store
 _sessions: dict[str, "SessionData"] = {}
@@ -234,6 +244,12 @@ async def health():
     return {"status": "ok", "active_sessions": len(_sessions)}
 
 
+@app.get("/metrics")
+async def metrics():
+    """Prometheus-compatible OpenMetrics endpoint."""
+    return PlainTextResponse(METRICS.generate_openmetrics(), media_type="text/plain")
+
+
 @app.post("/browsers", response_model=BrowserCreateResponse)
 async def create_browser(req: BrowserCreateRequest):
     """Create a new headless browser session."""
@@ -269,7 +285,7 @@ async def create_browser(req: BrowserCreateRequest):
         return BrowserCreateResponse(id=session_id)
     except Exception as e:
         logger.error("Failed to create browser session: %s", e)
-        raise HTTPException(
+        raise HTTPException(  # noqa: B904
             status_code=500, detail=f"Failed to create browser session: {e}"
         )
 
