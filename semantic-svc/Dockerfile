@@ -5,6 +5,8 @@ COPY pyproject.toml .
 RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -e .
 
 # Pre-download embedding model at build time so first request is fast
+ARG HF_TOKEN=
+ENV HF_TOKEN=$HF_TOKEN
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-m3')"
 
 COPY app.py models.py retention.py router_index.py router_search.py router_migration.py metrics.py ./
