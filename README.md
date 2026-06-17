@@ -8,10 +8,12 @@ GroktoCrawl implements the Firecrawl v2 API surface — scrape, search, map, cra
 
 ```bash
 cp .env.sample .env
-docker compose up --build -d
+docker compose --profile fixture up --build -d
 ```
 
-Eight containers start. The stack includes SearXNG for real web search, a smart scraper, and an Ofelia-scheduled monitor system.
+Eight containers start. Add `--profile fixture` to also start a built-in LLM fixture and test site — useful for evaluation without an API key. Omit it for production (configure a real LLM in `.env` instead).
+
+The stack includes a SearXNG-compatible search service, a smart scraper, and an Ofelia-scheduled monitor system.
 
 ```bash
 # CLI
@@ -51,26 +53,35 @@ LLM_MODEL=llama3.2
 flowchart TD
     subgraph compose["docker-compose.yml"]
         valkey[("valkey<br/>(queue + storage)")]
-        searxng["searxng<br/>(web search)"]
+        qdrant[("qdrant<br/>(vector index)")]
+        searxng["slopsearx<br/>(web search)"]
         scraper("scraper-svc<br/>(smart fetch)")
         browser["browser-svc<br/>(Playwright sessions)"]
+        semantic["semantic-svc<br/>(embeddings + near-dup)"]
         agent("agent-svc<br/>(FastAPI + workers)")
+        portal["portal-svc<br/>(web UI)"]
         ofelia["ofelia<br/>(cron scheduler)"]
 
         valkey --- agent
+        qdrant --- semantic
         searxng --- agent
         scraper --- agent
+        semantic --- agent
         browser --- agent
+        portal --> agent
         ofelia -.->|docker exec| agent
     end
-    llm_provider("LLM Provider<br/>(DeepSeek / OpenAI / Ollama)")
+    llm_provider("LLM Provider<br/>(DeepSeek / OpenAI / Ollama / fixture)")
     llm_provider -.->|LLM_BASE_URL| agent
 
     style valkey fill:#ffe0b0
+    style qdrant fill:#ffe0b0
     style searxng fill:#b0d4ff
     style scraper fill:#b0ffb0
     style browser fill:#d4b0ff
+    style semantic fill:#ffd4b0
     style agent fill:#ffb0b0
+    style portal fill:#b0d0ff
     style ofelia fill:#b0b0b0
 ```
 
@@ -128,6 +139,7 @@ python3 -m pip install requests
 | GET | `/v2/agent/:jobId` | Get agent job status and results |
 | DELETE | `/v2/agent/:jobId` | Cancel an agent job |
 | POST | `/v2/answer` | Grounded Q&A — search, synthesize, cite in one round-trip |
+| GET | `/v2/activity` | List active/processing jobs across all job types |
 | POST | `/v2/extract` | Extract structured data from URLs (with schema) |
 | GET | `/v2/extract/:jobId` | Get extract status and results |
 | POST | `/v2/crawl` | Crawl a website |
@@ -195,6 +207,10 @@ The `POST /v2/agent` endpoint accepts an optional `model` field to override the 
 When `model` is omitted or set to `"default"`, the `LLM_MODEL` from `.env` is used. This is useful for routing simple lookups to a cheaper model and complex research to a more capable one.
 
 The agent is powered by a **determined research prompt** that evaluates source quality, synthesizes across multiple pages, detects contradictions, and cites sources by URL. It does not fabricate information — if the available sources don't answer the question, it says so and suggests what would be needed.
+
+## Web Portal
+
+A browser-based UI is available at `http://localhost:8082` when `portal-svc` is running. It provides a chat interface to the agent and answer endpoints, showing source citations and streaming responses inline. The portal is a thin client — all requests route through the agent API.
 
 ## OpenAPI / Swagger Docs
 
