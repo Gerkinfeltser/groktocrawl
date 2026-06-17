@@ -122,9 +122,10 @@ services:
       - ACTIVE_EMBED_MODEL=${ACTIVE_EMBED_MODEL:-v_bge-m3}
 
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.18.2
     platform: linux/amd64
     restart: unless-stopped
+    mem_limit: 4g
     volumes:
       - qdrant_data:/qdrant/storage
     environment:
