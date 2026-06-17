@@ -29,6 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Unit test coverage for worker.py and research.py** — adds `test_worker.py` (19 tests, 693 lines) covering all 7 worker processing functions, and 23 new tests for previously uncovered research.py functions (`run_extract`, `run_research_stream`, `run_answer_stream`, `run_rich_search`, `_rerank_answer_sources`). Agent-svc/agent coverage from ~15% to 55%. Coverage threshold raised to 20%. (closes #192)
 
+### Fixed
+
+- **Playwright health probe and Tier-3 integration tests** — adds `test_scraper_health_reports_playwright` and `test_scraper_falls_through_to_playwright` to catch missing `playwright install-deps chromium` (fixes #258). Adds `tier3-fixture` service with JS-rendered dynamic content to force Playwright fallback. Scraper `/health` now returns `checks.playwright.available`. (closes #260)
+
+- **Default URL scheme typos in settings** — all four agent-svc default URLs (`scraper_url`, `searxng_url`, `semantic_url`, `llm_base_url`) had `http//` instead of `http://`, causing agent to fail when `.env` didn't explicitly set these. (closes #260)
+
+- **CI workflow fixture setup** — `llm-svc` was not started in the "Start test fixtures" step, breaking the 2 streaming endpoint tests. `LLM_BASE_URL` and `LLM_MODEL` now written to `.env` before stack startup so the agent daemon uses the fixture LLM. Semantic-svc health check now validates Qdrant reachability from inside the agent-svc container. (closes #260)
+
+- **Flaky activity feed tests** — `test_activity_shows_active_crawl_job` and `test_activity_multi_type` failed when fast single-page crawls completed before the activity feed check. Both now fall back to the job status endpoint when the job is no longer in the active feed. (closes #260)
+
 ---
 
 ## [0.7.0] — 2026-06-09
