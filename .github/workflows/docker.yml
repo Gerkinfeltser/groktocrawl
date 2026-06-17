@@ -41,11 +41,11 @@ jobs:
             dockerfile: browser-svc/Dockerfile
             image: ghcr.io/groktopus/groktocrawl-browser
           - service: semantic-svc
-            context: ./semantic-svc
+            context: .
             dockerfile: semantic-svc/Dockerfile
             image: ghcr.io/groktopus/groktocrawl-semantic
           - service: portal-svc
-            context: ./portal-svc
+            context: .
             dockerfile: portal-svc/Dockerfile
             image: ghcr.io/groktopus/groktocrawl-portal
       max-parallel: 2

@@ -10,6 +10,9 @@ dev = [
     "pytest-cov>=5.0",
     "pytest-xdist>=3.0",
     "httpx>=0.28.0",
+    "vulture>=2.14",
+    "deptry>=0.23",
+    "jscpd>=4.0",
 ]
 
 [tool.ruff]
@@ -42,6 +45,7 @@ select = [
     "T20",   # flake8-print — no print in production code
     "RUF",   # ruff-specific rules
     "FURB",  # refurb — general quality
+    "TD",    # flake8-todos — track TODO/FIXME/HACK/XXX markers
 ]
 
 ignore = [
@@ -70,3 +74,46 @@ skip-magic-trailing-comma = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=agent-svc/agent --cov=scraper-svc/scraper --cov=browser-svc/browser_svc --cov=parse-svc/parse_svc --cov=portal-svc/portal --cov=semantic-svc --cov-report=term-missing --cov-fail-under=20 --durations=10 -n auto"
+
+[tool.mypy]
+ignore_missing_imports = true
+exclude = [
+    "/.venv/",
+    "/.venv-sys/",
+    "/htmlcov/",
+    "/graphify-out/",
+    "/droid-wiki/",
+    "/__pycache__/",
+    "/.egg-info/",
+    "/dist/",
+    "/build/",
+]
+
+[[tool.mypy.overrides]]
+module = [
+    "fastapi.*",
+    "uvicorn.*",
+    "playwright.*",
+    "redis.*",
+    "qdrant_client.*",
+    "sentence_transformers.*",
+    "readability_lxml.*",
+    "markdownify.*",
+    "beautifulsoup4.*",
+    "httpx.*",
+    "pydantic.*",
+    "numpy.*",
+    "jinja2.*",
+    "aiofiles.*",
+    "markitdown.*",
+    "pypdf.*",
+    "python_docx.*",
+    "python_pptx.*",
+    "openpyxl.*",
+    "tabulate.*",
+    "pillow.*",
+    "youtube_transcript_api.*",
+    "crawl4ai.*",
+    "python_multipart.*",
+]
+ignore_missing_imports = true

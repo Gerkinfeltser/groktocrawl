@@ -33,21 +33,28 @@ class ScraperClient:
             elapsed = time.monotonic() - start
             source = (result.get("data") or {}).get("source", "unknown")
             METRICS.histogram(
-                "scrape_duration_seconds", "Scrape latency by source tier",
+                "scrape_duration_seconds",
+                "Scrape latency by source tier",
                 ["tier"],
             ).observe({"tier": source}, elapsed)
-            METRICS.counter("scrapes_total", "Total scrapes by tier", ["tier"]).inc({"tier": source})
-            return result
+            METRICS.counter("scrapes_total", "Total scrapes by tier", ["tier"]).inc(
+                {"tier": source}
+            )
+            return result  # type: ignore[no-any-return]
         except httpx.TimeoutException:
             elapsed = time.monotonic() - start
             logger.warning("Scraper timed out for %s", url)
-            METRICS.histogram("scrape_duration_seconds", "Scrape latency by source tier", ["tier"]).observe({"tier": "timeout"}, elapsed)
+            METRICS.histogram(
+                "scrape_duration_seconds", "Scrape latency by source tier", ["tier"]
+            ).observe({"tier": "timeout"}, elapsed)
             return {"success": False, "error": f"Scraper timed out for {url}"}
         except Exception as e:
             elapsed = time.monotonic() - start
             logger.error("Scraper client error for %s: %s", url, e)
-            METRICS.histogram("scrape_duration_seconds", "Scrape latency by source tier", ["tier"]).observe({"tier": "error"}, elapsed)
+            METRICS.histogram(
+                "scrape_duration_seconds", "Scrape latency by source tier", ["tier"]
+            ).observe({"tier": "error"}, elapsed)
             return {"success": False, "error": str(e)}
 
-    async def close(self):
+    async def close(self) -> None:
         await self._client.aclose()

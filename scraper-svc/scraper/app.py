@@ -8,14 +8,19 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
+
+from common.logging import setup_logging
+from common.metrics import METRICS
+from common.middleware import add_request_id_middleware
 
 from .cookie_store import close_client, get_client
 from .exceptions import GroktoCrawlError, UpstreamError
 from .fetch import smart_scrape
 from .meta import fetch_meta_tags
 
+setup_logging()
 logger = logging.getLogger(__name__)
 
 # Cache for Playwright browser availability — probed at startup.
@@ -82,6 +87,18 @@ async def lifespan(app):
 
 
 app = FastAPI(title="GroktoCrawl Scraper", version="0.1.0", lifespan=lifespan)
+
+# ── Instrumentation ──────────────────────────────────────────
+add_request_id_middleware(
+    app,
+    record_metric=lambda labels, val: METRICS.histogram(
+        "http_request_duration_seconds",
+        "HTTP request latency by path and method",
+        ["method", "path"],
+    ).observe(labels, val),
+)
+METRICS.counter("scrape_calls_total", "Total scrape requests", ["status"])
+METRICS.counter("meta_calls_total", "Total meta requests", ["status"])
 
 
 class ScrapeRequest(BaseModel):
@@ -182,12 +199,21 @@ async def health():
     return {"status": overall, "checks": checks}
 
 
+@app.get("/metrics")
+async def metrics():
+    """Prometheus-compatible OpenMetrics endpoint."""
+    return PlainTextResponse(METRICS.generate_openmetrics(), media_type="text/plain")
+
+
 @app.post("/scrape", response_model=ScrapeResponse)
 async def scrape(request: ScrapeRequest):
     """Scrape a URL and return its content as clean markdown."""
     try:
         result = await smart_scrape(request.url)
         if result.get("error"):
+            METRICS.counter(
+                "scrape_calls_total", "Total scrape requests", ["status"]
+            ).inc({"status": "error"})
             raise UpstreamError(detail=result["error"])
         data = {
             "markdown": result.get("markdown", ""),
@@ -199,6 +225,9 @@ async def scrape(request: ScrapeRequest):
         }
         if result.get("download"):
             data["download"] = result["download"]
+        METRICS.counter("scrape_calls_total", "Total scrape requests", ["status"]).inc(
+            {"status": "success"}
+        )
         return ScrapeResponse(success=True, data=data)
     except Exception as e:
         logger.exception("Scrape failed for %s", request.url)

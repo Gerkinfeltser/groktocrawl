@@ -1,0 +1,67 @@
+# Code Quality CI — dead code, unused deps, duplicate detection
+#
+# Runs vulture (dead code), deptry (unused dependencies),
+# and jscpd (duplicate code) on every PR and push to main.
+#
+# These are fast checks (~10-20s each) that catch issues agents
+# might introduce during development.
+
+name: Code Quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  dead-code:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install vulture
+        run: pip install vulture
+      - name: Run vulture (dead code detection)
+        run: |
+          vulture . \
+            --exclude ".venv,.venv-sys,htmlcov,graphify-out,droid-wiki,node_modules,dist,build,__pycache__,*.egg-info,.git" \
+            --min-confidence 80
+
+  unused-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deptry
+        run: pip install deptry
+      - name: Run deptry per service (unused dependency detection)
+        run: |
+          # Install all deps first
+          pip install -e ".[dev]"
+          for svc in agent-svc scraper-svc semantic-svc browser-svc parse-svc portal-svc; do
+            echo "=== $svc ==="
+            pip install -e "$svc" 2>/dev/null || true
+            deptry "$svc" --per-rule-ignores '{"DEP002":{"allowlist":["pytest","pytest-cov","pytest-xdist","httpx","vulture","deptry","jscpd"]}}' || true
+          done
+
+  duplicate-code:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install jscpd
+        run: npm install -g jscpd
+      - name: Run jscpd (duplicate code detection)
+        run: |
+          jscpd \
+            --pattern "**/*.py" \
+            --ignore ".venv,.venv-sys,htmlcov,graphify-out,droid-wiki,node_modules,dist,build,__pycache__,*.egg-info,.git" \
+            --min-tokens 50 \
+            --min-lines 5 \
+            --threshold 5 \
+            --reporters console \
+            .

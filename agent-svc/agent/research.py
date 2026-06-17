@@ -5,6 +5,7 @@ Also provides the extract endpoint: scrape given URLs → LLM → structured dat
 
 import json
 import logging
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from common.url import extract_domain
@@ -209,7 +210,7 @@ async def run_research_stream(
     llm_model: str = "gpt-4o-mini",
     requested_model: str | None = None,
     max_searches_per_request: int = 5,
-):
+) -> AsyncGenerator[dict[str, Any], None]:
     """Streaming version of run_research. Yields SSE-suitable dicts.
 
     Phase 1 - Discovery: search + scrape, yielding progress events.
@@ -827,7 +828,7 @@ async def run_answer_stream(
     llm_model: str = "gpt-4o-mini",
     requested_model: str | None = None,
     max_searches_per_request: int = 5,
-):
+) -> AsyncGenerator[dict[str, Any], None]:
     """Streaming version of run_answer. Yields SSE-suitable dicts.
 
     Yields:

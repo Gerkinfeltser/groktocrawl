@@ -4,10 +4,12 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from redis import Redis
 
 from .api import router
@@ -139,7 +141,9 @@ def create_app() -> FastAPI:
 
     # ── Middleware: request_id ───────────────────────────────────
     @app.middleware("http")
-    async def request_id_middleware(request: Request, call_next):
+    async def request_id_middleware(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
         """Attach a unique request_id to every request and log start/end.
 
         Skips request_id generation for /health and /metrics to avoid
@@ -192,7 +196,9 @@ def create_app() -> FastAPI:
 
     # ── Security warning middleware ──────────────────────────────
     @app.middleware("http")
-    async def security_warning_middleware(request: Request, call_next):
+    async def security_warning_middleware(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
         response = await call_next(request)
         if not AUTH_ENABLED:
             response.headers[SECURITY_WARNING_HEADER] = (
@@ -204,7 +210,7 @@ def create_app() -> FastAPI:
 
     # ── Health endpoint (always unauthenticated) ─────────────────
     @app.get("/health")
-    async def health():
+    async def health() -> dict[str, Any]:
         """Return aggregate health status with per-dependency probes.
 
         Response shape (backward-compatible):
@@ -246,7 +252,7 @@ def create_app() -> FastAPI:
 
     # ── Metrics endpoint (always unauthenticated) ────────────────
     @app.get("/metrics")
-    async def metrics():
+    async def metrics() -> PlainTextResponse:
         """OpenMetrics-format metrics endpoint for Prometheus scraping.
 
         Returns counters, histograms, and gauges collected during agent-svc
@@ -272,7 +278,9 @@ def create_app() -> FastAPI:
 
     # ── Exception handlers ──────────────────────────────────────
     @app.exception_handler(GroktoCrawlError)
-    async def groktocrawl_error_handler(request: Request, exc: GroktoCrawlError):
+    async def groktocrawl_error_handler(
+        request: Request, exc: GroktoCrawlError
+    ) -> JSONResponse:
         return JSONResponse(
             status_code=exc.status_code,
             content=ErrorResponse(
@@ -283,7 +291,9 @@ def create_app() -> FastAPI:
         )
 
     @app.exception_handler(HTTPException)
-    async def http_exception_handler(request: Request, exc: HTTPException):
+    async def http_exception_handler(
+        request: Request, exc: HTTPException
+    ) -> JSONResponse:
         status_code = exc.status_code
         error_code_map = {
             400: "INVALID_REQUEST",
@@ -304,7 +314,7 @@ def create_app() -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(
         request: Request, exc: RequestValidationError
-    ):
+    ) -> JSONResponse:
         details_list = []
         for err in exc.errors():
             loc = err.get("loc", [])
@@ -323,7 +333,7 @@ def create_app() -> FastAPI:
     app.include_router(router, dependencies=[Depends(verify_api_key)])
 
     @app.on_event("shutdown")
-    async def shutdown_event():
+    async def shutdown_event() -> None:
         await app.state.task_tracker.shutdown(grace_period=5.0)
         await app.state.scraper_client.close()
         await app.state.searxng_client.close()

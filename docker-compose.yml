@@ -109,7 +109,8 @@ services:
 
   semantic-svc:
     build:
-      context: ./semantic-svc
+      context: .
+      dockerfile: semantic-svc/Dockerfile
     image: ghcr.io/groktopus/groktocrawl-semantic
     restart: unless-stopped
     ports:
@@ -169,7 +170,8 @@ services:
 
   portal-svc:
     build:
-      context: ./portal-svc
+      context: .
+      dockerfile: portal-svc/Dockerfile
     image: ghcr.io/groktopus/groktocrawl-portal
     restart: unless-stopped
     ports:
@@ -179,7 +181,8 @@ services:
 
   parse-svc:
     build:
-      context: ./parse-svc
+      context: .
+      dockerfile: parse-svc/Dockerfile
     restart: unless-stopped
 
 volumes:

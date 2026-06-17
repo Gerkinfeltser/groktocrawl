@@ -5,15 +5,14 @@ Uses the same valkey connection for both the API and the worker.
 """
 
 import json
-import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from redis import Redis
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _default_ttl() -> int:
@@ -55,7 +54,7 @@ class JobStore:
         data_raw = self.redis.get(f"job:{job_id}:data")
         if data_raw:
             meta["data"] = json.loads(data_raw)
-        return meta
+        return meta  # type: ignore[no-any-return]
 
     def complete_job(self, job_id: str, data: dict) -> None:
         """Mark a job as completed with its result data."""
@@ -92,7 +91,9 @@ class JobStore:
         self.redis.set(f"job:{job_id}:meta", json.dumps(meta), ex=_default_ttl())
         return True
 
-    def list_active_jobs(self, kind: str | None = None, status: str = "processing", limit: int = 50) -> list[dict]:
+    def list_active_jobs(
+        self, kind: str | None = None, status: str = "processing", limit: int = 50
+    ) -> list[dict]:
         """List jobs by status, optionally filtered by kind.
 
         Uses Valkey SCAN with pattern ``job:*:meta`` — no dedicated index.

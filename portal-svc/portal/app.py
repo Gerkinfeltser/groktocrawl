@@ -1,20 +1,26 @@
 """GroktoCrawl web portal — single-search-bar UI for human users."""
 
-import json
 import logging
 import os
 
 import httpx
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
+from common.logging import setup_logging
+from common.metrics import METRICS
+from common.middleware import add_request_id_middleware
+
+setup_logging()
 logger = logging.getLogger(__name__)
 
 AGENT_BASE_URL = os.getenv("AGENT_BASE_URL", "http://agent-svc:8080")
 ANSWER_URL = f"{AGENT_BASE_URL}/v2/answer"
 
-templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
+templates = Jinja2Templates(
+    directory=os.path.join(os.path.dirname(__file__), "templates")
+)
 
 app = FastAPI(
     title="GroktoCrawl Portal",
@@ -22,10 +28,20 @@ app = FastAPI(
     description="Web portal for GroktoCrawl — self-hosted AI research.",
 )
 
+# ── Instrumentation ──────────────────────────────────────────
+add_request_id_middleware(app)
+METRICS.counter("portal_queries_total", "Total portal queries")
+
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "portal-svc"}
+
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus-compatible OpenMetrics endpoint."""
+    return PlainTextResponse(METRICS.generate_openmetrics(), media_type="text/plain")
 
 
 @app.get("/", response_class=HTMLResponse)
