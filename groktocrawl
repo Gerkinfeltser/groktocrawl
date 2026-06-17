@@ -917,13 +917,15 @@ def cmd_agent(client: Client, args: argparse.Namespace) -> None:
             # Streaming path (default)
             result = client.create_agent_stream(prompt=args.prompt, urls=args.urls)
     except ApiError as e:
-        die(str(e))
+        print(f"\nError: {e}", flush=True)
+        sys.exit(1)
 
     if args.sync:
         # Poll loop (non-streaming)
         job_id = result.get("id", "")
         if not job_id:
-            die("No job ID returned")
+            print("\nError: No job ID returned from agent endpoint", flush=True)
+            sys.exit(1)
 
         if args.no_poll:
             if JSON_OUTPUT:
@@ -967,7 +969,9 @@ def cmd_agent(client: Client, args: argparse.Namespace) -> None:
                             print(f"  {src}")
                 return
             elif s == "failed":
-                die(f"Agent failed: {status.get('error', 'unknown')}")
+                err_msg = status.get('error', 'unknown')
+                print(f"\nError: Agent failed — {err_msg}", flush=True)
+                sys.exit(1)
             else:
                 info(f"  Status: {s}")
     else:
@@ -1009,7 +1013,8 @@ def cmd_agent(client: Client, args: argparse.Namespace) -> None:
                     if not pyramid_mode:
                         print()
                 elif event["type"] == "error":
-                    die("Error: " + event["content"])
+                    print(f"\nError: {event['content']}", flush=True)
+                    sys.exit(1)
             except json.JSONDecodeError:
                 continue
 
