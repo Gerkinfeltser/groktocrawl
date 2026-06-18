@@ -6,12 +6,12 @@ Extracted from app.py per ADR-0037.
 import asyncio
 import logging
 
+import app as app_module
 from app import (
     COLLECTION_NAME,
     _ensure_qdrant,
     _get_active_model,
     _get_embed_model,
-    _models_ready,
 )
 from fastapi import APIRouter, HTTPException
 from models import VectorSearchRequest, VectorSearchResponse, VectorSearchResult
@@ -30,7 +30,7 @@ async def search_vector(body: VectorSearchRequest):
     is determined by _get_active_model() — defaults to env var,
     overridable via /migrate/cutover.
     """
-    if not _models_ready:
+    if not app_module._models_ready:
         raise HTTPException(
             503, "Models are still loading — please retry in a few seconds"
         )

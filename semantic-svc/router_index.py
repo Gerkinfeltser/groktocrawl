@@ -8,6 +8,7 @@ import json
 import logging
 import time
 
+import app as app_module
 from app import (
     COLLECTION_NAME,
     EMBED_DIM,
@@ -17,7 +18,6 @@ from app import (
     _get_active_model,
     _get_embed_model,
     _migration,
-    _models_ready,
     _named_vector_name,
     _now_iso,
     _url_hash,
@@ -131,7 +131,7 @@ async def index_page(body: IndexRequest):
     Phase 4: Uses named vectors. During dual-write migration,
     indexes with both the active model and the target model.
     """
-    if not _models_ready:
+    if not app_module._models_ready:
         raise HTTPException(
             503, "Models are still loading — please retry in a few seconds"
         )
@@ -212,7 +212,7 @@ async def index_batch(body: IndexBatchRequest):
     SentenceTransformer call and upserts via Qdrant gRPC batch.
     Best-effort: failure is logged but never propagated.
     """
-    if not _models_ready:
+    if not app_module._models_ready:
         raise HTTPException(
             503, "Models are still loading — please retry in a few seconds"
         )
@@ -239,7 +239,7 @@ async def index_batch(body: IndexBatchRequest):
     # Build points with payloads
     active_nv = _get_active_model()
     points = []
-    for page, embedding in zip(body.pages, embeddings):
+    for page, embedding in zip(body.pages, embeddings, strict=False):
         point_id = _url_hash(page.url)
         existing_payload = None
         try:
@@ -269,9 +269,9 @@ async def index_batch(body: IndexBatchRequest):
                     loop = asyncio.get_event_loop()
                     target_embedding = await loop.run_in_executor(
                         None,
-                        lambda: (
-                            SentenceTransformer(target_name)
-                            .encode(page.content[:2000], normalize_embeddings=True)
+                        lambda tn=target_name, p=page: (
+                            SentenceTransformer(tn)
+                            .encode(p.content[:2000], normalize_embeddings=True)
                             .tolist()
                         ),
                     )
