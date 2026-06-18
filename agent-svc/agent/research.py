@@ -514,81 +514,176 @@ async def run_research_stream(
             "reasoning": reasoning,
         }
 
-        # Phase 1: Discovery — search (single or multi-query) + scrape
-        yield {"type": "status", "state": "searching"}
+        pass_count = 0
+        max_passes = 1  # May increase to 2 if gaps are detected
+        all_source_details: list[dict] = []
+        combined_context = ""
+        gap_topics: list[str] = []
 
-        if strategy == "deep" and len(queries) > 1:
-            discovered = await _run_multi_query_discover_and_scrape(
-                queries=queries,
-                urls=urls,
-                searxng=searxng,
-                scraper=scraper,
-                max_searches_per_request=max_searches_per_request,
+        while pass_count < max_passes:
+            pass_count += 1
+
+            yield {
+                "type": "research_pass",
+                "pass": pass_count,
+                "total_passes": max_passes,
+            }
+            yield {"type": "status", "state": "searching"}
+
+            if pass_count == 1:
+                # ── Pass 1: normal discovery ────────────────────────
+                if strategy == "deep" and len(queries) > 1:
+                    discovered = await _run_multi_query_discover_and_scrape(
+                        queries=queries,
+                        urls=urls,
+                        searxng=searxng,
+                        scraper=scraper,
+                        max_searches_per_request=max_searches_per_request,
+                    )
+                else:
+                    query = queries[0] if queries else prompt
+                    discovered = await _run_research_discover_and_scrape(
+                        prompt=query,
+                        urls=urls,
+                        searxng=searxng,
+                        scraper=scraper,
+                    )
+            else:
+                # ── Pass 2: gap-focused discovery ────────────────────
+                discovered = await _run_multi_query_discover_and_scrape(
+                    queries=gap_topics,
+                    urls=None,
+                    searxng=searxng,
+                    scraper=scraper,
+                    max_searches_per_request=min(
+                        len(gap_topics), max_searches_per_request
+                    ),
+                )
+
+            search_results = discovered["search_results"]
+            source_details = discovered["source_details"]
+            context = discovered["context"]
+
+            # Yield pending sources for progress visibility
+            pending_sources = (
+                [
+                    {
+                        "url": r["url"],
+                        "title": r.get("title", ""),
+                        "relevance": r.get("description", ""),
+                    }
+                    for r in search_results
+                    if r.get("url")
+                ]
+                if not urls
+                else [{"url": u, "title": "", "relevance": ""} for u in urls]
             )
-        else:
-            query = queries[0] if queries else prompt
-            discovered = await _run_research_discover_and_scrape(
-                prompt=query,
-                urls=urls,
-                searxng=searxng,
-                scraper=scraper,
-            )
+            yield {"type": "sources_pending", "sources": pending_sources}
 
-        search_results = discovered["search_results"]
-        source_details = discovered["source_details"]
-        context = discovered["context"]
-
-        # Yield pending sources for progress visibility
-        pending_sources = (
-            [
-                {
-                    "url": r["url"],
-                    "title": r.get("title", ""),
-                    "relevance": r.get("description", ""),
+            # Yield scraped source progress events
+            for src in source_details:
+                yield {
+                    "type": "source_scraped",
+                    "url": src["url"],
+                    "source": src["source"],
+                    "chars": src["char_count"],
                 }
-                for r in search_results
-                if r.get("url")
-            ]
-            if not urls
-            else [{"url": u, "title": "", "relevance": ""} for u in urls]
-        )
-        yield {"type": "sources_pending", "sources": pending_sources}
 
-        # Yield scraped source progress events
-        for src in source_details:
-            yield {
-                "type": "source_scraped",
-                "url": src["url"],
-                "source": src["source"],
-                "chars": src["char_count"],
-            }
+            if not context and not combined_context:
+                elapsed = int((time.monotonic() - start) * 1000)
+                yield {"type": "sources", "sources": []}
+                yield {
+                    "type": "done",
+                    "result": (
+                        "I was unable to find or scrape any relevant "
+                        "web pages."
+                    ),
+                    "sources": [],
+                    "latency_ms": elapsed,
+                }
+                return
 
-        if not context:
-            elapsed = int((time.monotonic() - start) * 1000)
-            yield {"type": "sources", "sources": []}
-            yield {
-                "type": "done",
-                "result": "I was unable to find or scrape any relevant web pages.",
-                "sources": [],
-                "latency_ms": elapsed,
-            }
-            return
+            # Combine contexts for multi-pass synthesis
+            all_source_details.extend(source_details)
+            if pass_count == 1:
+                combined_context = context
+            else:
+                if context:
+                    combined_context = (
+                        combined_context
+                        + "\n\n---\n\nAdditional sources (pass 2):\n\n"
+                        + context
+                    )
 
-        # Yield status heartbeat — synthesizing phase
-        yield {"type": "status", "state": "synthesizing"}
+            if not combined_context:
+                elapsed = int((time.monotonic() - start) * 1000)
+                yield {"type": "sources", "sources": []}
+                yield {
+                    "type": "done",
+                    "result": (
+                        "I was unable to find or scrape any relevant "
+                        "web pages."
+                    ),
+                    "sources": [],
+                    "latency_ms": elapsed,
+                }
+                return
 
-        # Phase 2: Synthesis
-        # If schema is provided, use synchronous generation (structured JSON output)
+            # Yield status heartbeat — synthesizing phase
+            yield {"type": "status", "state": "synthesizing"}
+
+            # Phase 2: Synthesis
+            if schema:
+                answer = await llm.generate(
+                    system_prompt=SYSTEM_PROMPT,
+                    user_prompt=prompt,
+                    context=combined_context,
+                    schema=schema,
+                )
+                _validate_json_if_schema(answer, schema)
+
+                # ── Gap detection after pass 1 ──────────────────────
+                if pass_count == 1:
+                    gap_topics = await _detect_gaps(combined_context, llm)
+                    if not gap_topics:
+                        break  # Coverage is adequate, done
+                    max_passes = 2  # Enable second pass
+                    continue
+            else:
+                # No schema — stream tokens from the LLM
+                yield {
+                    "type": "sources",
+                    "sources": [s["url"] for s in all_source_details],
+                }
+
+                full_answer = ""
+                async for event in llm.generate_stream(
+                    system_prompt=SYSTEM_PROMPT,
+                    user_prompt=prompt,
+                    context=combined_context,
+                ):
+                    if event["type"] == "token":
+                        full_answer += event["content"]
+                        yield {"type": "token", "content": event["content"]}
+                    elif event["type"] == "error":
+                        yield {"type": "error", "content": event["content"]}
+                        return
+                    elif event["type"] == "done":
+                        full_answer = event["full_content"]
+
+                # ── Gap detection after pass 1 ──────────────────────
+                if pass_count == 1:
+                    gap_topics = await _detect_gaps(combined_context, llm)
+                    if not gap_topics:
+                        break  # Coverage is adequate, done
+                    max_passes = 2  # Enable second pass
+                    continue
+
+        # ── Final done event after all passes ───────────────────────
+        source_list = [s["url"] for s in all_source_details]
+        elapsed = int((time.monotonic() - start) * 1000)
+
         if schema:
-            answer = await llm.generate(
-                system_prompt=SYSTEM_PROMPT,
-                user_prompt=prompt,
-                context=context,
-                schema=schema,
-            )
-            _validate_json_if_schema(answer, schema)
-            source_list = [s["url"] for s in source_details]
-            elapsed = int((time.monotonic() - start) * 1000)
             yield {"type": "sources", "sources": source_list}
             yield {
                 "type": "done",
@@ -596,34 +691,13 @@ async def run_research_stream(
                 "sources": source_list,
                 "latency_ms": elapsed,
             }
-            return
-
-        # No schema — stream tokens from the LLM
-        yield {"type": "sources", "sources": [s["url"] for s in source_details]}
-
-        full_answer = ""
-        async for event in llm.generate_stream(
-            system_prompt=SYSTEM_PROMPT,
-            user_prompt=prompt,
-            context=context,
-        ):
-            if event["type"] == "token":
-                full_answer += event["content"]
-                yield {"type": "token", "content": event["content"]}
-            elif event["type"] == "error":
-                yield {"type": "error", "content": event["content"]}
-                return
-            elif event["type"] == "done":
-                full_answer = event["full_content"]
-
-        source_list = [s["url"] for s in source_details]
-        elapsed = int((time.monotonic() - start) * 1000)
-        yield {
-            "type": "done",
-            "result": full_answer,
-            "sources": source_list,
-            "latency_ms": elapsed,
-        }
+        else:
+            yield {
+                "type": "done",
+                "result": full_answer,
+                "sources": source_list,
+                "latency_ms": elapsed,
+            }
 
     finally:
         await searxng.close()
