@@ -123,11 +123,6 @@ def create_app() -> FastAPI:
     app.state.max_searches_per_request = settings.max_searches_per_request
     app.state.task_tracker = TaskTracker()
 
-    # ── Start analytics counter exporter background task ────────
-    app.state.task_tracker.create_background_task(
-        start_analytics_exporter(redis_url=redis_url)
-    )
-
     # ── Middleware: request_id ───────────────────────────────────
     def _record_metric(labels: dict[str, str], value: float) -> None:
         METRICS.histogram(
@@ -275,6 +270,17 @@ def create_app() -> FastAPI:
 
     # ── Include API router with auth dependency ─────────────────
     app.include_router(router, dependencies=[Depends(verify_api_key)])
+
+    @app.on_event("startup")
+    async def startup_event() -> None:
+        """Start the analytics counter exporter on server startup.
+
+        This runs inside a running event loop (unlike module-level
+        ``asyncio.create_task()`` which would fail at import time).
+        """
+        app.state.task_tracker.create_background_task(
+            start_analytics_exporter(redis_url=app.state.valkey_url)
+        )
 
     @app.on_event("shutdown")
     async def shutdown_event() -> None:
