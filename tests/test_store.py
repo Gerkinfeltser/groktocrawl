@@ -13,7 +13,7 @@ def fake_redis():
 
     r = MagicMock()
     r.set = MagicMock(
-        side_effect=lambda key, val, _ex=None: store_data.update({key: val}) or True
+        side_effect=lambda key, val, **kw: store_data.update({key: val}) or True
     )
     r.get = MagicMock(side_effect=lambda key: store_data.get(key))
 

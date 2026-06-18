@@ -4,8 +4,8 @@ Tests the _extract_description() function directly without needing
 a running Docker stack. Run with: python3 -m pytest tests/test_llmstxt_unit.py -v
 """
 
-import sys
 import os
+import sys
 
 # Add the agent-svc directory to the path so we can import llmstxt
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "agent-svc"))
@@ -98,7 +98,9 @@ def test_fallback_truncation():
     text = "This is a very long string of text that has no sentence boundaries " * 20
     desc = _extract_description(text)
     if len(desc) >= 300:
-        assert desc.endswith("..."), f"Should end with ellipsis when truncated, got: {desc[-20:]}"
+        assert desc.endswith("..."), (
+            f"Should end with ellipsis when truncated, got: {desc[-20:]}"
+        )
 
 
 def test_multi_sentence_content():

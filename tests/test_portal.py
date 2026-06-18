@@ -17,7 +17,7 @@ def test_health():
 def test_metrics():
     resp = client.get("/metrics")
     assert resp.status_code == 200
-    assert "text/plain" in resp.headers["content-type"]
+    assert "openmetrics-text" in resp.headers["content-type"]
     body = resp.text
     assert "# HELP" in body or body.strip() == "# EOF\n"
 

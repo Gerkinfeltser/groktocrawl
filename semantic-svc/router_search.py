@@ -6,8 +6,6 @@ Extracted from app.py per ADR-0037.
 import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException
-
 from app import (
     COLLECTION_NAME,
     _ensure_qdrant,
@@ -15,7 +13,8 @@ from app import (
     _get_embed_model,
     _models_ready,
 )
-from models import VectorSearchRequest, VectorSearchResult, VectorSearchResponse
+from fastapi import APIRouter, HTTPException
+from models import VectorSearchRequest, VectorSearchResponse, VectorSearchResult
 from router_index import _track_access
 
 logger = logging.getLogger(__name__)

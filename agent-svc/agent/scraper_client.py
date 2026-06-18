@@ -90,15 +90,11 @@ class ScraperClient:
                     result = await _asyncio.wait_for(
                         self.scrape(url), timeout=url_timeout
                     )
-                    if result.get("success") and result.get("data", {}).get(
-                        "markdown"
-                    ):
+                    if result.get("success") and result.get("data", {}).get("markdown"):
                         return result
                     return None
-                except (_asyncio.TimeoutError, TimeoutError):
-                    logger.warning(
-                        "Timeout scraping %s after %ss", url, url_timeout
-                    )
+                except TimeoutError:
+                    logger.warning("Timeout scraping %s after %ss", url, url_timeout)
                     return None
                 except Exception as e:
                     logger.warning("Error scraping %s: %s", url, e)
@@ -156,14 +152,13 @@ class ScraperClient:
                 self.scrape(url, force_browser=False),
                 timeout=generic_timeout,
             )
-            if result.get("success") and result.get("data", {}).get(
-                "markdown", ""
-            ).strip():
+            if (
+                result.get("success")
+                and result.get("data", {}).get("markdown", "").strip()
+            ):
                 return result
-        except (_asyncio.TimeoutError, TimeoutError):
-            logger.info(
-                "Generic scrape timed out for %s, trying browser fallback", url
-            )
+        except TimeoutError:
+            logger.info("Generic scrape timed out for %s, trying browser fallback", url)
         except Exception as e:
             logger.warning(
                 "Generic scrape failed for %s: %s, trying browser fallback", url, e
@@ -175,17 +170,14 @@ class ScraperClient:
                 self.scrape(url, force_browser=True),
                 timeout=browser_timeout,
             )
-            if result.get("success") and result.get("data", {}).get(
-                "markdown", ""
-            ).strip():
+            if (
+                result.get("success")
+                and result.get("data", {}).get("markdown", "").strip()
+            ):
                 return result
-        except (_asyncio.TimeoutError, TimeoutError):
-            logger.warning(
-                "Browser fallback also timed out for %s", url
-            )
+        except TimeoutError:
+            logger.warning("Browser fallback also timed out for %s", url)
         except Exception as e:
-            logger.warning(
-                "Browser fallback failed for %s: %s", url, e
-            )
+            logger.warning("Browser fallback failed for %s: %s", url, e)
 
         return {"success": False, "error": f"All scrape methods failed for {url}"}

@@ -66,6 +66,7 @@ def mock_scraper():
 
     async def _fb(url, generic_timeout=20.0, browser_timeout=45.0):
         return await m.scrape(url, force_browser=False)
+
     m.scrape_with_fallback = _fb
     return m
 
@@ -156,6 +157,7 @@ class TestRunResearch:
 
         async def _fb(url, generic_timeout=20.0, browser_timeout=45.0):
             return await scraper.scrape(url, force_browser=False)
+
         scraper.scrape_with_fallback = _fb
         scraper.close = AsyncMock()
 
@@ -276,7 +278,9 @@ class TestRunResearch:
         # _generate_research_plan is patched out; llm.generate is called for
         # synthesis + gap detection (multi-pass). At least one call has schema.
         assert llm.generate.call_count >= 2
-        schema_calls = [c for c in llm.generate.call_args_list if c[1].get("schema") == schema]
+        schema_calls = [
+            c for c in llm.generate.call_args_list if c[1].get("schema") == schema
+        ]
         assert len(schema_calls) >= 1
 
     @pytest.mark.asyncio
@@ -360,6 +364,7 @@ class TestRunAnswer:
 
         async def _fb(url, generic_timeout=20.0, browser_timeout=45.0):
             return await scraper.scrape(url, force_browser=False)
+
         scraper.scrape_with_fallback = _fb
         scraper.scrape.return_value = {
             "success": True,
@@ -403,6 +408,7 @@ class TestRunAnswer:
 
         async def _fb(url, generic_timeout=20.0, browser_timeout=45.0):
             return await scraper.scrape(url, force_browser=False)
+
         scraper.scrape_with_fallback = _fb
         scraper.close = AsyncMock()
 
@@ -432,6 +438,7 @@ class TestRunExtract:
 
         async def _fb(url, generic_timeout=20.0, browser_timeout=45.0):
             return await scraper.scrape(url, force_browser=False)
+
         scraper.scrape_with_fallback = _fb
         scraper.close = AsyncMock()
 
@@ -558,6 +565,7 @@ class TestRunResearchStream:
 
         async def _fb(url, generic_timeout=20.0, browser_timeout=45.0):
             return await scraper.scrape(url, force_browser=False)
+
         scraper.scrape_with_fallback = _fb
         scraper.scrape.return_value = {
             "success": True,
@@ -633,6 +641,7 @@ class TestRunResearchStream:
 
         async def _fb(url, generic_timeout=20.0, browser_timeout=45.0):
             return await scraper.scrape(url, force_browser=False)
+
         scraper.scrape_with_fallback = _fb
         scraper.scrape.return_value = {
             "success": True,
@@ -683,6 +692,7 @@ class TestRunResearchStream:
 
         async def _fb(url, generic_timeout=20.0, browser_timeout=45.0):
             return await scraper.scrape(url, force_browser=False)
+
         scraper.scrape_with_fallback = _fb
         scraper.scrape.return_value = {
             "success": False,
@@ -728,6 +738,7 @@ class TestRunResearchStream:
 
         async def _fb(url, generic_timeout=20.0, browser_timeout=45.0):
             return await scraper.scrape(url, force_browser=False)
+
         scraper.scrape_with_fallback = _fb
         scraper.scrape.return_value = {
             "success": True,
@@ -788,6 +799,7 @@ class TestRunAnswerStream:
 
         async def _fb(url, generic_timeout=20.0, browser_timeout=45.0):
             return await scraper.scrape(url, force_browser=False)
+
         scraper.scrape_with_fallback = _fb
         scraper.scrape.return_value = {
             "success": True,
@@ -887,6 +899,7 @@ class TestRunAnswerStream:
 
         async def _fb(url, generic_timeout=20.0, browser_timeout=45.0):
             return await scraper.scrape(url, force_browser=False)
+
         scraper.scrape_with_fallback = _fb
         scraper.scrape.return_value = {
             "success": True,
@@ -941,6 +954,7 @@ class TestRunAnswerStream:
 
         async def _fb(url, generic_timeout=20.0, browser_timeout=45.0):
             return await scraper.scrape(url, force_browser=False)
+
         scraper.scrape_with_fallback = _fb
         scraper.scrape.return_value = {
             "success": True,
@@ -988,6 +1002,7 @@ class TestRunAnswerStream:
 
         async def _fb(url, generic_timeout=20.0, browser_timeout=45.0):
             return await scraper.scrape(url, force_browser=False)
+
         scraper.scrape_with_fallback = _fb
         scraper.scrape.return_value = {
             "success": True,
@@ -1036,6 +1051,7 @@ class TestRunRichSearch:
 
         async def _fb(url, generic_timeout=20.0, browser_timeout=45.0):
             return await scraper.scrape(url, force_browser=False)
+
         scraper.scrape_with_fallback = _fb
         scraper.scrape.return_value = {
             "success": True,
@@ -1079,6 +1095,7 @@ class TestRunRichSearch:
 
         async def _fb(url, generic_timeout=20.0, browser_timeout=45.0):
             return await scraper.scrape(url, force_browser=False)
+
         scraper.scrape_with_fallback = _fb
         scraper.scrape.return_value = {
             "success": True,
@@ -1121,6 +1138,7 @@ class TestRunRichSearch:
 
         async def _fb(url, generic_timeout=20.0, browser_timeout=45.0):
             return await scraper.scrape(url, force_browser=False)
+
         scraper.scrape_with_fallback = _fb
         scraper.scrape.return_value = {
             "success": True,
@@ -1188,6 +1206,7 @@ class TestRunRichSearch:
 
         async def _fb(url, generic_timeout=20.0, browser_timeout=45.0):
             return await scraper.scrape(url, force_browser=False)
+
         scraper.scrape_with_fallback = _fb
         scraper.scrape.return_value = {
             "success": True,

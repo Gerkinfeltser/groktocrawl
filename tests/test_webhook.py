@@ -76,7 +76,7 @@ class TestDeliverWebhook:
 
         with (
             patch("agent.webhook.httpx.AsyncClient") as mock_client_cls,
-            patch("agent.webhook.WEBHOOK_SECRET", "my-secret"),
+            patch("agent.webhook._webhook_settings.webhook_secret", "my-secret"),
         ):
             mock_resp = MagicMock()
             mock_resp.status_code = 200

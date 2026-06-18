@@ -8,10 +8,6 @@ import json
 import logging
 import time
 
-from fastapi import APIRouter, HTTPException
-from qdrant_client import models
-from sentence_transformers import SentenceTransformer
-
 from app import (
     COLLECTION_NAME,
     EMBED_DIM,
@@ -26,6 +22,7 @@ from app import (
     _now_iso,
     _url_hash,
 )
+from fastapi import APIRouter, HTTPException
 from metrics import METRICS
 from models import (
     IndexBatchRequest,
@@ -35,11 +32,13 @@ from models import (
     IndexStatsResponse,
     ModelInfoResponse,
 )
+from qdrant_client import models
 from retention import (
     _compute_domain_category,
     _compute_retention_score,
     _evict_if_needed,
 )
+from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 

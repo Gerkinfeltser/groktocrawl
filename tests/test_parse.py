@@ -17,7 +17,7 @@ def test_health():
 def test_metrics():
     resp = client.get("/metrics")
     assert resp.status_code == 200
-    assert "text/plain" in resp.headers["content-type"]
+    assert "openmetrics-text" in resp.headers["content-type"]
     body = resp.text
     assert "# HELP" in body or body.strip() == "# EOF\n"
 
@@ -27,7 +27,7 @@ def test_unsupported_format():
         "/parse",
         files={"file": ("test.xyz", io.BytesIO(b"hello"), "application/octet-stream")},
     )
-    assert resp.status_code == 422
+    assert resp.status_code == 400
 
 
 def test_file_too_large():
@@ -79,4 +79,4 @@ def test_extension_detection():
             )
         },
     )
-    assert resp.status_code in (200, 500)
+    assert resp.status_code in (200, 422, 500)

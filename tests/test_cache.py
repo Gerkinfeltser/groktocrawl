@@ -126,14 +126,12 @@ class TestParseDomainTtls:
 
     def test_valid_json(self):
         raw = '{"news.ycombinator.com": 300, "docs.python.org": 86400}'
-        with patch.dict(os.environ, {"SCRAPE_CACHE_DOMAIN_TTLS": raw}, clear=False):
+        with patch("scraper.cache._settings.scrape_cache_domain_ttls", raw):
             result = _parse_domain_ttls()
             assert result == {"news.ycombinator.com": 300, "docs.python.org": 86400}
 
     def test_invalid_json_returns_empty(self):
-        with patch.dict(
-            os.environ, {"SCRAPE_CACHE_DOMAIN_TTLS": "not-json"}, clear=False
-        ):
+        with patch("scraper.cache._settings.scrape_cache_domain_ttls", "not-json"):
             assert _parse_domain_ttls() == {}
 
 
@@ -142,25 +140,25 @@ class TestParseDomainTtls:
 
 class TestResolveCacheTtl:
     def test_default_ttl_when_no_domain_match(self):
-        with patch.dict(os.environ, {"SCRAPE_CACHE_DOMAIN_TTLS": "{}"}, clear=False):
+        with patch("scraper.cache._settings.scrape_cache_domain_ttls", "{}"):
             ttl = _resolve_cache_ttl("https://example.com/page")
             assert ttl == 3600
 
     def test_matches_root_domain_exactly(self):
         raw = json.dumps({"example.com": 1800})
-        with patch.dict(os.environ, {"SCRAPE_CACHE_DOMAIN_TTLS": raw}, clear=False):
+        with patch("scraper.cache._settings.scrape_cache_domain_ttls", raw):
             ttl = _resolve_cache_ttl("https://example.com/page")
             assert ttl == 1800
 
     def test_longest_suffix_match_wins(self):
         raw = json.dumps({"python.org": 7200, "docs.python.org": 86400})
-        with patch.dict(os.environ, {"SCRAPE_CACHE_DOMAIN_TTLS": raw}, clear=False):
+        with patch("scraper.cache._settings.scrape_cache_domain_ttls", raw):
             ttl = _resolve_cache_ttl("https://docs.python.org/3/")
             assert ttl == 86400  # Longer match wins
 
     def test_subdomain_matches_parent(self):
         raw = json.dumps({"python.org": 7200})
-        with patch.dict(os.environ, {"SCRAPE_CACHE_DOMAIN_TTLS": raw}, clear=False):
+        with patch("scraper.cache._settings.scrape_cache_domain_ttls", raw):
             ttl = _resolve_cache_ttl("https://docs.python.org/3/")
             assert ttl == 7200
 

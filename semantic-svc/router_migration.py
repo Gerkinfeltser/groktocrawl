@@ -6,10 +6,6 @@ Extracted from app.py per ADR-0037.
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException
-from qdrant_client import models
-from sentence_transformers import SentenceTransformer
-
 from app import (
     COLLECTION_NAME,
     EMBED_DIM,
@@ -20,9 +16,14 @@ from app import (
     _now_iso,
     _set_active_override,
     _set_migration_task,
+)
+from app import (
     app as fastapi_app,
 )
+from fastapi import APIRouter, HTTPException
 from models import MigrationStartRequest, MigrationStatusResponse
+from qdrant_client import models
+from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +175,7 @@ async def migrate_start(body: MigrationStartRequest):
     try:
         collection_info = qdrant.get_collection(COLLECTION_NAME)
         vectors_config = collection_info.config.params.vectors
-        if hasattr(vectors_config, 'get') and target_nv not in vectors_config:
+        if hasattr(vectors_config, "get") and target_nv not in vectors_config:
             raise HTTPException(
                 400,
                 f"Target named vector '{target_nv}' is not configured on the collection. "
@@ -190,17 +191,19 @@ async def migrate_start(body: MigrationStartRequest):
         )
 
     _migration.clear()
-    _migration.update({
-        "status": "backfilling",
-        "source_model": EMBED_MODEL_NAME,
-        "source_dim": EMBED_DIM,
-        "target_model": target_model_id,
-        "target_dim": target_dim,
-        "docs_processed": 0,
-        "docs_total": 0,
-        "started_at": _now_iso(),
-        "completed_at": "",
-    })
+    _migration.update(
+        {
+            "status": "backfilling",
+            "source_model": EMBED_MODEL_NAME,
+            "source_dim": EMBED_DIM,
+            "target_model": target_model_id,
+            "target_dim": target_dim,
+            "docs_processed": 0,
+            "docs_total": 0,
+            "started_at": _now_iso(),
+            "completed_at": "",
+        }
+    )
 
     _set_migration_task(
         fastapi_app.state.task_tracker.create_background_task(

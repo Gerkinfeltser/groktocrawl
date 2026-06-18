@@ -81,7 +81,7 @@ class TestAgentRequest:
         from agent.models import AgentRequest
 
         with pytest.raises(ValidationError):
-            AgentRequest(prompt="x" * 10001)
+            AgentRequest(prompt="x" * 100001)
 
 
 class TestAgentCreateResponse:

@@ -8,10 +8,9 @@ import logging
 import math
 import urllib.parse
 
-from qdrant_client import QdrantClient, models
-
 from app import COLLECTION_NAME, MAX_DOCS
 from metrics import METRICS
+from qdrant_client import QdrantClient, models
 
 logger = logging.getLogger(__name__)
 
