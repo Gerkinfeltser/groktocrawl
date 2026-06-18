@@ -216,11 +216,15 @@ async def _head_probe(url: str, client: httpx.AsyncClient) -> dict:
         }
 
 
-async def smart_scrape(url: str) -> dict:
+async def smart_scrape(url: str, force_browser: bool = False) -> dict:
     """Try each tier in order. Return the first successful result with acceptable quality.
 
     Degrades through tiers when quality is below QA_MIN_QUALITY_THRESHOLD.
     Returns the best-effort result if all tiers produce low quality.
+
+    When ``force_browser`` is True, skips the HEAD probe and Tiers 1-2,
+    going straight to Tier 3 (Playwright render). Used for Cloudflare-
+    protected pages where the lightweight tiers would fail or timeout.
 
     When SCRAPER_POLITENESS_ENABLED=true, checks robots.txt and enforces
     per-domain rate limits before each tier.
@@ -228,6 +232,88 @@ async def smart_scrape(url: str) -> dict:
     Returns a dict with keys: markdown, source, url, quality, error (optional).
     """
     best_effort: list[dict] = []
+
+    # ── force_browser fast path ─────────────────────────────────
+    # Skip the adapter, cache, HEAD probe, and lightweight tiers.
+    # Jump directly to Tier 3 (Playwright) for Cloudflare-protected
+    # or JS-heavy pages.
+    if force_browser:
+        logger.info("force_browser=True, jumping to Tier 3 for %s", url)
+        # Politeness check still applies
+        _proceed, blocked = await _politeness_check_and_delay(url)
+        if blocked:
+            return blocked
+
+        result = await fetch_via_playwright(url)
+        if result:
+            # Barrier detection
+            if "barrier" in result:
+                logger.warning(
+                    "Barrier detected at force_browser Tier 3 for %s", url
+                )
+            markdown_text = result.get("markdown", "")
+            raw_html = result.get("raw_html_start", "")
+            barrier = _classify_barrier("", url, markdown_text, raw_html)
+            if not barrier.detected or barrier.confidence <= 0.7:
+                accepted = await _maybe_degrade(
+                    result, "tier3-playwright", best_effort
+                )
+                if accepted:
+                    accepted = await _enrich_with_politeness(accepted, url)
+                    return accepted
+            else:
+                logger.info(
+                    "force_browser Tier 3 barrier for %s: %s (conf=%.2f)",
+                    url,
+                    barrier.barrier_type or "none",
+                    barrier.confidence,
+                )
+
+        # Fall through to FlareSolverr
+        _proceed, blocked = await _politeness_check_and_delay(url)
+        if blocked:
+            return blocked
+        fs_result = await fetch_via_flaresolverr(url)
+        if fs_result:
+            if "barrier" in fs_result:
+                logger.warning(
+                    "Barrier detected at force_browser Tier 3.5 for %s", url
+                )
+                return fs_result
+            accepted = await _maybe_degrade(
+                fs_result, "tier35-flaresolverr", best_effort
+            )
+            if accepted:
+                accepted = await _enrich_with_politeness(accepted, url)
+                return accepted
+
+        # Return best effort or error
+        if best_effort:
+            best = max(
+                best_effort, key=lambda r: r.get("quality", {}).get("score", 0.0)
+            )
+            bq = best.get("quality", {})
+            bs = bq.get("score", 0.0)
+            logger.warning(
+                "force_browser all tiers exhausted for %s, returning best effort (quality=%.2f)",
+                url,
+                bs,
+            )
+            best["warning"] = (
+                f"Suboptimal content — quality ({bs:.2f}) below threshold "
+                f"({QA_MIN_QUALITY_THRESHOLD:.2f})"
+            )
+            return await _enrich_with_politeness(best, url)
+
+        return await _enrich_with_politeness(
+            {
+                "error": f"Could not extract content from {url}",
+                "markdown": "",
+                "source": "none",
+                "url": url,
+            },
+            url,
+        )
 
     # Log proxy status for debugging (per-scrape proxy identity logging)
     proxy_url = SCRAPER_PROXY_URL

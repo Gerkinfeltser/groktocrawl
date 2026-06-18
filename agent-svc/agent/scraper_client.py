@@ -17,17 +17,23 @@ class ScraperClient:
         self.base_url = base_url.rstrip("/")
         self._client = httpx.AsyncClient(timeout=60)
 
-    async def scrape(self, url: str) -> dict:
+    async def scrape(self, url: str, force_browser: bool = False) -> dict:
         """Scrape a URL via the scraper service.
 
         Returns dict with keys: success, data (with markdown, source), error.
         Records scrape latency metrics by source tier.
+
+        When ``force_browser`` is True, the scraper-svc skips lightweight
+        tiers and goes straight to Playwright render (Tier 3).
         """
         start = time.monotonic()
         try:
+            body: dict = {"url": url}
+            if force_browser:
+                body["force_browser"] = True
             resp = await self._client.post(
                 f"{self.base_url}/scrape",
-                json={"url": url},
+                json=body,
             )
             result = resp.json()
             elapsed = time.monotonic() - start
@@ -58,3 +64,128 @@ class ScraperClient:
 
     async def close(self) -> None:
         await self._client.aclose()
+
+    async def scrape_urls_batch(
+        self,
+        urls: list[str],
+        max_concurrent: int = 5,
+        url_timeout: float = 20.0,
+        min_sources: int = 10,
+    ) -> list[dict]:
+        """Scrape multiple URLs concurrently with bounded concurrency.
+
+        Returns list of result dicts (with success, data keys) for completed scrapes.
+        Stops early when ``min_sources`` successful results are collected.
+        Records metrics for concurrent scrape operations.
+        """
+        import asyncio as _asyncio
+
+        semaphore = _asyncio.Semaphore(max_concurrent)
+        documents: list[dict] = []
+        completed_urls: set[str] = set()
+
+        async def _scrape_one(url: str) -> dict | None:
+            async with semaphore:
+                try:
+                    result = await _asyncio.wait_for(
+                        self.scrape(url), timeout=url_timeout
+                    )
+                    if result.get("success") and result.get("data", {}).get(
+                        "markdown"
+                    ):
+                        return result
+                    return None
+                except (_asyncio.TimeoutError, TimeoutError):
+                    logger.warning(
+                        "Timeout scraping %s after %ss", url, url_timeout
+                    )
+                    return None
+                except Exception as e:
+                    logger.warning("Error scraping %s: %s", url, e)
+                    return None
+
+        async def _collect_one(url: str) -> None:
+            if url in completed_urls:
+                return
+            result = await _scrape_one(url)
+            if result:
+                documents.append(result)
+                completed_urls.add(url)
+
+        # Launch tasks, collect results, stop early at min_sources
+        tasks = [_asyncio.create_task(_collect_one(u)) for u in urls]
+        pending = set(tasks)
+        while pending and len(documents) < min_sources:
+            done, pending = await _asyncio.wait(
+                pending, return_when=_asyncio.FIRST_COMPLETED
+            )
+            for t in done:
+                try:
+                    t.result()
+                except Exception:
+                    pass
+
+        # Cancel remaining tasks
+        for t in pending:
+            t.cancel()
+
+        logger.info(
+            "Batch scraped %d/%d URLs (min_sources=%d)",
+            len(documents),
+            len(urls),
+            min_sources,
+        )
+        return documents
+
+    async def scrape_with_fallback(
+        self,
+        url: str,
+        generic_timeout: float = 20.0,
+        browser_timeout: float = 45.0,
+    ) -> dict:
+        """Try generic scrape first, fall back to browser-tier on failure/empty.
+
+        Returns the first successful result dict (with ``success``, ``data`` keys)
+        or a failure dict.
+        """
+        import asyncio as _asyncio
+
+        # ── Try generic (fast path) ───────────────────────────
+        try:
+            result = await _asyncio.wait_for(
+                self.scrape(url, force_browser=False),
+                timeout=generic_timeout,
+            )
+            if result.get("success") and result.get("data", {}).get(
+                "markdown", ""
+            ).strip():
+                return result
+        except (_asyncio.TimeoutError, TimeoutError):
+            logger.info(
+                "Generic scrape timed out for %s, trying browser fallback", url
+            )
+        except Exception as e:
+            logger.warning(
+                "Generic scrape failed for %s: %s, trying browser fallback", url, e
+            )
+
+        # ── Try browser (slow path, longer timeout) ────────────
+        try:
+            result = await _asyncio.wait_for(
+                self.scrape(url, force_browser=True),
+                timeout=browser_timeout,
+            )
+            if result.get("success") and result.get("data", {}).get(
+                "markdown", ""
+            ).strip():
+                return result
+        except (_asyncio.TimeoutError, TimeoutError):
+            logger.warning(
+                "Browser fallback also timed out for %s", url
+            )
+        except Exception as e:
+            logger.warning(
+                "Browser fallback failed for %s: %s", url, e
+            )
+
+        return {"success": False, "error": f"All scrape methods failed for {url}"}
