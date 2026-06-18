@@ -16,7 +16,9 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 AGENT_BASE_URL = os.getenv("AGENT_BASE_URL", "http://agent-svc:8080")
-ANSWER_URL = f"{AGENT_BASE_URL}/v2/answer"
+# Strip any trailing slash so the join with "/v2/answer" is always clean.
+BASE = AGENT_BASE_URL.rstrip("/")
+ANSWER_URL = f"{BASE}/v2/answer"
 
 templates = Jinja2Templates(
     directory=os.path.join(os.path.dirname(__file__), "templates")
@@ -30,7 +32,7 @@ app = FastAPI(
 
 # ── Instrumentation ──────────────────────────────────────────
 add_request_id_middleware(app)
-METRICS.counter("portal_queries_total", "Total portal queries")
+_queries_counter = METRICS.counter("portal_queries_total", "Total portal queries")
 
 
 @app.get("/health")
@@ -54,20 +56,37 @@ async def index(request: Request):
 
 @app.post("/ask")
 async def ask(query: str = Form(...), num_sources: int = Form(5)):
-    """Proxy a grounded Q&A query to agent-svc, streaming SSE results back."""
+    """Proxy a grounded Q&A query to agent-svc, streaming SSE results back.
+
+    Errors from the downstream agent are communicated as SSE ``error``
+    events so the frontend can display them inline.  Transport-level
+    failures (e.g. agent unreachable) are also caught and converted to
+    SSE error events.
+    """
+    _queries_counter.inc()
 
     async def proxy_stream():
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream(
-                "POST",
-                ANSWER_URL,
-                json={
-                    "query": query,
-                    "num_sources": num_sources,
-                    "stream": True,
-                },
-            ) as response:
-                async for chunk in response.aiter_bytes():
-                    yield chunk
+        try:
+            async with httpx.AsyncClient(timeout=None) as client:
+                async with client.stream(
+                    "POST",
+                    ANSWER_URL,
+                    json={
+                        "query": query,
+                        "num_sources": num_sources,
+                        "stream": True,
+                    },
+                ) as response:
+                    if response.status_code >= 400:
+                        body = await response.aread()
+                        yield (
+                            f"event: error\ndata: {body.decode(errors='replace')}\n\n"
+                        ).encode()
+                        return
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+        except httpx.ConnectError:
+            logger.warning("Agent unreachable at %s", ANSWER_URL)
+            yield b"event: error\ndata: Service unavailable\n\n"
 
     return StreamingResponse(proxy_stream(), media_type="text/event-stream")
