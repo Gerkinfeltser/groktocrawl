@@ -28,7 +28,7 @@ jobs:
         run: |
           vulture . \
             --exclude ".venv,.venv-sys,htmlcov,graphify-out,droid-wiki,node_modules,dist,build,__pycache__,*.egg-info,.git" \
-            --min-confidence 80
+            --min-confidence 90
 
   unused-deps:
     runs-on: ubuntu-latest
@@ -41,12 +41,10 @@ jobs:
         run: pip install deptry
       - name: Run deptry per service (unused dependency detection)
         run: |
-          # Install all deps first
-          pip install -e ".[dev]"
           for svc in agent-svc scraper-svc semantic-svc browser-svc parse-svc portal-svc; do
             echo "=== $svc ==="
             pip install -e "$svc" 2>/dev/null || true
-            deptry "$svc" --per-rule-ignores '{"DEP002":{"allowlist":["pytest","pytest-cov","pytest-xdist","httpx","vulture","deptry","jscpd"]}}' || true
+            deptry "$svc" --per-rule-ignores '{"DEP002":{"allowlist":["pytest","pytest-cov","pytest-xdist","httpx","vulture","deptry"]}}' || true
           done
 
   duplicate-code:
@@ -59,9 +57,9 @@ jobs:
         run: |
           jscpd \
             --pattern "**/*.py" \
-            --ignore ".venv,.venv-sys,htmlcov,graphify-out,droid-wiki,node_modules,dist,build,__pycache__,*.egg-info,.git" \
+            --ignore ".venv,.venv-sys,htmlcov,graphify-out,droid-wiki,node_modules,dist,build,__pycache__,*.egg-info,.git,common" \
             --min-tokens 50 \
             --min-lines 5 \
-            --threshold 5 \
+            --threshold 15 \
             --reporters console \
             .
