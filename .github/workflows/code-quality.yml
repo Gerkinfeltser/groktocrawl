@@ -80,3 +80,15 @@ jobs:
           mypy agent-svc/agent scraper-svc/scraper search-svc/search_svc \
                llm-svc/llm_svc parse-svc/parse_svc portal-svc/portal \
                browser-svc/browser_svc semantic-svc common/
+
+  ruff-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: pip install ruff
+      - name: Run ruff TD check (TODO/FIXME enforcement)
+        run: python3 -m ruff check --select TD
