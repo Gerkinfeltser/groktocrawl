@@ -251,7 +251,13 @@ class TestRunResearch:
             patch("agent.research.SearXNGClient", return_value=searxng),
             patch("agent.research.ScraperClient", return_value=scraper),
             patch("agent.research.LLMClient", return_value=llm),
+            patch("agent.research._generate_research_plan") as mock_plan,
         ):
+            mock_plan.return_value = {
+                "reasoning": "",
+                "research_strategy": "focused",
+                "focused_queries": ["Extract name"],
+            }
             result = await run_research(
                 prompt="Extract name",
                 urls=["https://example.com"],
@@ -259,6 +265,7 @@ class TestRunResearch:
             )
 
         assert result["result"] == '{"name": "AI"}'
+        # _generate_research_plan is patched out; llm.generate is called once for synthesis
         llm.generate.assert_called_once()
         assert llm.generate.call_args[1].get("schema") == schema
 
@@ -539,6 +546,10 @@ class TestRunResearchStream:
             yield {"type": "done", "full_content": "Here is the answer."}
 
         llm = MagicMock()
+        llm.generate = AsyncMock()
+        llm.generate.return_value = (
+            '{"research_strategy": "focused", "focused_queries": ["What is AI?"]}'
+        )
         llm.generate_stream = _stream
         llm.close = AsyncMock()
 
@@ -551,12 +562,18 @@ class TestRunResearchStream:
             async for event in run_research_stream(prompt="What is AI?"):
                 events.append(event)
 
-        # Verify event sequence — status heartbeat is now the first event
-        assert len(events) >= 5
+        # Verify event sequence — Phase 0 planning → Phase 1 discovery → Phase 2 synthesis
+        assert len(events) >= 7
+        # Phase 0: planning
         assert events[0]["type"] == "status"
-        assert events[0]["state"] == "searching"
-        assert events[1]["type"] == "sources_pending"
-        assert len(events[1]["sources"]) == 1
+        assert events[0]["state"] == "planning"
+        assert events[1]["type"] == "research_plan"
+        assert "queries" in events[1]
+        # Phase 1: searching + discovery
+        assert events[2]["type"] == "status"
+        assert events[2]["state"] == "searching"
+        assert events[3]["type"] == "sources_pending"
+        assert len(events[3]["sources"]) == 1
         # source_scraped events
         scraped_events = [e for e in events if e["type"] == "source_scraped"]
         assert len(scraped_events) >= 1
@@ -603,7 +620,9 @@ class TestRunResearchStream:
             patch("agent.research.LLMClient", return_value=llm),
         ):
             events = []
-            async for event in run_research_stream(prompt="Extract data", schema=schema):
+            async for event in run_research_stream(
+                prompt="Extract data", schema=schema
+            ):
                 events.append(event)
 
         types = [e["type"] for e in events]
@@ -636,6 +655,10 @@ class TestRunResearchStream:
         scraper.close = AsyncMock()
 
         llm = MagicMock()
+        llm.generate = AsyncMock()
+        llm.generate.return_value = (
+            '{"research_strategy": "focused", "focused_queries": ["Anything?"]}'
+        )
         llm.close = AsyncMock()
 
         with (
@@ -673,8 +696,14 @@ class TestRunResearchStream:
         scraper.close = AsyncMock()
 
         llm = MagicMock()
+        llm.generate = AsyncMock()
+        llm.generate.return_value = (
+            '{"research_strategy": "focused", "focused_queries": ["Test"]}'
+        )
+
         async def _error_stream(*args, **kwargs):
             yield {"type": "error", "content": "LLM rate limit exceeded"}
+
         llm.generate_stream = _error_stream
         llm.close = AsyncMock()
 
@@ -703,7 +732,13 @@ class TestRunAnswerStream:
         searxng = MagicMock()
         searxng.search = AsyncMock()
         searxng.search.return_value = (
-            [{"url": "https://example.com", "title": "Example", "description": "A test page"}],
+            [
+                {
+                    "url": "https://example.com",
+                    "title": "Example",
+                    "description": "A test page",
+                }
+            ],
             MagicMock(),
         )
         searxng.close = AsyncMock()
@@ -717,10 +752,12 @@ class TestRunAnswerStream:
         scraper.close = AsyncMock()
 
         llm = MagicMock()
+
         async def _stream(*args, **kwargs):
             yield {"type": "token", "content": "Based on [1] "}
             yield {"type": "token", "content": "the answer is 42."}
             yield {"type": "done", "full_content": "Based on [1] the answer is 42."}
+
         llm.generate_stream = _stream
         llm.close = AsyncMock()
 
@@ -730,7 +767,9 @@ class TestRunAnswerStream:
             patch("agent.research.LLMClient", return_value=llm),
         ):
             events = []
-            async for event in run_answer_stream(query="What is the answer?", num_sources=1):
+            async for event in run_answer_stream(
+                query="What is the answer?", num_sources=1
+            ):
                 events.append(event)
 
         types = [e["type"] for e in events]
@@ -739,7 +778,7 @@ class TestRunAnswerStream:
         assert "token" in types
         assert "done" in types
 
-        done_event = [e for e in events if e["type"] == "done"][0]
+        done_event = next(e for e in events if e["type"] == "done")
         assert "answer" in done_event
         assert done_event["answer"] == "Based on [1] the answer is 42."
         # Citations should be parsed
@@ -771,7 +810,7 @@ class TestRunAnswerStream:
             async for event in run_answer_stream(query="Anything?"):
                 events.append(event)
 
-        done_event = [e for e in events if e["type"] == "done"][0]
+        done_event = next(e for e in events if e["type"] == "done")
         assert "No relevant web pages found" in done_event["answer"]
         assert done_event["citations"] == []
 
@@ -784,8 +823,16 @@ class TestRunAnswerStream:
         searxng.search = AsyncMock()
         searxng.search.return_value = (
             [
-                {"url": "https://source-a.com", "title": "Source A", "description": "desc a"},
-                {"url": "https://source-b.com", "title": "Source B", "description": "desc b"},
+                {
+                    "url": "https://source-a.com",
+                    "title": "Source A",
+                    "description": "desc a",
+                },
+                {
+                    "url": "https://source-b.com",
+                    "title": "Source B",
+                    "description": "desc b",
+                },
             ],
             MagicMock(),
         )
@@ -800,9 +847,14 @@ class TestRunAnswerStream:
         scraper.close = AsyncMock()
 
         llm = MagicMock()
+
         async def _stream(*args, **kwargs):
             yield {"type": "token", "content": "Per [1] and [2], the answer is clear."}
-            yield {"type": "done", "full_content": "Per [1] and [2], the answer is clear."}
+            yield {
+                "type": "done",
+                "full_content": "Per [1] and [2], the answer is clear.",
+            }
+
         llm.generate_stream = _stream
         llm.close = AsyncMock()
 
@@ -812,10 +864,12 @@ class TestRunAnswerStream:
             patch("agent.research.LLMClient", return_value=llm),
         ):
             events = []
-            async for event in run_answer_stream(query="Test with citations", num_sources=2):
+            async for event in run_answer_stream(
+                query="Test with citations", num_sources=2
+            ):
                 events.append(event)
 
-        done_event = [e for e in events if e["type"] == "done"][0]
+        done_event = next(e for e in events if e["type"] == "done")
         citations = done_event["citations"]
         assert len(citations) == 2
         assert citations[0]["index"] == 1
@@ -843,8 +897,10 @@ class TestRunAnswerStream:
         scraper.close = AsyncMock()
 
         llm = MagicMock()
+
         async def _stream(*args, **kwargs):
             yield {"type": "done", "full_content": "Answer."}
+
         llm.generate_stream = _stream
         llm.close = AsyncMock()
 
@@ -855,7 +911,9 @@ class TestRunAnswerStream:
             patch("agent.research._rerank_answer_sources") as mock_rerank,
         ):
             events = []
-            async for event in run_answer_stream(query="Test", retrieval_mode="keyword"):
+            async for event in run_answer_stream(
+                query="Test", retrieval_mode="keyword"
+            ):
                 events.append(event)
 
         mock_rerank.assert_not_called()
@@ -882,8 +940,10 @@ class TestRunAnswerStream:
         scraper.close = AsyncMock()
 
         llm = MagicMock()
+
         async def _stream(*args, **kwargs):
             yield {"type": "done", "full_content": "Answer."}
+
         llm.generate_stream = _stream
         llm.close = AsyncMock()
 
@@ -894,7 +954,9 @@ class TestRunAnswerStream:
             patch("agent.research._rerank_answer_sources") as mock_rerank,
         ):
             events = []
-            async for event in run_answer_stream(query="Test", retrieval_mode="semantic"):
+            async for event in run_answer_stream(
+                query="Test", retrieval_mode="semantic"
+            ):
                 events.append(event)
 
         mock_rerank.assert_called_once()
