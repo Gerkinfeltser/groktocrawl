@@ -412,6 +412,8 @@ class YouTubeAdapter(SiteAdapter):
         transcript = None
         description = None
         try:
+            t_result: object
+            d_result: object
             t_result, d_result = await asyncio.gather(
                 ctx.with_timeout(_fetch_transcript(video_id), timeout=12),
                 ctx.with_timeout(_fetch_description(video_id), timeout=10),

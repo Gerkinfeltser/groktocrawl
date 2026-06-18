@@ -832,6 +832,7 @@ async def _fetch_issue(owner: str, repo: str, number: int) -> dict | None:
     logger.debug("GraphQL issue failed, trying REST for %s/%s#%d", owner, repo, number)
     issue = await _rest_get(f"/repos/{owner}/{repo}/issues/{number}")
     if issue:
+        assert isinstance(issue, dict)
         comments = await _rest_get(
             f"/repos/{owner}/{repo}/issues/{number}/comments", {"per_page": 100}
         )
@@ -876,6 +877,7 @@ async def _fetch_pull(owner: str, repo: str, number: int) -> dict | None:
     logger.debug("GraphQL PR failed, trying REST for %s/%s#%d", owner, repo, number)
     pr = await _rest_get(f"/repos/{owner}/{repo}/pulls/{number}")
     if pr:
+        assert isinstance(pr, dict)
         comments = await _rest_get(
             f"/repos/{owner}/{repo}/issues/{number}/comments", {"per_page": 100}
         )
@@ -958,6 +960,7 @@ async def _fetch_release(owner: str, repo: str, tag: str) -> dict | None:
     )
     release = await _rest_get(f"/repos/{owner}/{repo}/releases/tags/{tag}")
     if release:
+        assert isinstance(release, dict)
         assets = await _rest_get(
             f"/repos/{owner}/{repo}/releases/{release.get('id')}/assets"
         )
@@ -1041,6 +1044,7 @@ async def _fetch_commit(owner: str, repo: str, sha: str) -> dict | None:
     logger.debug("GraphQL commit failed, trying REST for %s/%s/%s", owner, repo, sha)
     commit = await _rest_get(f"/repos/{owner}/{repo}/commits/{sha}")
     if commit:
+        assert isinstance(commit, dict)
         author_info = commit.get("commit", {}).get("author", {}) or {}
         committer_info = commit.get("commit", {}).get("committer", {}) or {}
         message = commit.get("commit", {}).get("message", "")

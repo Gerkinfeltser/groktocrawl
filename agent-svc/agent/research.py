@@ -195,22 +195,18 @@ async def _run_multi_query_discover_and_scrape(
         )
         import asyncio as _asyncio
 
-        search_tasks = [
-            searxng.search(q, limit=10) for q in queries_to_run
-        ]
+        search_tasks = [searxng.search(q, limit=10) for q in queries_to_run]
         search_results_list = await _asyncio.gather(
             *search_tasks, return_exceptions=True
         )
-        for i, (query, result_tuple) in enumerate(
+        for i, (query, result_tuple) in enumerate(  # type: ignore[misc]
             zip(queries_to_run, search_results_list), start=1
         ):
             logger.info("  [%d/%d] Searching: %s", i, len(queries_to_run), query)
             if isinstance(result_tuple, Exception):
-                logger.warning(
-                    "Search failed for %s: %s", query, result_tuple
-                )
+                logger.warning("Search failed for %s: %s", query, result_tuple)
                 continue
-            results, _health = result_tuple
+            results, _health = result_tuple  # type: ignore[misc]
             for r in results:
                 url = r.get("url", "")
                 if url and url not in seen_urls:
@@ -401,7 +397,9 @@ async def run_research(
                     urls=None,
                     searxng=searxng,
                     scraper=scraper,
-                    max_searches_per_request=min(len(gap_topics), max_searches_per_request),
+                    max_searches_per_request=min(
+                        len(gap_topics), max_searches_per_request
+                    ),
                 )
 
             context = discovered["context"]
@@ -595,8 +593,7 @@ async def run_research_stream(
                 yield {
                     "type": "done",
                     "result": (
-                        "I was unable to find or scrape any relevant "
-                        "web pages."
+                        "I was unable to find or scrape any relevant web pages."
                     ),
                     "sources": [],
                     "latency_ms": elapsed,
@@ -621,8 +618,7 @@ async def run_research_stream(
                 yield {
                     "type": "done",
                     "result": (
-                        "I was unable to find or scrape any relevant "
-                        "web pages."
+                        "I was unable to find or scrape any relevant web pages."
                     ),
                     "sources": [],
                     "latency_ms": elapsed,
@@ -924,22 +920,24 @@ def _score_url(url: str) -> int:
         score += 2
 
     # Known high-quality domains (gardening, health, academic, news)
-    _high_quality = frozenset({
-        "provenwinners.com",
-        "logees.com",
-        "almanac.com",
-        "nhs.uk",
-        "mayoclinic.org",
-        "webmd.com",
-        "sciencedirect.com",
-        "scholar.google.com",
-        "acm.org",
-        "ieee.org",
-        "arstechnica.com",
-        "reuters.com",
-        "apnews.com",
-        "npr.org",
-    })
+    _high_quality = frozenset(
+        {
+            "provenwinners.com",
+            "logees.com",
+            "almanac.com",
+            "nhs.uk",
+            "mayoclinic.org",
+            "webmd.com",
+            "sciencedirect.com",
+            "scholar.google.com",
+            "acm.org",
+            "ieee.org",
+            "arstechnica.com",
+            "reuters.com",
+            "apnews.com",
+            "npr.org",
+        }
+    )
     if any(d in hostname for d in _high_quality):
         score += 2
     if hostname.endswith(".gov") or hostname.endswith(".org"):
@@ -951,17 +949,19 @@ def _score_url(url: str) -> int:
         score += 1
 
     # ── Penalise social media / aggregators ────────────────────
-    _low_quality = frozenset({
-        "reddit.com",
-        "pinterest.com",
-        "facebook.com",
-        "twitter.com",
-        "x.com",
-        "linkedin.com",
-        "tumblr.com",
-        "quora.com",
-        "stackexchange.com",
-    })
+    _low_quality = frozenset(
+        {
+            "reddit.com",
+            "pinterest.com",
+            "facebook.com",
+            "twitter.com",
+            "x.com",
+            "linkedin.com",
+            "tumblr.com",
+            "quora.com",
+            "stackexchange.com",
+        }
+    )
     if any(d in hostname for d in _low_quality):
         score -= 1
 

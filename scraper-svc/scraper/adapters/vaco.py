@@ -83,7 +83,7 @@ def _extract_ldjson(html: str) -> dict | None:
             continue
 
         # Handle both direct object and @graph wrappers
-        candidates = []
+        candidates: list[dict] = []
         if isinstance(data, dict):
             graph = data.get("@graph")
             if isinstance(graph, list):

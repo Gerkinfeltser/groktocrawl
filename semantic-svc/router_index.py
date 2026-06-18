@@ -170,6 +170,7 @@ async def index_page(body: IndexRequest):
     if _migration["status"] == "dual_write":
         target_name = _migration["target_model"]
         if target_name:
+            assert isinstance(target_name, str)
             try:
                 target_model = SentenceTransformer(target_name)
                 target_embedding = target_model.encode(
@@ -265,11 +266,12 @@ async def index_batch(body: IndexBatchRequest):
         if _migration["status"] == "dual_write":
             target_name = _migration["target_model"]
             if target_name:
+                assert isinstance(target_name, str)
                 try:
                     loop = asyncio.get_event_loop()
                     target_embedding = await loop.run_in_executor(
                         None,
-                        lambda tn=target_name, p=page: (
+                        lambda tn=target_name, p=page: (  # type: ignore[misc]
                             SentenceTransformer(tn)
                             .encode(p.content[:2000], normalize_embeddings=True)
                             .tolist()

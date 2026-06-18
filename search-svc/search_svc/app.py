@@ -56,14 +56,14 @@ def _search(q: str, limit: int = 5):
         score = sum(1 for kw in item["keywords"] if kw in q)
         ranked.append((score, item))
     ranked.sort(key=lambda x: x[0], reverse=True)
-    results = []
+    results: list[dict[str, str]] = []
     for score, item in ranked:
         if score > 0 or not results:
             results.append(
                 {
-                    "url": item["url"],
-                    "title": item["title"],
-                    "description": item["description"],
+                    "url": str(item["url"]),
+                    "title": str(item["title"]),
+                    "description": str(item["description"]),
                 }
             )
         if len(results) >= limit:
