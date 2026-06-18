@@ -33,7 +33,8 @@ import time
 from contextlib import asynccontextmanager
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Request, Response
+from auth import verify_api_key
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from metrics import METRICS
 from models import (
     EmbedRequest,
@@ -192,6 +193,31 @@ def _set_active_override(val: str | None) -> None:
     """Set the in-memory active model override (used by migration cutover)."""
     global _active_override
     _active_override = val
+
+
+# ── Target model cache for migration dual-write ────────────────────
+# Cached globally so that batch dual-write does not instantiate a new
+# SentenceTransformer per page (see fix-semantic-hardening).
+
+_target_embed_model: SentenceTransformer | None = None
+_target_embed_model_name: str = ""
+
+
+async def _get_target_embed_model(target_name: str) -> SentenceTransformer:
+    """Get or load the target embedding model for migration dual-write.
+
+    Caches the model globally so that batch dual-write (which can process
+    hundreds of pages in a single request) does not re-instantiate the
+    SentenceTransformer for each page.
+    """
+    global _target_embed_model, _target_embed_model_name
+    if _target_embed_model is None or _target_embed_model_name != target_name:
+        loop = asyncio.get_event_loop()
+        _target_embed_model = await loop.run_in_executor(
+            None, lambda: SentenceTransformer(target_name)
+        )
+        _target_embed_model_name = target_name
+    return _target_embed_model
 
 
 def _set_migration_task(task: asyncio.Task | None) -> None:
@@ -420,4 +446,8 @@ from router_search import router_search
 
 app.include_router(router_index, prefix="/index")
 app.include_router(router_search, prefix="/search")
-app.include_router(router_migration, prefix="/index/migrate")
+app.include_router(
+    router_migration,
+    prefix="/index/migrate",
+    dependencies=[Depends(verify_api_key)],
+)

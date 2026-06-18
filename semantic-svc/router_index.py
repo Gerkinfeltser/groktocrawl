@@ -17,6 +17,7 @@ from app import (
     _ensure_qdrant,
     _get_active_model,
     _get_embed_model,
+    _get_target_embed_model,
     _migration,
     _named_vector_name,
     _now_iso,
@@ -38,7 +39,6 @@ from retention import (
     _compute_retention_score,
     _evict_if_needed,
 )
-from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 
@@ -167,12 +167,13 @@ async def index_page(body: IndexRequest):
     vectors = {active_nv: embedding}
 
     # During dual-write phase, also embed with the target model
+    # Uses globally cached model (fix-semantic-hardening: avoid per-request instantiation)
     if _migration["status"] == "dual_write":
         target_name = _migration["target_model"]
         if target_name:
             assert isinstance(target_name, str)
             try:
-                target_model = SentenceTransformer(target_name)
+                target_model = await _get_target_embed_model(target_name)
                 target_embedding = target_model.encode(
                     body.content[:2000], normalize_embeddings=True
                 ).tolist()
@@ -239,6 +240,22 @@ async def index_batch(body: IndexBatchRequest):
 
     # Build points with payloads
     active_nv = _get_active_model()
+
+    # Pre-load target model for dual-write (cached globally, not per-page)
+    target_model = None
+    target_nv = ""
+    if _migration["status"] == "dual_write":
+        target_name = _migration["target_model"]
+        if target_name:
+            assert isinstance(target_name, str)
+            try:
+                target_model = await _get_target_embed_model(target_name)
+                target_nv = _named_vector_name(target_name)
+            except Exception as e:
+                logger.warning(
+                    "Failed to load target model for batch dual-write: %s", e
+                )
+
     points = []
     for page, embedding in zip(body.pages, embeddings, strict=False):
         point_id = _url_hash(page.url)
@@ -262,32 +279,24 @@ async def index_batch(body: IndexBatchRequest):
         payload = _build_index_payload(page.url, page.title, existing_payload)
         vectors: dict[str, list[float]] = {active_nv: embedding}
 
-        # Dual-write support: also embed with target model
-        if _migration["status"] == "dual_write":
-            target_name = _migration["target_model"]
-            if target_name:
-                assert isinstance(target_name, str)
-                try:
-                    loop = asyncio.get_event_loop()
-                    target_embedding = await loop.run_in_executor(
-                        None,
-                        lambda tn=target_name, p=page: (  # type: ignore[misc]
-                            SentenceTransformer(tn)
-                            .encode(p.content[:2000], normalize_embeddings=True)
-                            .tolist()
-                        ),
-                    )
-                    target_nv = _named_vector_name(target_name)
-                    vectors[target_nv] = target_embedding
-                    existing_models = json.loads(payload.get("embedding_models", "[]"))
-                    for nv in [active_nv, target_nv]:
-                        if nv not in existing_models:
-                            existing_models.append(nv)
-                    payload["embedding_models"] = json.dumps(existing_models)
-                except Exception as e:
-                    logger.warning(
-                        "Batch dual-write embed failed for target model: %s", e
-                    )
+        # Dual-write support: use pre-loaded (globally cached) target model
+        if target_model is not None and target_nv:
+            try:
+                loop = asyncio.get_event_loop()
+                target_embedding = await loop.run_in_executor(
+                    None,
+                    lambda p=page: target_model.encode(  # type: ignore[misc]
+                        p.content[:2000], normalize_embeddings=True
+                    ).tolist(),
+                )
+                vectors[target_nv] = target_embedding
+                existing_models = json.loads(payload.get("embedding_models", "[]"))
+                for nv in [active_nv, target_nv]:
+                    if nv not in existing_models:
+                        existing_models.append(nv)
+                payload["embedding_models"] = json.dumps(existing_models)
+            except Exception as e:
+                logger.warning("Batch dual-write embed failed for target model: %s", e)
 
         points.append(
             models.PointStruct(

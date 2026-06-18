@@ -9,7 +9,7 @@ ARG HF_TOKEN=
 ENV HF_TOKEN=$HF_TOKEN
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-m3')"
 
-COPY semantic-svc/app.py semantic-svc/models.py semantic-svc/retention.py semantic-svc/router_index.py semantic-svc/router_search.py semantic-svc/router_migration.py semantic-svc/metrics.py ./
+COPY semantic-svc/app.py semantic-svc/auth.py semantic-svc/models.py semantic-svc/retention.py semantic-svc/router_index.py semantic-svc/router_search.py semantic-svc/router_migration.py semantic-svc/metrics.py ./
 COPY common/ common/
 
 EXPOSE 8003

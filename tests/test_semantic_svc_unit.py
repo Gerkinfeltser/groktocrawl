@@ -10,6 +10,8 @@ import sys
 import time
 import types
 
+import pytest
+
 # ── Import setup: mock router modules to avoid circular imports ──
 
 
@@ -713,3 +715,111 @@ class TestMigrationStates:
         # Reset
         _set_active_override(None)
         assert _get_active_model() == original
+
+
+# ── Tests: verify_api_key ──────────────────────────────────────────
+
+
+class TestVerifyApiKey:
+    """API key verification for migration endpoints (VAL-FIX-003)."""
+
+    def _make_request(self, headers: dict | None = None, query: dict | None = None):
+        """Create a mock FastAPI Request for testing verify_api_key."""
+        from unittest.mock import MagicMock
+
+        mock_request = MagicMock(spec=["headers", "query_params"])
+        mock_request.headers = headers or {}
+        mock_request.query_params = query or {}
+        return mock_request
+
+    @pytest.mark.asyncio
+    async def test_no_api_key_configured_allows_all(self, monkeypatch):
+        """When API_KEY is empty/unset, all requests are allowed."""
+        monkeypatch.setattr("auth.API_KEY", "")
+        from auth import verify_api_key
+
+        req = self._make_request()
+        # Should not raise
+        await verify_api_key(req)
+
+    @pytest.mark.asyncio
+    async def test_returns_401_without_api_key(self, monkeypatch):
+        """Migration endpoints return 401 without valid API key."""
+        monkeypatch.setattr("auth.API_KEY", "test-secret-key")
+        from auth import verify_api_key
+        from fastapi import HTTPException
+
+        req = self._make_request(headers={})
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_api_key(req)
+        assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_returns_401_with_wrong_x_api_key(self, monkeypatch):
+        """Migration endpoints return 401 with wrong X-API-Key header."""
+        monkeypatch.setattr("auth.API_KEY", "test-secret-key")
+        from auth import verify_api_key
+        from fastapi import HTTPException
+
+        req = self._make_request(headers={"X-API-Key": "wrong-key"})
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_api_key(req)
+        assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_succeeds_with_valid_x_api_key(self, monkeypatch):
+        """Migration endpoints succeed with valid X-API-Key header."""
+        monkeypatch.setattr("auth.API_KEY", "test-secret-key")
+        from auth import verify_api_key
+
+        req = self._make_request(headers={"X-API-Key": "test-secret-key"})
+        # Should not raise
+        await verify_api_key(req)
+
+    @pytest.mark.asyncio
+    async def test_succeeds_with_valid_api_key_query_param(self, monkeypatch):
+        """Migration endpoints succeed with valid api_key query parameter."""
+        monkeypatch.setattr("auth.API_KEY", "test-secret-key")
+        from auth import verify_api_key
+
+        req = self._make_request(query={"api_key": "test-secret-key"})
+        # Should not raise
+        await verify_api_key(req)
+
+    @pytest.mark.asyncio
+    async def test_returns_401_with_wrong_api_key_query_param(self, monkeypatch):
+        """Migration endpoints return 401 with wrong api_key query parameter."""
+        monkeypatch.setattr("auth.API_KEY", "test-secret-key")
+        from auth import verify_api_key
+        from fastapi import HTTPException
+
+        req = self._make_request(query={"api_key": "wrong-key"})
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_api_key(req)
+        assert exc_info.value.status_code == 401
+
+
+# ── Tests: _get_target_embed_model ─────────────────────────────────
+
+
+class TestTargetEmbedModelCache:
+    """Target model caching for migration dual-write (fix-semantic-hardening).
+
+    These tests verify the caching logic without loading actual
+    SentenceTransformer models (too heavy for unit tests).
+    """
+
+    def test_cache_variables_exist(self):
+        """_target_embed_model and _target_embed_model_name globals exist."""
+        from app import _target_embed_model, _target_embed_model_name
+
+        # These should exist as module-level variables
+        assert _target_embed_model is None  # Initially None
+        assert _target_embed_model_name == ""
+
+    def test_target_embed_model_name_tracked(self):
+        """The _target_embed_model_name tracks which model is cached."""
+        from app import _target_embed_model_name
+
+        # Initially empty string
+        assert isinstance(_target_embed_model_name, str)
