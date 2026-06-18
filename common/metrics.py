@@ -58,6 +58,20 @@ class _SafeCounter:
         with self._lock:
             self._data[key] += value
 
+    def set(self, labels: dict[str, str] | None = None, value: float = 0.0) -> None:
+        """Set the counter to an absolute value (replaces any prior value).
+
+        Primarily used by the analytics counter exporter to report the
+        current Valkey counter value as a monotonically-increasing counter.
+
+        Args:
+            labels: Optional label key/value pairs.
+            value: The absolute value to set.
+        """
+        key = tuple(sorted(labels.items())) if labels else ()
+        with self._lock:
+            self._data[key] = value
+
     def _collect(self) -> list[tuple[tuple, float]]:
         with self._lock:
             return list(self._data.items())

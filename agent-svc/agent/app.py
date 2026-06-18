@@ -1,6 +1,7 @@
 """FastAPI application entrypoint for GroktoCrawl."""
 
 import logging
+import os
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -9,10 +10,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from redis import Redis
 
+from common.features import is_enabled
 from common.logging import setup_logging
 from common.metrics import METRICS
 from common.middleware import add_request_id_middleware
 
+from .analytics_exporter import start_analytics_exporter
 from .api import router
 from .auth import (
     AUTH_ENABLED,
@@ -36,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 def create_app() -> FastAPI:
     settings = load_settings()
-    setup_logging(default_level=settings.log_level)
+    setup_logging(default_level=settings.log_level, service_name="agent-svc")
 
     app = FastAPI(
         title="GroktoCrawl",
@@ -79,6 +82,30 @@ def create_app() -> FastAPI:
     # Info metric for version identification (kept for backward compat)
     METRICS.gauge("groktocrawl_info", "GroktoCrawl version info").set(value=1.0)
 
+    # ── Feature toggle observability ─────────────────────────────
+    # Log effective state of every FEATURE_* toggle and register
+    # groktocrawl_feature_enabled{feature=...} gauges.
+    _feature_gauge = METRICS.gauge(
+        "groktocrawl_feature_enabled",
+        "Feature toggle enabled status (1=enabled, 0=disabled)",
+        ["feature"],
+    )
+    for env_key, env_val in sorted(os.environ.items()):
+        if env_key.startswith("FEATURE_"):
+            feature_name = env_key[len("FEATURE_") :].lower()
+            enabled = is_enabled(feature_name)
+            logger.info(
+                "Feature toggle %s enabled=%s (from %s=%s)",
+                feature_name,
+                str(enabled),
+                env_key,
+                env_val,
+            )
+            _feature_gauge.set(
+                {"feature": feature_name},
+                1.0 if enabled else 0.0,
+            )
+
     # ── App state ───────────────────────────────────────────────
     app.state.redis = conn
     app.state.job_store = store
@@ -95,6 +122,11 @@ def create_app() -> FastAPI:
     app.state.rate_limiter = rate_limiter
     app.state.max_searches_per_request = settings.max_searches_per_request
     app.state.task_tracker = TaskTracker()
+
+    # ── Start analytics counter exporter background task ────────
+    app.state.task_tracker.create_background_task(
+        start_analytics_exporter(redis_url=redis_url)
+    )
 
     # ── Middleware: request_id ───────────────────────────────────
     def _record_metric(labels: dict[str, str], value: float) -> None:

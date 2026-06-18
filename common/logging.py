@@ -89,9 +89,41 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(log_entry, default=str)
 
 
+class ErrorCountingHandler(logging.Handler):
+    """Logging handler that increments a Prometheus counter on ERROR-level records.
+
+    The counter ``log_errors_total`` carries a ``service`` label so that
+    per-service error rates can be queried in Prometheus.
+
+    Args:
+        service_name: Value for the ``service`` label.
+    """
+
+    def __init__(self, service_name: str = "unknown") -> None:
+        super().__init__(level=logging.ERROR)
+        self.service_name = service_name
+        self._counter = None
+
+    def _get_counter(self):  # type: ignore[no-untyped-def]
+        """Lazy-import METRICS to avoid circular import on module load."""
+        if self._counter is None:
+            from common.metrics import METRICS  # fmt: skip
+
+            self._counter = METRICS.counter(
+                "log_errors_total",
+                "Total error-level log messages",
+                ["service"],
+            )
+        return self._counter
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._get_counter().inc({"service": self.service_name})
+
+
 def setup_logging(
     default_level: str | None = None,
     quiet_third_party: bool = True,
+    service_name: str | None = None,
 ) -> None:
     """Configure structured JSON logging with sensitive-data scrubbing.
 
@@ -102,9 +134,14 @@ def setup_logging(
     API keys, bearer tokens, passwords, and similar secrets are
     automatically redacted from all log output.
 
+    When *service_name* is provided, an :class:`ErrorCountingHandler` is
+    also installed that increments ``log_errors_total{service=...}`` on
+    every ERROR-level record.
+
     Args:
         default_level: Override the env-configured log level.
         quiet_third_party: If True, suppress noisy logs from httpx/httpcore/urllib3.
+        service_name: Service name for the ``log_errors_total`` counter label.
     """
     log_level = (default_level or os.getenv("LOG_LEVEL", "INFO")).upper()  # type: ignore[union-attr]
     handler = logging.StreamHandler()
@@ -119,6 +156,11 @@ def setup_logging(
     # The filter runs before the formatter and interpolates/redacts
     # so that getMessage() inside the formatter returns clean text.
     _install_sensitive_data_filter(root)
+
+    # Install error-counting handler when a service name is provided.
+    if service_name:
+        error_handler = ErrorCountingHandler(service_name=service_name)
+        root.addHandler(error_handler)
 
     if quiet_third_party:
         logging.getLogger("httpx").setLevel(logging.WARNING)
