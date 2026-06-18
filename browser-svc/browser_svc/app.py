@@ -154,7 +154,7 @@ class SessionData:
 
     @property
     def expired(self) -> bool:
-        return time.time() - self.created_at > self.ttl
+        return time.time() - self.created_at >= self.ttl
 
     @property
     def idle_seconds(self) -> float:
