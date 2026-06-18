@@ -84,6 +84,171 @@ Rules:
 - Organise extracted data clearly. If no schema is provided, format your answer
   in clean markdown with structure (tables, lists, sections as appropriate)."""
 
+QUERY_INTELLIGENCE_SYSTEM_PROMPT = """You are a research planning agent. Given a user's research prompt, analyze what they need and produce a search plan.
+
+Rules:
+- For broad, multi-topic prompts, decompose into 3-6 specific search queries that each target a distinct sub-topic
+- For narrow, single-topic prompts, use 1-2 queries and set strategy to "focused"
+- Never pass the user's full prompt as a search query — extract the core search intent
+- Output valid JSON only, no other text
+
+Output format:
+{
+  "reasoning": "Brief analysis of what the user needs",
+  "research_strategy": "deep" | "focused",
+  "focused_queries": [
+    "specific search query 1",
+    "specific search query 2"
+  ]
+}"""
+
+
+async def _generate_research_plan(
+    prompt: str,
+    llm: LLMClient,
+) -> dict:
+    """Phase 0: Analyze the user prompt with an LLM and produce a research plan.
+
+    Returns a dict with keys:
+        reasoning (str): brief analysis of what the user needs
+        research_strategy (str): "deep" or "focused"
+        focused_queries (list[str]): 1-6 specific search queries
+
+    On any failure (API error, timeout, invalid JSON, empty response),
+    falls back to using the prompt itself as a single focused query.
+    """
+    try:
+        raw_response = await llm.generate(
+            system_prompt=QUERY_INTELLIGENCE_SYSTEM_PROMPT,
+            user_prompt=prompt,
+        )
+
+        # Strip markdown code fences if present
+        cleaned = raw_response.strip()
+        cleaned = cleaned.removeprefix("```json")
+        cleaned = cleaned.removeprefix("```")
+        cleaned = cleaned.removesuffix("```")
+        cleaned = cleaned.strip()
+
+        if not cleaned:
+            raise ValueError("Empty response from query intelligence LLM")
+
+        plan = json.loads(cleaned)
+
+        # Validate required fields
+        queries = plan.get("focused_queries", [prompt])
+        if not isinstance(queries, list) or len(queries) == 0:
+            queries = [prompt]
+
+        strategy = plan.get("research_strategy", "focused")
+        if strategy not in ("deep", "focused"):
+            strategy = "deep" if len(queries) > 1 else "focused"
+
+        return {
+            "reasoning": plan.get("reasoning", ""),
+            "research_strategy": strategy,
+            "focused_queries": queries,
+        }
+    except Exception as e:
+        logger.warning(
+            "Query intelligence LLM call failed, falling back to verbatim prompt: %s",
+            e,
+        )
+        return {
+            "reasoning": "Query intelligence unavailable — using prompt verbatim",
+            "research_strategy": "focused",
+            "focused_queries": [prompt],
+        }
+
+
+async def _run_multi_query_discover_and_scrape(
+    queries: list[str],
+    urls: list[str] | None,
+    searxng: SearXNGClient,
+    scraper: ScraperClient,
+    max_searches_per_request: int = 5,
+) -> dict:
+    """Search multiple sub-queries, deduplicate URLs, scrape, and merge context.
+
+    Iterates over ``queries`` (truncated to ``max_searches_per_request``),
+    running a search for each. Collects all unique URLs across all queries
+    (deduplicating by URL, keeping the first occurrence for richer metadata),
+    then scrapes the union. Merges documents into a single context block
+    organized by query.
+
+    Returns the same dict shape as ``_run_research_discover_and_scrape()``:
+        search_results, target_urls, documents, source_details, context
+    """
+    target_urls = list(urls) if urls else []
+    all_search_results: list[dict] = []
+    seen_urls: set[str] = set(target_urls)
+
+    # Truncate to search budget
+    budget = min(len(queries), max_searches_per_request)
+    queries_to_run = queries[:budget]
+
+    if not target_urls and queries_to_run:
+        logger.info(
+            "Multi-query research: running %d search queries (budget=%d)",
+            len(queries_to_run),
+            max_searches_per_request,
+        )
+        for i, query in enumerate(queries_to_run):
+            logger.info("  [%d/%d] Searching: %s", i + 1, len(queries_to_run), query)
+            results, _health = await searxng.search(query, limit=10)
+            for r in results:
+                url = r.get("url", "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    all_search_results.append(r)
+                    target_urls.append(url)
+
+    if not target_urls and not queries_to_run:
+        return {
+            "search_results": [],
+            "target_urls": [],
+            "documents": [],
+            "source_details": [],
+            "context": "",
+        }
+
+    preferred = [u for u in target_urls if not _is_video_platform_url(u)]
+    deprioritized = [u for u in target_urls if _is_video_platform_url(u)]
+
+    documents, source_details = await _scrape_urls(
+        preferred,
+        scraper,
+        min_sources=3,
+        max_attempts=len(preferred) or 10,
+    )
+    logger.info(
+        "Multi-query: scraped %d docs from %d preferred URLs (attempts=%d)",
+        len(documents),
+        len(preferred),
+        len(preferred) or 10,
+    )
+
+    if len(documents) < 3 and deprioritized:
+        remaining = 3 - len(documents)
+        extra_docs, extra_details = await _scrape_urls(
+            deprioritized,
+            scraper,
+            min_sources=remaining,
+            max_attempts=remaining * 2,
+        )
+        documents.extend(extra_docs)
+        source_details.extend(extra_details)
+
+    context = "\n\n---\n\n".join(documents) if documents else ""
+
+    return {
+        "search_results": all_search_results,
+        "target_urls": target_urls,
+        "documents": documents,
+        "source_details": source_details,
+        "context": context,
+    }
+
 
 async def _run_research_discover_and_scrape(
     prompt: str,
@@ -155,7 +320,12 @@ async def run_research(
     requested_model: str | None = None,
     max_searches_per_request: int = 5,
 ) -> dict:
-    """Execute the research loop: search → scrape → think → answer."""
+    """Execute the research loop: plan → search → scrape → think → answer.
+
+    Phase 0: Query Intelligence analyzes the prompt and generates a research plan.
+    Phase 1: Search (single or multi-query) and scrape.
+    Phase 2: LLM synthesis with the scraped context.
+    """
     searxng = SearXNGClient(searxng_url, max_searches=max_searches_per_request)
     scraper = ScraperClient(scraper_url)
     effective_model = (
@@ -166,12 +336,28 @@ async def run_research(
     llm = LLMClient(llm_base_url, llm_api_key, effective_model)
 
     try:
-        discovered = await _run_research_discover_and_scrape(
-            prompt=prompt,
-            urls=urls,
-            searxng=searxng,
-            scraper=scraper,
-        )
+        # Phase 0: Query Intelligence — analyze prompt, generate research plan
+        research_plan = await _generate_research_plan(prompt, llm)
+        queries = research_plan["focused_queries"]
+        strategy = research_plan["research_strategy"]
+
+        if strategy == "deep" and len(queries) > 1:
+            discovered = await _run_multi_query_discover_and_scrape(
+                queries=queries,
+                urls=urls,
+                searxng=searxng,
+                scraper=scraper,
+                max_searches_per_request=max_searches_per_request,
+            )
+        else:
+            # Focused strategy or single query: use existing single-search path
+            query = queries[0] if queries else prompt
+            discovered = await _run_research_discover_and_scrape(
+                prompt=query,
+                urls=urls,
+                searxng=searxng,
+                scraper=scraper,
+            )
 
         context = discovered["context"]
         if not context:
@@ -213,12 +399,14 @@ async def run_research_stream(
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Streaming version of run_research. Yields SSE-suitable dicts.
 
-    Phase 1 - Discovery: search + scrape, yielding progress events.
+    Phase 0 - Query Intelligence: analyze prompt, generate research plan (NEW).
+    Phase 1 - Discovery: search (single or multi-query) + scrape, yielding progress events.
     Phase 2 - Synthesis: LLM token stream (or full response for schema-based output).
 
     Yields:
+      {"type": "research_plan", "strategy": "...", "queries": [...], "reasoning": "..."} — plan
       {"type": "sources_pending", "sources": [...]} — search results (before scrape)
-      {"type": "source_scraped", "url": "...", "title": "...", "chars": N} — each scraped page
+      {"type": "source_scraped", "url": "...", "source": "...", "chars": N} — each scraped page
       {"type": "token", "content": "..."} — individual tokens from the LLM (no schema)
       {"type": "done", "result": "...", "sources": [...], "latency_ms": N} — final
       {"type": "error", "content": "..."} — error
@@ -237,18 +425,42 @@ async def run_research_stream(
     llm = LLMClient(llm_base_url, llm_api_key, effective_model)
 
     try:
-        # Yield status heartbeat — searching phase
+        # Phase 0: Query Intelligence — analyze prompt, generate research plan
+        yield {"type": "status", "state": "planning"}
+
+        research_plan = await _generate_research_plan(prompt, llm)
+        queries = research_plan["focused_queries"]
+        strategy = research_plan["research_strategy"]
+        reasoning = research_plan.get("reasoning", "")
+
+        yield {
+            "type": "research_plan",
+            "strategy": strategy,
+            "queries": queries,
+            "reasoning": reasoning,
+        }
+
+        # Phase 1: Discovery — search (single or multi-query) + scrape
         yield {"type": "status", "state": "searching"}
 
-        discovered = await _run_research_discover_and_scrape(
-            prompt=prompt,
-            urls=urls,
-            searxng=searxng,
-            scraper=scraper,
-        )
+        if strategy == "deep" and len(queries) > 1:
+            discovered = await _run_multi_query_discover_and_scrape(
+                queries=queries,
+                urls=urls,
+                searxng=searxng,
+                scraper=scraper,
+                max_searches_per_request=max_searches_per_request,
+            )
+        else:
+            query = queries[0] if queries else prompt
+            discovered = await _run_research_discover_and_scrape(
+                prompt=query,
+                urls=urls,
+                searxng=searxng,
+                scraper=scraper,
+            )
 
         search_results = discovered["search_results"]
-        discovered["documents"]
         source_details = discovered["source_details"]
         context = discovered["context"]
 
