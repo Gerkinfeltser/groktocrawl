@@ -1,9 +1,6 @@
 """FastAPI application entrypoint for GroktoCrawl."""
 
-import json
 import logging
-import time
-import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -11,6 +8,10 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from redis import Redis
+
+from common.logging import setup_logging
+from common.metrics import METRICS
+from common.middleware import add_request_id_middleware
 
 from .api import router
 from .auth import (
@@ -22,7 +23,6 @@ from .auth import (
 from .exceptions import GroktoCrawlError
 from .health import check_all
 from .llm import LLMClient
-from .metrics import METRICS
 from .models import ErrorDetail, ErrorResponse
 from .rate_limiter import SlidingWindowRateLimiter
 from .scraper_client import ScraperClient
@@ -34,54 +34,9 @@ from .tasks import TaskTracker
 logger = logging.getLogger(__name__)
 
 
-class JSONFormatter(logging.Formatter):
-    """Structured JSON log formatter.
-
-    Produces one JSON object per line with fields:
-    timestamp, level, logger, message, and optional extra fields.
-    """
-
-    def format(self, record: logging.LogRecord) -> str:
-        log_entry = {
-            "timestamp": self.formatTime(record, self.datefmt),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-        }
-        # Include any extra fields set via extra={}
-        for key, value in getattr(record, "extra_fields", {}).items():
-            log_entry[key] = value
-        # Include exception info if present
-        if record.exc_info and record.exc_info[0]:
-            log_entry["exception"] = self.formatException(record.exc_info)
-        return json.dumps(log_entry, default=str)
-
-
-def setup_logging() -> None:
-    """Configure structured JSON logging for all services.
-
-    Replaces the default log format with JSON lines. Sets the root logger
-    to INFO by default, controllable via ``LOG_LEVEL`` env var.
-    """
-    settings = load_settings()
-    log_level = settings.log_level.upper()
-    handler = logging.StreamHandler()
-    handler.setFormatter(JSONFormatter())
-    root = logging.getLogger()
-    root.setLevel(log_level)
-    # Remove default handlers and add structured handler
-    for h in root.handlers[:]:
-        root.removeHandler(h)
-    root.addHandler(handler)
-    # Quiet noisy third-party loggers
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-
-
 def create_app() -> FastAPI:
     settings = load_settings()
-    setup_logging()
+    setup_logging(default_level=settings.log_level)
 
     app = FastAPI(
         title="GroktoCrawl",
@@ -121,6 +76,8 @@ def create_app() -> FastAPI:
 
     # ── Metrics initialization ────────────────────────────────────
     METRICS.counter("search_calls_total", "Total search calls", ["status"])
+    # Info metric for version identification (kept for backward compat)
+    METRICS.gauge("groktocrawl_info", "GroktoCrawl version info").set(value=1.0)
 
     # ── App state ───────────────────────────────────────────────
     app.state.redis = conn
@@ -140,59 +97,14 @@ def create_app() -> FastAPI:
     app.state.task_tracker = TaskTracker()
 
     # ── Middleware: request_id ───────────────────────────────────
-    @app.middleware("http")
-    async def request_id_middleware(
-        request: Request, call_next: Callable[[Request], Awaitable[Response]]
-    ) -> Response:
-        """Attach a unique request_id to every request and log start/end.
-
-        Skips request_id generation for /health and /metrics to avoid
-        polluting logs from pollers.
-        """
-        # Skip instrumentation for health/metrics pollers
-        if request.url.path in ("/health", "/metrics"):
-            return await call_next(request)
-
-        request_id = str(uuid.uuid4())[:8]
-        request.state.request_id = request_id
-        start_time = time.monotonic()
-
-        logger.info(
-            "Request started",
-            extra={
-                "extra_fields": {
-                    "request_id": request_id,
-                    "method": request.method,
-                    "path": request.url.path,
-                }
-            },
-        )
-
-        response = await call_next(request)
-
-        duration_ms = (time.monotonic() - start_time) * 1000
-        # Record request latency metric
+    def _record_metric(labels: dict[str, str], value: float) -> None:
         METRICS.histogram(
             "http_request_duration_seconds",
             "HTTP request latency by path and method",
             ["method", "path"],
-        ).observe(
-            {"method": request.method, "path": request.url.path}, duration_ms / 1000
-        )
+        ).observe(labels, value)
 
-        logger.info(
-            "Request completed",
-            extra={
-                "extra_fields": {
-                    "request_id": request_id,
-                    "method": request.method,
-                    "path": request.url.path,
-                    "status_code": response.status_code,
-                    "duration_ms": round(duration_ms, 1),
-                }
-            },
-        )
-        return response
+    add_request_id_middleware(app, record_metric=_record_metric)
 
     # ── Security warning middleware ──────────────────────────────
     @app.middleware("http")
