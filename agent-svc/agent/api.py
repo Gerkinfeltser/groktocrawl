@@ -221,6 +221,8 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
                     yield f"data: {json.dumps({'type': 'status', 'state': event['state']})}\n\n"
                 elif event["type"] == "research_plan":
                     yield f"data: {json.dumps({'type': 'research_plan', 'strategy': event['strategy'], 'queries': event['queries'], 'reasoning': event['reasoning']})}\n\n"
+                elif event["type"] == "research_pass":
+                    yield f"data: {json.dumps({'type': 'research_pass', 'pass': event['pass'], 'total_passes': event['total_passes']})}\n\n"
             yield "data: [DONE]\n\n"
 
         headers = {
