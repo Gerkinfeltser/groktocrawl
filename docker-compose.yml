@@ -27,7 +27,8 @@ services:
 
   search-svc:
     build:
-      context: ./search-svc
+      context: .
+      dockerfile: search-svc/Dockerfile
     restart: unless-stopped
     ports:
       - "8010:8010"
