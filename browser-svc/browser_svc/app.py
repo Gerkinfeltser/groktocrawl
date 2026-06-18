@@ -248,7 +248,10 @@ async def health():
 @app.get("/metrics")
 async def metrics():
     """Prometheus-compatible OpenMetrics endpoint."""
-    return PlainTextResponse(METRICS.generate_openmetrics(), media_type="text/plain")
+    return PlainTextResponse(
+        METRICS.generate_openmetrics(),
+        media_type="application/openmetrics-text; version=1.0.0",
+    )
 
 
 @app.post("/browsers", response_model=BrowserCreateResponse)
