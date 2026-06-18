@@ -39,7 +39,8 @@ services:
 
   llm-svc:
     build:
-      context: ./llm-svc
+      context: .
+      dockerfile: llm-svc/Dockerfile
     restart: unless-stopped
     ports:
       - "8011:8011"
