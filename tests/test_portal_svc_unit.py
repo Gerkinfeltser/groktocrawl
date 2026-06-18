@@ -2,7 +2,7 @@
 
 Tests the behavior of the /ask proxy endpoint by mocking ``httpx.AsyncClient``
 to simulate various downstream responses — form forwarding, SSE passthrough,
-error propagation, and connection failures.
+error propagation, connection failures, and circuit breaker integration.
 """
 
 from unittest.mock import AsyncMock, patch
@@ -10,7 +10,9 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from portal.app import AGENT_BASE_URL, ANSWER_URL, app
+from portal.app import AGENT_BASE_URL, ANSWER_URL, _agent_circuit_breaker, app
+
+from common.circuit_breaker import CircuitBreaker, CircuitBreakerState
 
 client = TestClient(app)
 
@@ -241,3 +243,179 @@ class TestEnvAwareness:
         """Default AGENT_BASE_URL when env not set."""
         # In the test environment the default is used
         assert "agent-svc:8080" in AGENT_BASE_URL or "ANSWER_URL" in globals()
+
+
+# ── Circuit breaker integration ─────────────────────────────────────────────
+
+
+class TestCircuitBreakerIntegration:
+    """Circuit breaker fast-fails when agent-svc is unhealthy."""
+
+    @pytest.mark.asyncio
+    async def test_circuit_breaker_imported(self):
+        """CircuitBreaker is created as _agent_circuit_breaker in app module."""
+        assert _agent_circuit_breaker is not None
+        assert isinstance(_agent_circuit_breaker, CircuitBreaker)
+
+    def test_fast_fail_returns_sse_error_with_circuit_open(self):
+        """When circuit is OPEN, /ask returns SSE error with circuit_open detail."""
+        # Force the circuit to OPEN with a recent failure so cooldown hasn't elapsed
+        import time
+
+        import portal.app
+
+        cb = portal.app._agent_circuit_breaker
+        cb._consecutive_failures = 0
+        cb._state = CircuitBreakerState.OPEN
+        cb._last_failure_time = time.monotonic()  # Just now → cooldown pending
+        cb._probe_in_progress = False
+
+        resp = client.post("/ask", data={"query": "test", "num_sources": "3"})
+
+        assert resp.status_code == 200
+        assert "event: error" in resp.text
+        assert "circuit_open" in resp.text
+        assert "remaining" in resp.text.lower()
+        # Restore state for other tests
+        cb._state = CircuitBreakerState.CLOSED
+        cb._consecutive_failures = 0
+
+    def test_fast_fail_no_http_call_made(self):
+        """When circuit is OPEN, no HTTP call is made to agent-svc."""
+        import time
+
+        import portal.app
+
+        cb = portal.app._agent_circuit_breaker
+        cb._state = CircuitBreakerState.OPEN
+        cb._last_failure_time = time.monotonic()  # Just now → cooldown pending
+        cb._probe_in_progress = False
+
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+
+        with patch.object(httpx, "AsyncClient", return_value=mock_client):
+            resp = client.post("/ask", data={"query": "test", "num_sources": "3"})
+
+        assert resp.status_code == 200
+        # The mock client should NOT have been called
+        mock_client.assert_not_called()
+        # Restore state
+        cb._state = CircuitBreakerState.CLOSED
+        cb._consecutive_failures = 0
+
+    def test_normal_flow_when_circuit_closed(self):
+        """When circuit is CLOSED, requests flow through normally."""
+        import portal.app
+
+        cb = portal.app._agent_circuit_breaker
+        cb._state = CircuitBreakerState.CLOSED
+        cb._consecutive_failures = 0
+
+        chunks = [b"data: ok\n\n"]
+        mock_client = _mock_async_client(status_code=200, chunks=chunks)
+
+        with patch.object(httpx, "AsyncClient", return_value=mock_client):
+            resp = client.post("/ask", data={"query": "normal", "num_sources": "3"})
+
+        assert resp.status_code == 200
+        assert "data: ok" in resp.text
+        # Verify the HTTP call was actually made
+        mock_client.stream.assert_called_once()
+
+    def test_five_consecutive_5xx_opens_circuit(self):
+        """After 5 consecutive 5xx errors, circuit opens and fast-fails."""
+        import portal.app
+
+        cb = portal.app._agent_circuit_breaker
+        cb._state = CircuitBreakerState.CLOSED
+        cb._consecutive_failures = 0
+
+        # We need to manually drive failures through record_failure
+        # Simulating 5 consecutive 5xx responses
+        for _ in range(5):
+            mock_client = _mock_async_client(status_code=503)
+            with patch.object(httpx, "AsyncClient", return_value=mock_client):
+                resp = client.post("/ask", data={"query": "err", "num_sources": "3"})
+
+        # Circuit should be OPEN now
+        assert cb.state is CircuitBreakerState.OPEN
+
+        # Next request should fast-fail without HTTP call
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        with patch.object(httpx, "AsyncClient", return_value=mock_client):
+            resp = client.post("/ask", data={"query": "err", "num_sources": "3"})
+
+        assert resp.status_code == 200
+        assert "circuit_open" in resp.text
+        mock_client.assert_not_called()
+
+        # Restore state
+        cb._state = CircuitBreakerState.CLOSED
+        cb._consecutive_failures = 0
+
+    def test_half_open_success_closes_circuit(self):
+        """After cooldown, a successful probe closes the circuit."""
+        import portal.app
+
+        cb = portal.app._agent_circuit_breaker
+        # Set to HALF_OPEN with probe not yet in progress
+        cb._state = CircuitBreakerState.HALF_OPEN
+        cb._probe_in_progress = False
+        cb._consecutive_failures = 5
+
+        chunks = [b"data: ok\n\n"]
+        mock_client = _mock_async_client(status_code=200, chunks=chunks)
+
+        with patch.object(httpx, "AsyncClient", return_value=mock_client):
+            resp = client.post("/ask", data={"query": "probe", "num_sources": "3"})
+
+        assert resp.status_code == 200
+        assert cb.state is CircuitBreakerState.CLOSED  # Probe succeeded
+
+        # Restore state
+        cb._consecutive_failures = 0
+
+    def test_half_open_failure_reopens_circuit(self):
+        """After cooldown, a failed probe re-opens the circuit."""
+        import portal.app
+
+        cb = portal.app._agent_circuit_breaker
+        # Set to HALF_OPEN with probe not yet in progress
+        cb._state = CircuitBreakerState.HALF_OPEN
+        cb._probe_in_progress = False
+        cb._consecutive_failures = 5
+
+        mock_client = _mock_async_client(status_code=503)
+
+        with patch.object(httpx, "AsyncClient", return_value=mock_client):
+            resp = client.post("/ask", data={"query": "probe_fail", "num_sources": "3"})
+
+        assert resp.status_code == 200
+        assert cb.state is CircuitBreakerState.OPEN  # Probe failed
+
+        # Restore state
+        cb._state = CircuitBreakerState.CLOSED
+        cb._consecutive_failures = 0
+
+    def test_half_open_concurrent_fast_fail(self):
+        """Concurrent requests in HALF_OPEN are fast-failed after probe starts."""
+        import portal.app
+
+        cb = portal.app._agent_circuit_breaker
+        # Force HALF_OPEN with probe_in_progress=True to simulate
+        # a probe that is currently happening
+        cb._state = CircuitBreakerState.HALF_OPEN
+        cb._probe_in_progress = True
+
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+
+        with patch.object(httpx, "AsyncClient", return_value=mock_client):
+            resp = client.post("/ask", data={"query": "concurrent", "num_sources": "3"})
+
+        assert resp.status_code == 200
+        assert "circuit_open" in resp.text
+        mock_client.assert_not_called()  # No HTTP call made
+
+        # Restore state
+        cb._state = CircuitBreakerState.CLOSED
+        cb._consecutive_failures = 0
