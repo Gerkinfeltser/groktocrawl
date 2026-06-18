@@ -11,6 +11,8 @@ __pypackages__/
 .planning/
 .coverage
 graphify-out/
+docker-compose.override.yml
+ofelia/config.local.ini
 
 # OS files
 .DS_Store
