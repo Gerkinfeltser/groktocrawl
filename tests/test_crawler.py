@@ -751,8 +751,10 @@ class TestCrawlEngine:
         result = await engine.run("http://example.com/", job_id="test-job-123")
 
         assert result.completed == 1
-        # redis.set should have been called at least once (final update)
-        assert mock_store.redis.set.call_count >= 1
+        # update_job_progress should have been called at least once (final update)
+        assert mock_store.update_job_progress.call_count >= 1
+        # increment_completed should have been called once (for the start page)
+        assert mock_store.increment_completed.call_count >= 1
 
     @pytest.mark.asyncio
     async def test_crawl_with_include_paths(self, mock_scraper):
@@ -3178,7 +3180,233 @@ class TestCrawlConcurrency:
         assert len(result.pages) == 1
 
 
-# ── CrawlRequest concurrency validation tests ───────────────────
+# ── Timeout and semaphore slot release (VAL-CONC-043, VAL-CONC-051) ─
+
+
+class TestCrawlTimeoutAndErrors:
+    """Tests for per-scrape timeout, error accumulation, and error types."""
+
+    @pytest.mark.asyncio
+    async def test_scrape_timeout_recorded_in_errors(self, mock_scraper):
+        """A timed-out scrape is recorded in the errors list."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=2,
+                max_depth=0,
+                max_concurrency=1,
+            ),
+        )
+
+        async def slow_scrape(url: str, force_browser: bool = False, **kwargs) -> dict:
+            raise TimeoutError("timed out")
+
+        mock_scraper.scrape = AsyncMock(side_effect=slow_scrape)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = "<html><body><p>No links</p></body></html>"
+            # The start URL fails, so the crawl finishes early (StartUrlScrapeError)
+            # This is caught in run() and we return the result with the error
+            result = await engine.run("http://example.com/")
+
+        assert len(result.errors) >= 1
+
+    @pytest.mark.asyncio
+    async def test_error_code_distinction(self, mock_scraper):
+        """Errors have distinct error_code for scrape failure vs timeout vs blocked."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=1,
+                max_concurrency=3,
+            ),
+        )
+
+        async def varied_scrape(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
+            if "/blocked" in url:
+                return {
+                    "success": False,
+                    "error": "Blocked by politeness: robots.txt disallows",
+                }
+            if "/fail" in url:
+                return {"success": False, "error": "HTTP 500 Internal Server Error"}
+            return MockPage.success(url)
+
+        mock_scraper.scrape = AsyncMock(side_effect=varied_scrape)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/blocked">Blocked</a>
+                <a href="http://example.com/fail">Fail</a>
+                <a href="http://example.com/good">Good</a>
+                </body></html>
+            """
+            result = await engine.run("http://example.com/")
+
+        blocked_errors = [e for e in result.errors if "/blocked" in e.get("url", "")]
+        fail_errors = [e for e in result.errors if "/fail" in e.get("url", "")]
+
+        for e in blocked_errors:
+            assert e.get("error_code") == "ROBOTS_BLOCKED", (
+                f"Expected ROBOTS_BLOCKED, got: {e}"
+            )
+        for e in fail_errors:
+            assert e.get("error_code") == "SCRAPE_ERROR", (
+                f"Expected SCRAPE_ERROR, got: {e}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_mixed_success_failure_blocked(self, mock_scraper):
+        """Crawl with a mix of successes, failures, and blocked URLs completes correctly."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=1,
+                max_concurrency=3,
+            ),
+        )
+
+        async def mixed_scrape(url: str, **kwargs) -> dict:
+            if "/fail" in url:
+                return MockPage.failure(url, "Connection error")
+            if "/blocked" in url:
+                return {
+                    "success": False,
+                    "error": "Blocked by politeness: robots.txt disallows",
+                }
+            return MockPage.success(url)
+
+        mock_scraper.scrape = AsyncMock(side_effect=mixed_scrape)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/good1">Good 1</a>
+                <a href="http://example.com/fail1">Fail 1</a>
+                <a href="http://example.com/blocked1">Blocked 1</a>
+                <a href="http://example.com/good2">Good 2</a>
+                </body></html>
+            """
+            result = await engine.run("http://example.com/")
+
+        # Start URL + good1 + good2 = 3 successes
+        assert result.completed >= 2  # at least 2 children (start URL + good pages)
+        assert len(result.errors) >= 2  # at least 2 errors (fail + blocked)
+        assert len(result.robots_blocked) >= 1  # at least 1 blocked
+
+        # Verify error code distinctions
+        for e in result.errors:
+            if "/blocked" in e.get("url", ""):
+                assert e.get("error_code") == "ROBOTS_BLOCKED"
+
+
+# ── Atomic store progress (VAL-CONC-042) ─────────────────────────
+
+
+class TestCrawlStoreAtomicity:
+    """Tests that the CrawlEngine calls atomic progress update methods."""
+
+    @pytest.mark.asyncio
+    async def test_atomic_completed_increment_with_mock_store(
+        self, mock_scraper, mock_store
+    ):
+        """CrawlEngine calls store.increment_completed() for each successful page."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=mock_store,
+            options=CrawlOptions(
+                max_pages=3,
+                max_depth=1,
+                max_concurrency=1,
+            ),
+        )
+
+        mock_store.increment_completed = MagicMock(return_value=1)
+        mock_store.get_completed = MagicMock(return_value=0)
+        mock_store.update_job_progress = MagicMock()
+
+        mock_scraper.scrape = AsyncMock(
+            return_value=MockPage.success("http://example.com/")
+        )
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/page1">Page 1</a>
+                <a href="http://example.com/page2">Page 2</a>
+                </body></html>
+            """
+            result = await engine.run("http://example.com/", job_id="test-job")
+
+        # increment_completed should be called for each successful page
+        assert result.completed == 3
+        assert mock_store.increment_completed.call_count == 3
+        # update_job_progress should be called (final update)
+        assert mock_store.update_job_progress.call_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_increment_only_for_successful_pages(self, mock_scraper, mock_store):
+        """increment_completed is NOT called for failed or blocked pages."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=mock_store,
+            options=CrawlOptions(
+                max_pages=5,
+                max_depth=1,
+                max_concurrency=3,
+            ),
+        )
+
+        mock_store.increment_completed = MagicMock(return_value=1)
+        mock_store.get_completed = MagicMock(return_value=0)
+        mock_store.update_job_progress = MagicMock()
+
+        async def mixed_scrape(url: str, **kwargs) -> dict:
+            if "/fail" in url:
+                return MockPage.failure(url, "Connection error")
+            if "/blocked" in url:
+                return {
+                    "success": False,
+                    "error": "Blocked by politeness: robots.txt disallows",
+                }
+            return MockPage.success(url)
+
+        mock_scraper.scrape = AsyncMock(side_effect=mixed_scrape)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/good1">Good 1</a>
+                <a href="http://example.com/fail1">Fail 1</a>
+                <a href="http://example.com/blocked1">Blocked 1</a>
+                </body></html>
+            """
+            await engine.run("http://example.com/", job_id="test-job-2")
+
+        # increment_completed should only be called for successful pages
+        # start URL + good1 = 2 successes
+        assert mock_store.increment_completed.call_count == 2
+
+
+# ── CrawlRequest concurrency validation tests (already exist) ───
 
 
 class TestCrawlRequestConcurrencyValidation:

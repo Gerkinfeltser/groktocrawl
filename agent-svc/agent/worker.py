@@ -149,12 +149,25 @@ async def _process_crawl_async(
 
     try:
         # ── Fire crawl.started webhook ────────────────────────
-        await deliver_webhook(
-            webhook_config,
-            "crawl.started",
-            job_id,
-            {"url": url, "max_pages": max_pages, "max_depth": max_depth},
-        )
+        if task_tracker is not None:
+            task_tracker.create_background_task(
+                deliver_webhook(
+                    webhook_config,
+                    "crawl.started",
+                    job_id,
+                    {"url": url, "max_pages": max_pages, "max_depth": max_depth},
+                    webhook_id_key="crawl.started",
+                    task_tracker=task_tracker,
+                )
+            )
+        else:
+            await deliver_webhook(
+                webhook_config,
+                "crawl.started",
+                job_id,
+                {"url": url, "max_pages": max_pages, "max_depth": max_depth},
+                webhook_id_key="crawl.started",
+            )
 
         from .crawler import CrawlEngine, CrawlOptions
 
@@ -179,22 +192,42 @@ async def _process_crawl_async(
         )
         engine = CrawlEngine(scraper, store=store, options=options)
 
-        # Per-page webhook callback
+        # Per-page webhook callback using task_tracker (VAL-CONC-049)
         async def _page_callback(_job_id: str, page: dict[str, Any]) -> None:
-            await deliver_webhook(webhook_config, "crawl.page", _job_id, page)
+            # Deliver webhook as a tracked background task to avoid
+            # blocking the crawl loop on webhook delivery latency.
+            webhook_id_key = f"crawl.page-{page.get('url', 'unknown')}"
+            if task_tracker is not None:
+                task_tracker.create_background_task(
+                    deliver_webhook(
+                        webhook_config,
+                        "crawl.page",
+                        _job_id,
+                        page,
+                        webhook_id_key=webhook_id_key,
+                        task_tracker=task_tracker,
+                    )
+                )
+            else:
+                await deliver_webhook(
+                    webhook_config,
+                    "crawl.page",
+                    _job_id,
+                    page,
+                    webhook_id_key=webhook_id_key,
+                )
 
         result = await engine.run(url, job_id=job_id, page_callback=_page_callback)
 
-        # Fire-and-forget indexing for each page
+        # Fire-and-forget indexing for each page using task_tracker (VAL-CONC-049)
         for page in result.pages:
             page_url = page.get("url", "")
             markdown = page.get("markdown", "")
+            idx_task = _index_page_async(page_url, "", markdown[:2000])
             if task_tracker is not None:
-                task_tracker.create_background_task(
-                    _index_page_async(page_url, "", markdown[:2000])
-                )
+                task_tracker.create_background_task(idx_task)
             else:
-                asyncio.create_task(_index_page_async(page_url, "", markdown[:2000]))
+                asyncio.create_task(idx_task)
 
         payload: dict[str, Any] = {
             "completed": result.completed,
@@ -214,15 +247,46 @@ async def _process_crawl_async(
             # Store is already marked cancelled by cancel_job();
             # do NOT overwrite with complete_job().
             logger.info("Crawl %s was cancelled — preserving cancelled status", job_id)
-            await deliver_webhook(
-                webhook_config,
-                "crawl.completed",
-                job_id,
-                {**payload, "status": "cancelled"},
-            )
+            if task_tracker is not None:
+                task_tracker.create_background_task(
+                    deliver_webhook(
+                        webhook_config,
+                        "crawl.completed",
+                        job_id,
+                        {**payload, "status": "cancelled"},
+                        webhook_id_key="crawl.completed",
+                        task_tracker=task_tracker,
+                    )
+                )
+            else:
+                await deliver_webhook(
+                    webhook_config,
+                    "crawl.completed",
+                    job_id,
+                    {**payload, "status": "cancelled"},
+                    webhook_id_key="crawl.completed",
+                )
         else:
             store.complete_job(job_id, payload)
-            await deliver_webhook(webhook_config, "crawl.completed", job_id, payload)
+            if task_tracker is not None:
+                task_tracker.create_background_task(
+                    deliver_webhook(
+                        webhook_config,
+                        "crawl.completed",
+                        job_id,
+                        payload,
+                        webhook_id_key="crawl.completed",
+                        task_tracker=task_tracker,
+                    )
+                )
+            else:
+                await deliver_webhook(
+                    webhook_config,
+                    "crawl.completed",
+                    job_id,
+                    payload,
+                    webhook_id_key="crawl.completed",
+                )
 
         elapsed = time.monotonic() - start
 
@@ -254,7 +318,25 @@ async def _process_crawl_async(
     except Exception as e:
         logger.exception("Crawl job %s failed", job_id)
         store.fail_job(job_id, str(e))
-        await deliver_webhook(webhook_config, "crawl.failed", job_id, {"error": str(e)})
+        if task_tracker is not None:
+            task_tracker.create_background_task(
+                deliver_webhook(
+                    webhook_config,
+                    "crawl.failed",
+                    job_id,
+                    {"error": str(e)},
+                    webhook_id_key="crawl.failed",
+                    task_tracker=task_tracker,
+                )
+            )
+        else:
+            await deliver_webhook(
+                webhook_config,
+                "crawl.failed",
+                job_id,
+                {"error": str(e)},
+                webhook_id_key="crawl.failed",
+            )
         elapsed = time.monotonic() - start
 
         # ── Existing job-type-agnostic metrics ─────────────────────────────

@@ -12,11 +12,24 @@ logger = logging.getLogger(__name__)
 
 
 class ScraperClient:
-    """Client for the scraper-svc HTTP API."""
+    """Client for the scraper-svc HTTP API.
+
+    Connection pool limits are configured to support high concurrency
+    (up to ``max_connections=100``, per VAL-CONC-048). This prevents
+    ``PoolTimeout`` or "connection pool exhausted" errors when many
+    concurrent scrape tasks are in flight.
+    """
 
     def __init__(self, base_url: str = "http://scraper-svc:8001"):
         self.base_url = base_url.rstrip("/")
-        self._client = httpx.AsyncClient(timeout=60)
+        self._client = httpx.AsyncClient(
+            timeout=60,
+            limits=httpx.Limits(
+                max_connections=100,
+                max_keepalive_connections=50,
+                keepalive_expiry=30.0,
+            ),
+        )
 
     async def scrape(
         self,
