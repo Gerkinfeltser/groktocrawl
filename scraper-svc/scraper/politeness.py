@@ -312,7 +312,10 @@ class PolitenessManager:
     # ── Main check interface ────────────────────────────────────
 
     async def check(
-        self, url: str, ignore_robots_txt: bool = False
+        self,
+        url: str,
+        ignore_robots_txt: bool = False,
+        robots_user_agent: str | None = None,
     ) -> PolitenessResult:
         """Check whether a URL can be scraped under the current politeness policy.
 
@@ -329,6 +332,8 @@ class PolitenessManager:
         Args:
             url: The URL to check.
             ignore_robots_txt: If True, skip robots.txt enforcement.
+            robots_user_agent: Custom User-Agent string for robots.txt
+                evaluation. If None, uses the default USER_AGENT.
 
         Returns:
             PolitenessResult with action "proceed", "delay", or "blocked".
@@ -347,7 +352,7 @@ class PolitenessManager:
 
             # ── Ensure robots.txt is loaded ────────────────────────
             if state.robots_cached_at == 0.0:
-                await self._fetch_and_parse_robots(domain)
+                await self._fetch_and_parse_robots(domain, user_agent=robots_user_agent)
 
             # ── Check robots.txt (skip if ignore_robots_txt) ──────
             if not ignore_robots_txt:

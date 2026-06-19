@@ -106,7 +106,9 @@ async def _politeness_check_and_delay(
     if not manager.enabled:
         return True, None
 
-    result = await manager.check(url, ignore_robots_txt=ignore_robots_txt)
+    result = await manager.check(
+        url, ignore_robots_txt=ignore_robots_txt, robots_user_agent=robots_user_agent
+    )
     if result.action == "blocked":
         logger.info("Politeness blocked %s: %s", url, result.reason)
         metadata = manager.get_politeness_metadata(url)
