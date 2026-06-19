@@ -288,6 +288,37 @@ class TestCheckCacheCombined:
         assert data == _SAMPLE_PAGE_DATA
         assert error is None
 
+    def test_both_set_stale_cache_triggers_fresh_scrape(self, cache):
+        """Both set, cache older than maxAge → trigger fresh scrape.
+
+        Previously the minAge block would unconditionally return cached
+        data when minAge was set, even if the cache was older than
+        maxAge. This test verifies that when age >= maxAge, the cache
+        returns use_cached=False so the caller performs a fresh scrape
+        instead of serving stale data (VAL-SCRAPE-031)."""
+        url = "https://example.com/page"
+
+        from datetime import UTC, datetime, timedelta
+
+        key = cache._cache_key(url)
+        # Inject an entry 2 hours old
+        old_time = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+        old_entry = {
+            "url": url,
+            "data": _SAMPLE_PAGE_DATA,
+            "cached_at": old_time,
+            "ttl_ms": 3600000,
+        }
+        cache.redis.set(key, json.dumps(old_entry), ex=3600)
+
+        # maxAge=60s, minAge=60s — cache is 2 hours old → stale
+        use_cached, data, error = cache.check_cache(
+            url, max_age_ms=60000, min_age_ms=60000
+        )
+        assert use_cached is False  # Must trigger fresh scrape
+        assert data is not None  # Still return cached data as fallback
+        assert error is None  # No error — just needs refresh
+
 
 # ── check_cache — no cache config ───────────────────────────────
 
