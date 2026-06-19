@@ -1,5 +1,6 @@
 """HTTP client to the scraper service."""
 
+import contextlib
 import logging
 import time
 
@@ -116,10 +117,8 @@ class ScraperClient:
                 pending, return_when=_asyncio.FIRST_COMPLETED
             )
             for t in done:
-                try:
+                with contextlib.suppress(Exception):
                     t.result()
-                except Exception:
-                    pass
 
         # Cancel remaining tasks
         for t in pending:

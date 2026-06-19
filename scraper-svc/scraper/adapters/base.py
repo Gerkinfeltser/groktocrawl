@@ -94,7 +94,7 @@ class AdapterContext:
         try:
             return await asyncio.wait_for(coro, timeout=timeout)
         except TimeoutError:
-            raise AdapterTimeoutError(f"Timed out after {timeout}s")
+            raise AdapterTimeoutError(f"Timed out after {timeout}s") from None
 
 
 # ── Adapter base class ───────────────────────────────────────────
