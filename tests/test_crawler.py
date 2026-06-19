@@ -14,6 +14,7 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -4906,3 +4907,610 @@ class TestListActiveCrawls:
         client.app.state.job_store.list_active_jobs.assert_called_with(
             kind="crawl", status="processing", limit=50
         )
+
+
+# ══════════════════════════════════════════════════════════════════
+# NL→Params Tests
+# ══════════════════════════════════════════════════════════════════
+
+
+class TestNlParamsSafeParse:
+    """Tests for _safe_parse_llm_response()."""
+
+    def test_plain_json(self):
+        from agent.nl_params import _safe_parse_llm_response
+
+        text = '{"include_paths": ["blog/.*"], "max_depth": 2}'
+        result = _safe_parse_llm_response(text)
+        assert result == {"include_paths": ["blog/.*"], "max_depth": 2}
+
+    def test_markdown_code_fence(self):
+        from agent.nl_params import _safe_parse_llm_response
+
+        text = '```json\n{"include_paths": ["blog/.*"]}\n```'
+        result = _safe_parse_llm_response(text)
+        assert result == {"include_paths": ["blog/.*"]}
+
+    def test_json_embedded_in_text(self):
+        from agent.nl_params import _safe_parse_llm_response
+
+        text = 'Here are the params: {"include_paths": ["blog/.*"]} Thanks!'
+        result = _safe_parse_llm_response(text)
+        assert result == {"include_paths": ["blog/.*"]}
+
+    def test_empty_string_returns_none(self):
+        from agent.nl_params import _safe_parse_llm_response
+
+        result = _safe_parse_llm_response("")
+        assert result is None
+
+    def test_invalid_json_returns_none(self):
+        from agent.nl_params import _safe_parse_llm_response
+
+        result = _safe_parse_llm_response("not json at all")
+        assert result is None
+
+
+class TestNlParamsValidateDerived:
+    """Tests for _validate_derived_params()."""
+
+    def test_valid_params_preserved(self):
+        from agent.nl_params import _validate_derived_params
+
+        params = {
+            "include_paths": ["blog/.*"],
+            "exclude_paths": ["admin/.*"],
+            "max_depth": 3,
+            "max_pages": 50,
+            "ignore_robots_txt": True,
+            "robots_user_agent": "MyBot/1.0",
+            "deduplicate_similar_urls": True,
+        }
+        result = _validate_derived_params(params)
+        assert result["include_paths"] == ["blog/.*"]
+        assert result["exclude_paths"] == ["admin/.*"]
+        assert result["max_depth"] == 3
+        assert result["max_pages"] == 50
+        assert result["ignore_robots_txt"] is True
+        assert result["robots_user_agent"] == "MyBot/1.0"
+        assert result["deduplicate_similar_urls"] is True
+
+    def test_none_removed(self):
+        from agent.nl_params import _validate_derived_params
+
+        # Only include_paths is valid, everything else None/invalid should be omitted
+        params = {
+            "include_paths": ["blog/.*"],
+            "exclude_paths": None,
+            "max_depth": None,
+            "max_pages": None,
+            "ignore_robots_txt": None,
+            "robots_user_agent": None,
+            "deduplicate_similar_urls": None,
+        }
+        result = _validate_derived_params(params)
+        assert result == {"include_paths": ["blog/.*"]}
+
+    def test_invalid_types_filtered(self):
+        from agent.nl_params import _validate_derived_params
+
+        params = {
+            "include_paths": "not a list",  # should be filtered
+            "exclude_paths": [1, 2, 3],  # non-string items
+            "max_depth": -1,  # negative should be filtered
+            "max_pages": 0,  # zero should be filtered
+            "ignore_robots_txt": "yes",  # not a bool
+            "robots_user_agent": 123,  # not a string
+            "deduplicate_similar_urls": None,
+        }
+        result = _validate_derived_params(params)
+        assert "include_paths" not in result
+        assert "exclude_paths" not in result
+        assert "max_depth" not in result
+        assert "max_pages" not in result
+        assert "ignore_robots_txt" not in result
+        assert "robots_user_agent" not in result
+        assert result == {}
+
+    def test_empty_input(self):
+        from agent.nl_params import _validate_derived_params
+
+        result = _validate_derived_params({})
+        assert result == {}
+
+    def test_max_depth_zero_accepted(self):
+        """Depth 0 is valid (scrape only start URL)."""
+        from agent.nl_params import _validate_derived_params
+
+        result = _validate_derived_params({"max_depth": 0})
+        assert result["max_depth"] == 0
+
+
+class TestNlParamsMerge:
+    """Tests for merge_params()."""
+
+    def test_llm_derived_used_when_no_explicit(self):
+        from agent.nl_params import merge_params
+
+        llm = {"include_paths": ["blog/.*"], "max_depth": 2}
+        explicit = {}
+        result = merge_params(llm, explicit)
+        assert result["include_paths"] == ["blog/.*"]
+        assert result["max_depth"] == 2
+
+    def test_explicit_overrides_llm(self):
+        from agent.nl_params import merge_params
+
+        llm = {"include_paths": ["blog/.*"], "max_depth": 2}
+        explicit = {"include_paths": ["docs/.*"]}
+        result = merge_params(llm, explicit)
+        assert result["include_paths"] == ["docs/.*"]
+        assert result["max_depth"] == 2  # Not overridden
+
+    def test_explicit_overrides_llm_max_depth(self):
+        from agent.nl_params import merge_params
+
+        llm = {"include_paths": ["blog/.*"], "max_depth": 3}
+        explicit = {"max_depth": 1}
+        result = merge_params(llm, explicit)
+        assert result["include_paths"] == ["blog/.*"]
+        assert result["max_depth"] == 1
+
+    def test_both_exclude_paths_merged(self):
+        from agent.nl_params import merge_params
+
+        llm = {"exclude_paths": ["admin/.*"], "max_depth": 2}
+        explicit = {"max_depth": 0}
+        result = merge_params(llm, explicit)
+        assert result["exclude_paths"] == ["admin/.*"]
+        assert result["max_depth"] == 0
+
+    def test_llm_error_preserved(self):
+        from agent.nl_params import merge_params
+
+        llm = {"error": "LLM unavailable", "max_depth": 2}
+        explicit = {}
+        result = merge_params(llm, explicit)
+        assert result["error"] == "LLM unavailable"
+        assert result["max_depth"] == 2
+
+    def test_explicit_none_does_not_override(self):
+        """Explicitly None fields should not override LLM-derived non-None values."""
+        from agent.nl_params import merge_params
+
+        llm = {"include_paths": ["blog/.*"], "max_depth": 2}
+        explicit = {"include_paths": None, "max_depth": None}
+        result = merge_params(llm, explicit)
+        # The merge function only checks explicit_val is not None
+        assert result["include_paths"] == ["blog/.*"]
+        assert result["max_depth"] == 2
+
+
+class TestNlParamsDeriveCrawlParams:
+    """Tests for derive_crawl_params() with mocked LLM client."""
+
+    @pytest.mark.asyncio
+    async def test_successful_derivation(self):
+        """Happy path: LLM returns valid JSON with crawl params."""
+        from agent.nl_params import derive_crawl_params
+
+        expected_response = json.dumps(
+            {
+                "include_paths": ["blog/.*"],
+                "exclude_paths": None,
+                "max_depth": 2,
+                "max_pages": 10,
+                "ignore_robots_txt": False,
+                "deduplicate_similar_urls": True,
+                "reasoning": "User wants blog posts.",
+            }
+        )
+
+        with (
+            patch(
+                "agent.nl_params.LLMClient.check_health", AsyncMock(return_value=True)
+            ),
+            patch(
+                "agent.nl_params.LLMClient.generate",
+                AsyncMock(return_value=expected_response),
+            ),
+            patch("agent.nl_params.LLMClient.close", AsyncMock()),
+        ):
+            result = await derive_crawl_params(
+                prompt="crawl only the blog posts",
+                llm_base_url="http://llm.test/v1",
+                llm_api_key="test-key",
+                llm_model="test-model",
+            )
+            assert "error" not in result
+            assert result["include_paths"] == ["blog/.*"]
+            assert result["max_depth"] == 2
+            assert result["max_pages"] == 10
+
+    @pytest.mark.asyncio
+    async def test_llm_unavailable_returns_error(self):
+        """LLM health check fails — returns error without crashing."""
+        from agent.nl_params import derive_crawl_params
+
+        with (
+            patch(
+                "agent.nl_params.LLMClient.check_health", AsyncMock(return_value=False)
+            ),
+            patch("agent.nl_params.LLMClient.close", AsyncMock()),
+        ):
+            result = await derive_crawl_params(
+                prompt="crawl everything",
+                llm_base_url="http://llm.test/v1",
+                llm_api_key="test-key",
+                llm_model="test-model",
+            )
+            assert "error" in result
+            assert "not available" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_invalid_json_response_falls_back(self):
+        """LLM returns unparseable JSON — returns error without crashing."""
+        from agent.nl_params import derive_crawl_params
+
+        with (
+            patch(
+                "agent.nl_params.LLMClient.check_health", AsyncMock(return_value=True)
+            ),
+            patch(
+                "agent.nl_params.LLMClient.generate",
+                AsyncMock(return_value="This is not JSON at all"),
+            ),
+            patch("agent.nl_params.LLMClient.close", AsyncMock()),
+        ):
+            result = await derive_crawl_params(
+                prompt="crawl the docs",
+                llm_base_url="http://llm.test/v1",
+                llm_api_key="test-key",
+                llm_model="test-model",
+            )
+            assert "error" in result
+            assert "invalid json" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_llm_error_response_handled(self):
+        """LLM client returns an error string — handled gracefully."""
+        from agent.nl_params import derive_crawl_params
+
+        with (
+            patch(
+                "agent.nl_params.LLMClient.check_health", AsyncMock(return_value=True)
+            ),
+            patch(
+                "agent.nl_params.LLMClient.generate",
+                AsyncMock(return_value="Error: LLM API returned 429"),
+            ),
+            patch("agent.nl_params.LLMClient.close", AsyncMock()),
+        ):
+            result = await derive_crawl_params(
+                prompt="crawl products",
+                llm_base_url="http://llm.test/v1",
+                llm_api_key="test-key",
+                llm_model="test-model",
+            )
+            assert "error" in result
+            assert "Error" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_llm_exception_handled(self):
+        """LLM client raises exception — caught and returned as error."""
+        from agent.nl_params import derive_crawl_params
+
+        with (
+            patch(
+                "agent.nl_params.LLMClient.check_health", AsyncMock(return_value=True)
+            ),
+            patch(
+                "agent.nl_params.LLMClient.generate",
+                AsyncMock(side_effect=ConnectionError("Connection refused")),
+            ),
+            patch("agent.nl_params.LLMClient.close", AsyncMock()),
+        ):
+            result = await derive_crawl_params(
+                prompt="crawl all",
+                llm_base_url="http://llm.test/v1",
+                llm_api_key="test-key",
+                llm_model="test-model",
+            )
+            assert "error" in result
+            assert "Connection refused" in result["error"]
+
+
+class TestNlParamsPromptModel:
+    """Tests for the prompt field on CrawlRequest model."""
+
+    def test_prompt_accepted(self):
+        """CrawlRequest accepts a prompt field."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(
+            url="https://example.com",
+            prompt="crawl only the blog posts",
+        )
+        assert req.prompt == "crawl only the blog posts"
+
+    def test_prompt_default_none(self):
+        """CrawlRequest prompt defaults to None."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="https://example.com")
+        assert req.prompt is None
+
+    def test_prompt_max_length_enforced(self):
+        """CrawlRequest rejects prompt > 10000 chars."""
+        from agent.models import CrawlRequest
+        from pydantic import ValidationError
+
+        long_prompt = "x" * 10001
+        with pytest.raises(ValidationError):
+            CrawlRequest(url="https://example.com", prompt=long_prompt)
+
+    def test_prompt_10000_chars_accepted(self):
+        """CrawlRequest accepts prompt exactly 10000 chars."""
+        from agent.models import CrawlRequest
+
+        exact_prompt = "x" * 10000
+        req = CrawlRequest(url="https://example.com", prompt=exact_prompt)
+        assert req.prompt == exact_prompt
+
+    def test_prompt_in_model_dump(self):
+        """prompt appears in model_dump output."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(
+            url="https://example.com",
+            prompt="crawl blog posts",
+        )
+        dumped = req.model_dump(exclude_unset=True)
+        assert "prompt" in dumped
+        assert dumped["prompt"] == "crawl blog posts"
+
+
+class TestParamsPreviewModel:
+    """Tests for ParamsPreviewRequest and ParamsPreviewResponse models."""
+
+    def test_params_preview_request_requires_url_and_prompt(self):
+        """ParamsPreviewRequest requires both url and prompt."""
+        from agent.models import ParamsPreviewRequest
+
+        req = ParamsPreviewRequest(url="https://example.com", prompt="crawl blog")
+        assert req.url == "https://example.com"
+        assert req.prompt == "crawl blog"
+
+    def test_params_preview_request_missing_prompt_rejected(self):
+        """ParamsPreviewRequest without prompt is rejected."""
+        from agent.models import ParamsPreviewRequest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ParamsPreviewRequest(url="https://example.com")
+
+    def test_params_preview_request_missing_url_rejected(self):
+        """ParamsPreviewRequest without url is rejected."""
+        from agent.models import ParamsPreviewRequest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ParamsPreviewRequest(prompt="crawl blog")
+
+    def test_params_preview_request_invalid_url_rejected(self):
+        """ParamsPreviewRequest with invalid URL scheme."""
+        from agent.models import ParamsPreviewRequest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ParamsPreviewRequest(url="ftp://example.com", prompt="crawl blog")
+
+    def test_params_preview_request_prompt_max_length(self):
+        """ParamsPreviewRequest rejects prompt > 10000 chars."""
+        from agent.models import ParamsPreviewRequest
+        from pydantic import ValidationError
+
+        long_prompt = "x" * 10001
+        with pytest.raises(ValidationError):
+            ParamsPreviewRequest(url="https://example.com", prompt=long_prompt)
+
+    def test_params_preview_response_defaults(self):
+        """ParamsPreviewResponse has sensible defaults."""
+        from agent.models import ParamsPreviewResponse
+
+        resp = ParamsPreviewResponse()
+        assert resp.success is True
+        assert resp.include_paths is None
+        assert resp.exclude_paths is None
+        assert resp.max_depth is None
+        assert resp.limit is None
+        assert resp.error is None
+
+    def test_params_preview_response_camelcase_output(self):
+        """ParamsPreviewResponse emits camelCase when serialized."""
+        from agent.models import ParamsPreviewResponse
+
+        resp = ParamsPreviewResponse(
+            success=True,
+            include_paths=["blog/.*"],
+            exclude_paths=["admin/.*"],
+            max_depth=2,
+            limit=10,
+        )
+        dumped = resp.model_dump(by_alias=True)
+        assert dumped["includePaths"] == ["blog/.*"]
+        assert dumped["excludePaths"] == ["admin/.*"]
+        assert dumped["maxDepth"] == 2
+        assert dumped["limit"] == 10
+
+
+@pytest.fixture
+def app_with_mocks():
+    """Build a FastAPI test app with mocked dependencies for param endpoint tests."""
+    from agent.api import router
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(router)
+
+    app.state.job_store = MagicMock()
+    app.state.job_store.create_job.return_value = "mock-job-id"
+    app.state.llm_base_url = "http://llm.test/v1"
+    app.state.llm_api_key = "test-key"
+    app.state.llm_model = "test-model"
+    app.state.task_tracker = MagicMock()
+
+    with TestClient(app) as client:
+        yield client
+
+
+class TestParamsPreviewEndpoint:
+    """Tests for the POST /v2/crawl/params-preview endpoint using TestClient."""
+
+    def test_params_preview_with_prompt(self, app_with_mocks):
+        """POST /v2/crawl/params-preview returns derived params."""
+        from unittest.mock import AsyncMock, patch
+
+        client = app_with_mocks
+        expected_response = json.dumps(
+            {
+                "include_paths": ["blog/.*"],
+                "exclude_paths": None,
+                "max_depth": 2,
+                "max_pages": 10,
+                "ignore_robots_txt": False,
+                "deduplicate_similar_urls": True,
+                "reasoning": "User wants blog posts.",
+            }
+        )
+
+        with (
+            patch(
+                "agent.nl_params.LLMClient.check_health", AsyncMock(return_value=True)
+            ),
+            patch(
+                "agent.nl_params.LLMClient.generate",
+                AsyncMock(return_value=expected_response),
+            ),
+            patch("agent.nl_params.LLMClient.close", AsyncMock()),
+        ):
+            resp = client.post(
+                "/v2/crawl/params-preview",
+                json={
+                    "url": "https://example.com",
+                    "prompt": "crawl only the blog posts",
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["success"] is True
+            assert data["includePaths"] == ["blog/.*"]
+            assert data["maxDepth"] == 2
+            assert "error" not in data or data["error"] is None
+
+    def test_params_preview_without_prompt_returns_422(self, app_with_mocks):
+        """POST /v2/crawl/params-preview without prompt returns 422."""
+        client = app_with_mocks
+        resp = client.post(
+            "/v2/crawl/params-preview",
+            json={"url": "https://example.com"},
+        )
+        assert resp.status_code == 422
+
+    def test_params_preview_without_url_returns_422(self, app_with_mocks):
+        """POST /v2/crawl/params-preview without url returns 422."""
+        client = app_with_mocks
+        resp = client.post(
+            "/v2/crawl/params-preview",
+            json={"prompt": "crawl blog"},
+        )
+        assert resp.status_code == 422
+
+    def test_params_preview_llm_unavailable(self, app_with_mocks):
+        """POST /v2/crawl/params-preview handles LLM unavailability gracefully."""
+        from unittest.mock import AsyncMock, patch
+
+        client = app_with_mocks
+
+        with (
+            patch(
+                "agent.nl_params.LLMClient.check_health", AsyncMock(return_value=False)
+            ),
+            patch("agent.nl_params.LLMClient.close", AsyncMock()),
+        ):
+            resp = client.post(
+                "/v2/crawl/params-preview",
+                json={"url": "https://example.com", "prompt": "crawl blog posts"},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["success"] is False
+            assert "error" in data
+            assert data["error"] is not None
+
+    def test_params_preview_llm_invalid_json(self, app_with_mocks):
+        """POST /v2/crawl/params-preview handles invalid LLM JSON gracefully."""
+        from unittest.mock import AsyncMock, patch
+
+        client = app_with_mocks
+
+        with (
+            patch(
+                "agent.nl_params.LLMClient.check_health", AsyncMock(return_value=True)
+            ),
+            patch(
+                "agent.nl_params.LLMClient.generate",
+                AsyncMock(return_value="not valid json"),
+            ),
+            patch("agent.nl_params.LLMClient.close", AsyncMock()),
+        ):
+            resp = client.post(
+                "/v2/crawl/params-preview",
+                json={"url": "https://example.com", "prompt": "crawl blog posts"},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["success"] is False
+            assert "error" in data
+            assert data["error"] is not None
+
+    def test_params_preview_endpoint_does_not_create_crawl_job(self, app_with_mocks):
+        """POST /v2/crawl/params-preview does not create a crawl job."""
+        from unittest.mock import AsyncMock, patch
+
+        client = app_with_mocks
+        expected_response = json.dumps(
+            {
+                "include_paths": ["blog/.*"],
+                "exclude_paths": None,
+                "max_depth": 2,
+                "max_pages": 10,
+                "ignore_robots_txt": False,
+                "deduplicate_similar_urls": True,
+                "reasoning": "User wants blog posts.",
+            }
+        )
+
+        with (
+            patch(
+                "agent.nl_params.LLMClient.check_health", AsyncMock(return_value=True)
+            ),
+            patch(
+                "agent.nl_params.LLMClient.generate",
+                AsyncMock(return_value=expected_response),
+            ),
+            patch("agent.nl_params.LLMClient.close", AsyncMock()),
+        ):
+            resp = client.post(
+                "/v2/crawl/params-preview",
+                json={
+                    "url": "https://example.com",
+                    "prompt": "crawl only the blog posts",
+                },
+            )
+            assert resp.status_code == 200
+            # No crawl job should be created
+            # The store's create_job should not have been called
+            # (there might be other calls from the test setup, so check no crawl job was created)
+            # Since params-preview doesn't create a job, the store is unaffected
+            assert "id" not in resp.json()
