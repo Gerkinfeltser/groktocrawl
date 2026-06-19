@@ -6,13 +6,18 @@ Uses the same valkey connection for both the API and the worker.
 
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from redis import Redis
 
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _expires_iso() -> str:
+    """Return ISO 8601 timestamp for 24 hours from now."""
+    return (datetime.now(UTC) + timedelta(hours=24)).isoformat()
 
 
 def _default_ttl() -> int:
@@ -39,6 +44,7 @@ class JobStore:
             "kind": kind,
             "status": "processing",
             "created_at": _now_iso(),
+            "expires_at": _expires_iso(),
             "payload": payload or {},
         }
         self.redis.set(f"job:{job_id}:meta", json.dumps(meta), ex=_default_ttl())

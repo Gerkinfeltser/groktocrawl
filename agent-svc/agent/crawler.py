@@ -16,6 +16,7 @@ import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from urllib.parse import urlparse, urlunparse
 
 import httpx
@@ -400,8 +401,10 @@ class CrawlEngine:
                 logger.debug("Skipping URL excluded by path filter: %s", url)
                 continue
 
-            # Scrape the page
+            # Scrape the page with timing
+            scrape_start = time.monotonic()
             result = await self.scraper.scrape(url)
+            scrape_duration_ms = int((time.monotonic() - scrape_start) * 1000)
 
             if not result.get("success"):
                 error_msg = result.get("error", "Unknown scrape error")
@@ -421,11 +424,46 @@ class CrawlEngine:
                     return result_obj
                 continue
 
-            # Record successful page
+            # Record successful page with enriched metadata
             data = result.get("data", {})
+            metadata = data.get("metadata") or {}
+            og = metadata.get("og") or {}
+            meta = metadata.get("meta") or {}
+            title = (
+                og.get("title")
+                or meta.get("title")
+                or data.get("title")
+                or metadata.get("title")
+                or ""
+            )
+            description = (
+                og.get("description")
+                or meta.get("description")
+                or metadata.get("description")
+                or ""
+            )
+            source = data.get("source", "unknown")
+            status_code = metadata.get("statusCode") or data.get("status_code") or 200
+            content_type = (
+                metadata.get("content-type")
+                or metadata.get("contentType")
+                or "text/html"
+            )
+            scraped_at = datetime.now(UTC).isoformat()
+
             page = {
                 "url": url,
                 "markdown": data.get("markdown", ""),
+                "metadata": {
+                    "title": title,
+                    "description": description,
+                    "source": source,
+                },
+                "title": title,
+                "status_code": status_code,
+                "content_type": content_type,
+                "scraped_at": scraped_at,
+                "duration_ms": scrape_duration_ms,
             }
             self._pages.append(page)
 

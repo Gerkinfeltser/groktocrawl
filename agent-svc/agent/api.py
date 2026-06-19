@@ -327,12 +327,31 @@ async def get_crawl_status(request: Request, job_id: str) -> CrawlStatusResponse
     if job is None:
         raise NotFoundError(detail="Job not found", details={"job_id": job_id})
     data = job.get("data") or {}
+
+    # Compute duration in milliseconds from created_at to completed_at
+    created_at = job.get("created_at")
+    completed_at = job.get("completed_at")
+    duration: int | None = None
+    if created_at and completed_at:
+        try:
+            from datetime import datetime as _dt
+
+            created_dt = _dt.fromisoformat(created_at)
+            completed_dt = _dt.fromisoformat(completed_at)
+            duration = int((completed_dt - created_dt).total_seconds() * 1000)
+        except (ValueError, TypeError):
+            duration = None
+
     return CrawlStatusResponse(
         status=job.get("status", "processing"),
         completed=data.get("completed", 0),
         total=data.get("total", 0),
         data=data.get("pages"),
         error=job.get("error"),
+        created_at=created_at,
+        completed_at=completed_at,
+        expires_at=job.get("expires_at"),
+        duration=duration,
     )
 
 
