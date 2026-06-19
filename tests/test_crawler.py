@@ -3918,6 +3918,292 @@ class TestScrapeOptionsModel:
         assert "headers" in dumped
         assert dumped["headers"] is None
 
+    # ── Advanced scrape options (VAL-PARITY-020 through 025, VAL-SCRAPE-056/057/058) ──
+
+    def test_advanced_fields_defaults(self):
+        """Advanced scrapeOptions fields have correct defaults."""
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions()
+        assert opts.actions is None
+        assert opts.location is None
+        assert opts.proxy is None
+        assert opts.block_ads is True  # default True
+        assert opts.parsers is None
+
+    def test_advanced_fields_custom_values(self):
+        """All advanced scrapeOptions fields accept custom values."""
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions(
+            actions=[
+                {"type": "wait", "milliseconds": 2000},
+                {"type": "click", "selector": ".load-more"},
+            ],
+            location={"country": "DE", "languages": ["de-DE", "en"]},
+            proxy="basic",
+            block_ads=False,
+            parsers=["pdf"],
+        )
+        assert opts.actions == [
+            {"type": "wait", "milliseconds": 2000},
+            {"type": "click", "selector": ".load-more"},
+        ]
+        assert opts.location == {"country": "DE", "languages": ["de-DE", "en"]}
+        assert opts.proxy == "basic"
+        assert opts.block_ads is False
+        assert opts.parsers == ["pdf"]
+
+    def test_actions_missing_type_rejected(self):
+        """Actions without a 'type' field are rejected."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match=r"missing required.*type"):
+            ScrapeOptions(actions=[{"milliseconds": 2000}])
+
+    def test_actions_invalid_type_rejected(self):
+        """Invalid action type is rejected."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="Invalid action type"):
+            ScrapeOptions(actions=[{"type": "fly"}])
+
+    def test_actions_click_requires_selector(self):
+        """Click action requires a selector field."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="requires a 'selector' field"):
+            ScrapeOptions(actions=[{"type": "click"}])
+
+    def test_actions_write_requires_selector_and_value(self):
+        """Write action requires both selector and value fields."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        # Missing selector
+        with pytest.raises(ValidationError, match="requires a 'selector' field"):
+            ScrapeOptions(actions=[{"type": "write", "value": "hello"}])
+
+        # Missing value
+        with pytest.raises(ValidationError, match="requires a 'value' field"):
+            ScrapeOptions(actions=[{"type": "write", "selector": "#input"}])
+
+    def test_actions_valid_types_accepted(self):
+        """All valid action types are accepted."""
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions(
+            actions=[
+                {"type": "wait", "milliseconds": 1000},
+                {"type": "click", "selector": "#btn"},
+                {"type": "screenshot"},
+                {"type": "scroll"},
+                {"type": "write", "selector": "#input", "value": "hello"},
+                {"type": "executeScript", "script": "document.title"},
+                {"type": "select", "selector": "#dropdown"},
+            ]
+        )
+        assert len(opts.actions) == 7
+
+    def test_invalid_proxy_rejected(self):
+        """Invalid proxy value is rejected."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="Invalid proxy"):
+            ScrapeOptions(proxy="super-premium")
+
+    def test_valid_proxy_values_accepted(self):
+        """All valid proxy values are accepted."""
+        from agent.models import ScrapeOptions
+
+        for val in ("basic", "enhanced", "auto"):
+            opts = ScrapeOptions(proxy=val)
+            assert opts.proxy == val
+
+    def test_invalid_parsers_rejected(self):
+        """Invalid parser type is rejected."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="Invalid parser"):
+            ScrapeOptions(parsers=["csv"])
+
+    def test_valid_parsers_accepted(self):
+        """Valid parser types are accepted."""
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions(parsers=["pdf"])
+        assert opts.parsers == ["pdf"]
+
+    def test_location_invalid_type_rejected(self):
+        """Non-dict location is rejected."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ScrapeOptions(location="DE")
+
+    def test_location_country_must_be_string(self):
+        """location.country must be a string."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match=r"location.country must be a string"):
+            ScrapeOptions(location={"country": 42})
+
+    def test_location_languages_must_be_list_of_strings(self):
+        """location.languages must be a list of strings."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match=r"location.languages must be a list"):
+            ScrapeOptions(location={"country": "DE", "languages": "de"})
+
+    def test_forward_compatible_extra_fields_passed_through(self):
+        """Unknown/extra fields are preserved in model_dump (extra='allow')."""
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions(
+            formats=["markdown"],
+            extra_field="hello",
+            another_unknown=True,
+            nested={"key": "value"},
+        )
+        dumped = opts.model_dump(mode="json")
+        assert dumped.get("extra_field") == "hello"
+        assert dumped.get("another_unknown") is True
+        assert dumped.get("nested") == {"key": "value"}
+
+    def test_advanced_fields_camelcase_input_accepted(self):
+        """CamelCase input for advanced fields works via populate_by_name."""
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions(
+            **{
+                "actions": [{"type": "wait", "milliseconds": 1000}],
+                "location": {"country": "FR", "languages": ["fr-FR"]},
+                "proxy": "enhanced",
+                "blockAds": True,
+                "parsers": ["pdf"],
+            }
+        )
+        assert opts.actions == [{"type": "wait", "milliseconds": 1000}]
+        assert opts.location == {"country": "FR", "languages": ["fr-FR"]}
+        assert opts.proxy == "enhanced"
+        assert opts.block_ads is True
+        assert opts.parsers == ["pdf"]
+
+    def test_advanced_fields_in_model_dump_by_alias(self):
+        """model_dump(by_alias=True) produces camelCase keys for advanced fields."""
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions(
+            actions=[{"type": "wait", "milliseconds": 2000}],
+            location={"country": "DE", "languages": ["de-DE"]},
+            proxy="basic",
+            block_ads=False,
+            parsers=["pdf"],
+        )
+        dumped = opts.model_dump(mode="json", by_alias=True)
+        assert dumped.get("actions") == [{"type": "wait", "milliseconds": 2000}]
+        assert dumped.get("location") == {"country": "DE", "languages": ["de-DE"]}
+        assert dumped.get("proxy") == "basic"
+        assert dumped.get("blockAds") is False
+        assert dumped.get("parsers") == ["pdf"]
+        # snake_case keys should not appear for aliased fields
+        assert "block_ads" not in dumped
+
+    def test_advanced_fields_json_serializable(self):
+        """model_dump(mode='json') produces JSON-serializable dict with advanced fields."""
+        import json
+
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions(
+            actions=[{"type": "wait", "milliseconds": 2000}],
+            location={"country": "US", "languages": ["en-US"]},
+            proxy="basic",
+            block_ads=True,
+            parsers=["pdf"],
+        )
+        dumped = opts.model_dump(mode="json")
+        json_str = json.dumps(dumped)
+        parsed = json.loads(json_str)
+        assert parsed["actions"] == [{"type": "wait", "milliseconds": 2000}]
+        assert parsed["location"] == {"country": "US", "languages": ["en-US"]}
+        assert parsed["proxy"] == "basic"
+        assert parsed["block_ads"] is True
+        assert parsed["parsers"] == ["pdf"]
+
+    def test_model_dump_excludes_none_advanced_fields(self):
+        """model_dump(exclude_none=True) excludes None advanced fields."""
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions()
+        dumped = opts.model_dump(mode="json", exclude_none=True)
+        assert "actions" not in dumped or dumped.get("actions") is None
+        assert "location" not in dumped or dumped.get("location") is None
+        assert "proxy" not in dumped or dumped.get("proxy") is None
+        assert "parsers" not in dumped or dumped.get("parsers") is None
+
+    def test_actions_list_not_dict_rejected(self):
+        """actions must be a list, not a dict."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ScrapeOptions(actions={"type": "wait"})
+
+    def test_actions_item_not_dict_rejected(self):
+        """Each action in actions must be a dict."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ScrapeOptions(actions=["wait"])
+
+    def test_parsers_not_list_rejected(self):
+        """parsers must be a list."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ScrapeOptions(parsers="pdf")
+
+    def test_parsers_item_not_string_rejected(self):
+        """Each item in parsers must be a string."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ScrapeOptions(parsers=[42])
+
+    def test_select_action_requires_selector(self):
+        """Select action requires a selector field."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="requires a 'selector' field"):
+            ScrapeOptions(actions=[{"type": "select"}])
+
 
 # ── DedupManager tests ────────────────────────────────────────────
 

@@ -11,6 +11,35 @@ VALID_SCRAPE_FORMATS: frozenset[str] = frozenset(
     {"markdown", "html", "links", "screenshot", "rawHtml", "screenshot@fullPage"}
 )
 
+# ── Valid browser action types ──────────────────────────────────
+VALID_SCRAPE_ACTION_TYPES: frozenset[str] = frozenset(
+    {
+        "wait",  # Wait for a specified number of milliseconds
+        "click",  # Click on a CSS selector
+        "screenshot",  # Take a screenshot
+        "scroll",  # Scroll the page
+        "write",  # Type text into a field
+        "executeScript",  # Execute JavaScript
+        "select",  # Select an option from a dropdown
+    }
+)
+
+# ── Valid parser types ──────────────────────────────────────────
+VALID_SCRAPE_PARSER_TYPES: frozenset[str] = frozenset(
+    {
+        "pdf",  # Extract PDF content as markdown
+    }
+)
+
+# ── Valid proxy values ──────────────────────────────────────────
+VALID_SCRAPE_PROXY_VALUES: frozenset[str] = frozenset(
+    {
+        "basic",
+        "enhanced",
+        "auto",
+    }
+)
+
 
 class ErrorDetail(BaseModel):
     """A single field-level validation error."""
@@ -34,6 +63,10 @@ class ScrapeOptions(BaseModel):
     All fields are optional with documented defaults. When ``None`` (or omitted),
     the scraper-svc applies its own sensible defaults for each field.
 
+    ``model_config`` uses ``extra="allow"`` so that unrecognised fields are
+    preserved and forwarded to the scraper-svc as-is (forward-compatible
+    passthrough).
+
     Attributes:
         formats: List of output formats to return. Allowed values:
             ``markdown`` (default), ``html``, ``links``, ``screenshot``,
@@ -53,9 +86,34 @@ class ScrapeOptions(BaseModel):
             ``{"Authorization": "Bearer ..."}``).
         remove_base64_images: When True, strip ``data:image/...`` URIs from
             the extracted content (default: False).
+        max_age: Maximum age of cached content in milliseconds. If the cached
+            response is younger than ``max_age``, it is returned without
+            re-scraping. When set to 0, caching is bypassed entirely.
+        min_age: Minimum age for cache-only mode in milliseconds. When set,
+            only cached content is returned. A cache miss produces a
+            ``cache_miss`` error rather than fetching fresh content.
+        actions: Ordered list of browser actions to execute before scraping
+            each page. Each action is a dict with at minimum a ``type`` key.
+            Supported types: ``wait``, ``click``, ``screenshot``, ``scroll``,
+            ``write``, ``executeScript``, ``select``.
+        location: Geo-location settings for the browser session. A dict with
+            optional ``country`` (ISO 3166-1 alpha-2) and ``languages``
+            (list of BCP 47 language tags).
+        proxy: Proxy selection hint. One of ``"basic"``, ``"enhanced"``, or
+            ``"auto"``. When set, influences which proxy pool is used for
+            the crawl's scraping requests.
+        block_ads: When True (default), ad content is stripped from scraped
+            pages. When False, ads remain in the output.
+        parsers: List of parser types to use for extraction. At minimum
+            ``["pdf"]`` is recognised — when set, PDF files are extracted
+            to markdown.
     """
 
-    model_config = ConfigDict(populate_by_name=True, alias_generator=to_camel)
+    model_config = ConfigDict(
+        populate_by_name=True,
+        alias_generator=to_camel,
+        extra="allow",
+    )
 
     formats: list[str] = Field(
         default=["markdown"],
@@ -102,6 +160,34 @@ class ScrapeOptions(BaseModel):
             " URL rather than fetching fresh content."
         ),
     )
+    actions: list[dict] | None = Field(
+        default=None,
+        description=(
+            "Ordered list of browser actions to execute before scraping each page."
+            " Each action is a dict with at minimum a ``type`` key. Supported types:"
+            " ``wait``, ``click``, ``screenshot``, ``scroll``, ``write``,"
+            " ``executeScript``, ``select``."
+        ),
+    )
+    location: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Geo-location settings. Dict with optional ``country``"
+            " (ISO 3166-1 alpha-2) and ``languages`` (list of BCP 47 tags)."
+        ),
+    )
+    proxy: str | None = Field(
+        default=None,
+        description="Proxy selection: ``basic``, ``enhanced``, or ``auto``.",
+    )
+    block_ads: bool = Field(
+        default=True,
+        description="When True, strip ad content from scraped pages.",
+    )
+    parsers: list[str] | None = Field(
+        default=None,
+        description=('List of parser types. At minimum ``["pdf"]`` is recognised.'),
+    )
 
     @field_validator("formats")
     @classmethod
@@ -140,6 +226,117 @@ class ScrapeOptions(BaseModel):
         """
         if value is not None and value < 0:
             raise ValueError(f"max_age must be >= 0, got {value}")
+        return value
+
+    @field_validator("actions")
+    @classmethod
+    def validate_actions(cls, value: list[dict] | None) -> list[dict] | None:
+        """Validate that each action has at minimum a ``type`` key with a
+        recognised value.
+
+        VAL-SCRAPE-056 / VAL-PARITY-021: actions field accepted and validated.
+        """
+        if value is None:
+            return value
+        if not isinstance(value, list):
+            raise ValueError("actions must be a list of action objects")
+        allowed = sorted(VALID_SCRAPE_ACTION_TYPES)
+        for i, action in enumerate(value):
+            if not isinstance(action, dict):
+                raise ValueError(
+                    f"actions[{i}] must be a dict/object, got {type(action).__name__}"
+                )
+            action_type = action.get("type")
+            if not action_type:
+                raise ValueError(f"actions[{i}] is missing required 'type' field")
+            if action_type not in VALID_SCRAPE_ACTION_TYPES:
+                raise ValueError(
+                    f"Invalid action type '{action_type}' at actions[{i}]. "
+                    f"Allowed values: {', '.join(allowed)}"
+                )
+            # ``click`` and ``write`` actions require a ``selector`` field
+            if action_type in ("click", "write", "select"):
+                if "selector" not in action:
+                    raise ValueError(
+                        f"actions[{i}]: '{action_type}' action requires a 'selector' field"
+                    )
+            # ``write`` action also requires a ``value`` (text) field
+            if action_type == "write":
+                if "value" not in action:
+                    raise ValueError(
+                        f"actions[{i}]: 'write' action requires a 'value' field"
+                    )
+        return value
+
+    @field_validator("proxy")
+    @classmethod
+    def validate_proxy(cls, value: str | None) -> str | None:
+        """Validate that proxy is one of the recognised values.
+
+        VAL-PARITY-023: proxy field accepted with ``basic``/``enhanced``/``auto``.
+        """
+        if value is None:
+            return value
+        if value not in VALID_SCRAPE_PROXY_VALUES:
+            allowed = ", ".join(sorted(VALID_SCRAPE_PROXY_VALUES))
+            raise ValueError(f"Invalid proxy '{value}'. Allowed values: {allowed}")
+        return value
+
+    @field_validator("parsers")
+    @classmethod
+    def validate_parsers(cls, value: list[str] | None) -> list[str] | None:
+        """Validate parser type strings.
+
+        VAL-PARITY-025: parsers field accepted with at minimum ``pdf``.
+        """
+        if value is None:
+            return value
+        if not isinstance(value, list):
+            raise ValueError("parsers must be a list of parser type strings")
+        allowed = sorted(VALID_SCRAPE_PARSER_TYPES)
+        for i, parser in enumerate(value):
+            if not isinstance(parser, str):
+                raise ValueError(
+                    f"parsers[{i}] must be a string, got {type(parser).__name__}"
+                )
+            if parser not in VALID_SCRAPE_PARSER_TYPES:
+                raise ValueError(
+                    f"Invalid parser '{parser}' at parsers[{i}]. "
+                    f"Allowed values: {', '.join(allowed)}"
+                )
+        return value
+
+    @field_validator("location")
+    @classmethod
+    def validate_location(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Validate the location object structure.
+
+        VAL-PARITY-022: location field accepted with ``country`` and
+        ``languages``.
+        """
+        if value is None:
+            return value
+        if not isinstance(value, dict):
+            raise ValueError("location must be a dict/object")
+        # ``country`` should be a string (ISO 3166-1 alpha-2) if present
+        country = value.get("country")
+        if country is not None and not isinstance(country, str):
+            raise ValueError(
+                f"location.country must be a string, got {type(country).__name__}"
+            )
+        # ``languages`` should be a list of strings if present
+        languages = value.get("languages")
+        if languages is not None:
+            if not isinstance(languages, list):
+                raise ValueError(
+                    f"location.languages must be a list, got {type(languages).__name__}"
+                )
+            for i, lang in enumerate(languages):
+                if not isinstance(lang, str):
+                    raise ValueError(
+                        f"location.languages[{i}] must be a string, "
+                        f"got {type(lang).__name__}"
+                    )
         return value
 
     @model_validator(mode="after")
