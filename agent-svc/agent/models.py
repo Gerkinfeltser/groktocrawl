@@ -124,6 +124,14 @@ class CrawlRequest(BaseModel):
         ge=0,
         description="Delay in seconds between scrapes. Forces concurrency to 1 when set.",
     )
+    ignore_robots_txt: bool = Field(
+        default=False,
+        description="When True, bypass robots.txt enforcement. All discovered URLs are scraped regardless of robots.txt Disallow rules.",
+    )
+    robots_user_agent: str | None = Field(
+        default=None,
+        description="Custom User-Agent string for robots.txt evaluation. When set, robots.txt rules are evaluated against this User-Agent instead of the default bot UA.",
+    )
 
     @field_validator("url")
     @classmethod

@@ -79,8 +79,19 @@ async def _maybe_degrade(
     return None
 
 
-async def _politeness_check_and_delay(url: str) -> tuple[bool, dict | None]:
+async def _politeness_check_and_delay(
+    url: str,
+    ignore_robots_txt: bool = False,
+    robots_user_agent: str | None = None,
+) -> tuple[bool, dict | None]:
     """Check politeness policy for a URL.
+
+    Args:
+        url: The URL to check.
+        ignore_robots_txt: If True, skip robots.txt enforcement but still
+            apply rate limiting.
+        robots_user_agent: Custom User-Agent string to use for robots.txt
+            evaluation. If None, uses the default bot UA.
 
     Returns (proceed, error_dict):
         (True, None) — proceed with the request
@@ -95,7 +106,7 @@ async def _politeness_check_and_delay(url: str) -> tuple[bool, dict | None]:
     if not manager.enabled:
         return True, None
 
-    result = await manager.check(url)
+    result = await manager.check(url, ignore_robots_txt=ignore_robots_txt)
     if result.action == "blocked":
         logger.info("Politeness blocked %s: %s", url, result.reason)
         metadata = manager.get_politeness_metadata(url)
@@ -216,7 +227,12 @@ async def _head_probe(url: str, client: httpx.AsyncClient) -> dict:
         }
 
 
-async def smart_scrape(url: str, force_browser: bool = False) -> dict:
+async def smart_scrape(
+    url: str,
+    force_browser: bool = False,
+    ignore_robots_txt: bool = False,
+    robots_user_agent: str | None = None,
+) -> dict:
     """Try each tier in order. Return the first successful result with acceptable quality.
 
     Degrades through tiers when quality is below QA_MIN_QUALITY_THRESHOLD.
@@ -229,6 +245,18 @@ async def smart_scrape(url: str, force_browser: bool = False) -> dict:
     When SCRAPER_POLITENESS_ENABLED=true, checks robots.txt and enforces
     per-domain rate limits before each tier.
 
+    When ``ignore_robots_txt`` is True, robots.txt disallow directives are
+    skipped but per-domain rate limiting (crawl-delay) still applies.
+
+    When ``robots_user_agent`` is set, it is used as the User-Agent for
+    robots.txt evaluation instead of the default bot UA.
+
+    Args:
+        url: The URL to scrape.
+        force_browser: If True, skip lightweight tiers.
+        ignore_robots_txt: If True, skip robots.txt enforcement.
+        robots_user_agent: Custom UA for robots.txt evaluation.
+
     Returns a dict with keys: markdown, source, url, quality, error (optional).
     """
     best_effort: list[dict] = []
@@ -240,7 +268,11 @@ async def smart_scrape(url: str, force_browser: bool = False) -> dict:
     if force_browser:
         logger.info("force_browser=True, jumping to Tier 3 for %s", url)
         # Politeness check still applies
-        _proceed, blocked = await _politeness_check_and_delay(url)
+        _proceed, blocked = await _politeness_check_and_delay(
+            url,
+            ignore_robots_txt=ignore_robots_txt,
+            robots_user_agent=robots_user_agent,
+        )
         if blocked:
             return blocked
 
@@ -248,16 +280,12 @@ async def smart_scrape(url: str, force_browser: bool = False) -> dict:
         if result:
             # Barrier detection
             if "barrier" in result:
-                logger.warning(
-                    "Barrier detected at force_browser Tier 3 for %s", url
-                )
+                logger.warning("Barrier detected at force_browser Tier 3 for %s", url)
             markdown_text = result.get("markdown", "")
             raw_html = result.get("raw_html_start", "")
             barrier = _classify_barrier("", url, markdown_text, raw_html)
             if not barrier.detected or barrier.confidence <= 0.7:
-                accepted = await _maybe_degrade(
-                    result, "tier3-playwright", best_effort
-                )
+                accepted = await _maybe_degrade(result, "tier3-playwright", best_effort)
                 if accepted:
                     accepted = await _enrich_with_politeness(accepted, url)
                     return accepted
@@ -270,15 +298,17 @@ async def smart_scrape(url: str, force_browser: bool = False) -> dict:
                 )
 
         # Fall through to FlareSolverr
-        _proceed, blocked = await _politeness_check_and_delay(url)
+        _proceed, blocked = await _politeness_check_and_delay(
+            url,
+            ignore_robots_txt=ignore_robots_txt,
+            robots_user_agent=robots_user_agent,
+        )
         if blocked:
             return blocked
         fs_result = await fetch_via_flaresolverr(url)
         if fs_result:
             if "barrier" in fs_result:
-                logger.warning(
-                    "Barrier detected at force_browser Tier 3.5 for %s", url
-                )
+                logger.warning("Barrier detected at force_browser Tier 3.5 for %s", url)
                 return fs_result
             accepted = await _maybe_degrade(
                 fs_result, "tier35-flaresolverr", best_effort
@@ -347,7 +377,11 @@ async def smart_scrape(url: str, force_browser: bool = False) -> dict:
                 return adapter_result.to_dict()
 
         # Politeness check: robots.txt + rate limit (before any HTTP)
-        _proceed, blocked = await _politeness_check_and_delay(url)
+        _proceed, blocked = await _politeness_check_and_delay(
+            url,
+            ignore_robots_txt=ignore_robots_txt,
+            robots_user_agent=robots_user_agent,
+        )
         if blocked:
             return blocked
 
@@ -375,7 +409,11 @@ async def smart_scrape(url: str, force_browser: bool = False) -> dict:
 
         # Tier 1: /llms.txt
         if not probe.get("shielded") and not probe.get("is_binary"):
-            _proceed, blocked = await _politeness_check_and_delay(url)
+            _proceed, blocked = await _politeness_check_and_delay(
+                url,
+                ignore_robots_txt=ignore_robots_txt,
+                robots_user_agent=robots_user_agent,
+            )
             if blocked:
                 return blocked
             result = await fetch_via_llms_txt(url, client)
@@ -388,7 +426,11 @@ async def smart_scrape(url: str, force_browser: bool = False) -> dict:
 
         # Tier 2: Accept: text/markdown
         if not probe.get("shielded") and not probe.get("is_binary"):
-            _proceed, blocked = await _politeness_check_and_delay(url)
+            _proceed, blocked = await _politeness_check_and_delay(
+                url,
+                ignore_robots_txt=ignore_robots_txt,
+                robots_user_agent=robots_user_agent,
+            )
             if blocked:
                 return blocked
             result = await fetch_via_content_negotiation(url, client)
@@ -402,7 +444,11 @@ async def smart_scrape(url: str, force_browser: bool = False) -> dict:
                     return accepted
 
     # Tier 3: Playwright render + readability (no shared client needed)
-    _proceed, blocked = await _politeness_check_and_delay(url)
+    _proceed, blocked = await _politeness_check_and_delay(
+        url,
+        ignore_robots_txt=ignore_robots_txt,
+        robots_user_agent=robots_user_agent,
+    )
     if blocked:
         return blocked
     result = await fetch_via_playwright(url)
@@ -439,7 +485,11 @@ async def smart_scrape(url: str, force_browser: bool = False) -> dict:
     # Tier 3.5: FlareSolverr for hard Cloudflare challenges
     # Always attempt FlareSolverr after Playwright — handles Cloudflare
     # JS challenges that Playwright couldn't render.
-    _proceed, blocked = await _politeness_check_and_delay(url)
+    _proceed, blocked = await _politeness_check_and_delay(
+        url,
+        ignore_robots_txt=ignore_robots_txt,
+        robots_user_agent=robots_user_agent,
+    )
     if blocked:
         return blocked
     fs_result = await fetch_via_flaresolverr(url)

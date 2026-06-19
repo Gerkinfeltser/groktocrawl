@@ -18,7 +18,13 @@ class ScraperClient:
         self.base_url = base_url.rstrip("/")
         self._client = httpx.AsyncClient(timeout=60)
 
-    async def scrape(self, url: str, force_browser: bool = False) -> dict:
+    async def scrape(
+        self,
+        url: str,
+        force_browser: bool = False,
+        ignore_robots_txt: bool = False,
+        robots_user_agent: str | None = None,
+    ) -> dict:
         """Scrape a URL via the scraper service.
 
         Returns dict with keys: success, data (with markdown, source), error.
@@ -26,12 +32,22 @@ class ScraperClient:
 
         When ``force_browser`` is True, the scraper-svc skips lightweight
         tiers and goes straight to Playwright render (Tier 3).
+
+        When ``ignore_robots_txt`` is True, the scraper-svc bypasses
+        robots.txt enforcement but still applies per-domain rate limiting.
+
+        When ``robots_user_agent`` is set, it is used as the User-Agent for
+        robots.txt evaluation instead of the default bot UA.
         """
         start = time.monotonic()
         try:
             body: dict = {"url": url}
             if force_browser:
                 body["force_browser"] = True
+            if ignore_robots_txt:
+                body["ignore_robots_txt"] = True
+            if robots_user_agent is not None:
+                body["robots_user_agent"] = robots_user_agent
             resp = await self._client.post(
                 f"{self.base_url}/scrape",
                 json=body,

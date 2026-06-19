@@ -284,7 +284,7 @@ class MockPage:
 
     @staticmethod
     def success(
-        url: str, markdown: str = "# Page Content", html: str | None = None
+        url: str, markdown: str = "# Page Content", html: str | None = None, **kwargs
     ) -> dict:
         return {
             "success": True,
@@ -296,7 +296,7 @@ class MockPage:
         }
 
     @staticmethod
-    def failure(url: str, error: str = "Scrape failed") -> dict:
+    def failure(url: str, error: str = "Scrape failed", **kwargs) -> dict:
         return {"success": False, "error": error}
 
 
@@ -349,7 +349,9 @@ class TestCrawlEngine:
             """
 
             # Set up scraper to return appropriate markdown per URL
-            async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            async def scrape_side_effect(
+                url: str, force_browser: bool = False, **kwargs
+            ) -> dict:
                 return MockPage.success(url, f"# Content of {url}")
 
             mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -400,7 +402,9 @@ class TestCrawlEngine:
             options=CrawlOptions(max_pages=10, max_depth=1),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -434,7 +438,9 @@ class TestCrawlEngine:
             options=CrawlOptions(max_pages=10, max_depth=2),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -469,7 +475,9 @@ class TestCrawlEngine:
             options=CrawlOptions(max_pages=10, max_depth=1),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -500,7 +508,9 @@ class TestCrawlEngine:
             options=CrawlOptions(max_pages=10, max_depth=1),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -535,7 +545,9 @@ class TestCrawlEngine:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -568,7 +580,9 @@ class TestCrawlEngine:
             options=CrawlOptions(max_pages=10, max_depth=1),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             if "fail" in url:
                 return MockPage.failure(url, "Connection refused")
             return MockPage.success(url, f"# Content of {url}")
@@ -631,7 +645,9 @@ class TestCrawlEngine:
             options=CrawlOptions(max_pages=10, max_depth=2, crawl_entire_domain=True),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -753,7 +769,9 @@ class TestCrawlEngine:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -816,7 +834,9 @@ class TestCrawlEngine:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -868,7 +888,9 @@ class TestCrawlEngine:
             options=CrawlOptions(max_pages=10, max_depth=2),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -884,7 +906,9 @@ class TestCrawlEngine:
             # Cancel after the first page is scraped
             original_scrape = mock_scraper.scrape
 
-            async def scrape_with_cancel(url: str, force_browser: bool = False) -> dict:
+            async def scrape_with_cancel(
+                url: str, force_browser: bool = False, **kwargs
+            ) -> dict:
                 result = await original_scrape(url, force_browser)
                 engine.cancel()
                 return result
@@ -954,7 +978,9 @@ class TestPathFiltering:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -991,7 +1017,9 @@ class TestPathFiltering:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -1030,7 +1058,9 @@ class TestPathFiltering:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -1069,7 +1099,9 @@ class TestPathFiltering:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -1102,7 +1134,9 @@ class TestPathFiltering:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -1141,7 +1175,9 @@ class TestPathFiltering:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -1230,7 +1266,9 @@ class TestPathFiltering:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -1274,7 +1312,9 @@ class TestPathFiltering:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -1311,7 +1351,9 @@ class TestPathFiltering:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -1350,7 +1392,9 @@ class TestPathFiltering:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -1407,7 +1451,9 @@ class TestPathFiltering:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -1449,7 +1495,9 @@ class TestPathFiltering:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -1700,7 +1748,9 @@ class TestPerPageMetadata:
         from agent.crawler import CrawlEngine, CrawlOptions
 
         # Mock scraper to return enriched data with metadata
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return {
                 "success": True,
                 "data": {
@@ -1796,7 +1846,9 @@ class TestCrawlEngineSitemap:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -1836,7 +1888,9 @@ class TestCrawlEngineSitemap:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -1882,7 +1936,9 @@ class TestCrawlEngineSitemap:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -1920,7 +1976,9 @@ class TestCrawlEngineSitemap:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -1956,7 +2014,9 @@ class TestCrawlEngineSitemap:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -1995,7 +2055,9 @@ class TestCrawlEngineSitemap:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -2035,7 +2097,9 @@ class TestCrawlEngineSitemap:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -2088,7 +2152,9 @@ class TestDomainScopeControls:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -2131,7 +2197,9 @@ class TestDomainScopeControls:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -2171,7 +2239,9 @@ class TestDomainScopeControls:
                 ),
             )
 
-            async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            async def scrape_side_effect(
+                url: str, force_browser: bool = False, **kwargs
+            ) -> dict:
                 return MockPage.success(url, f"# Content of {url}")
 
             mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -2208,7 +2278,9 @@ class TestDomainScopeControls:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -2248,7 +2320,9 @@ class TestDomainScopeControls:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -2286,7 +2360,9 @@ class TestDomainScopeControls:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -2326,7 +2402,9 @@ class TestDomainScopeControls:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -2364,7 +2442,9 @@ class TestDomainScopeControls:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -2411,7 +2491,9 @@ class TestDomainScopeControls:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -2452,7 +2534,9 @@ class TestDomainScopeControls:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -2681,7 +2765,9 @@ class TestCrawlConcurrency:
 
         scrape_times = []
 
-        async def scrape_with_timing(url: str, force_browser: bool = False) -> dict:
+        async def scrape_with_timing(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             scrape_times.append(time.monotonic())
             return MockPage.success(url, f"# Content of {url}")
 
@@ -2725,7 +2811,9 @@ class TestCrawlConcurrency:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -2765,7 +2853,9 @@ class TestCrawlConcurrency:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -2802,7 +2892,9 @@ class TestCrawlConcurrency:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -2840,7 +2932,9 @@ class TestCrawlConcurrency:
         # With delay=0.0, concurrency should NOT be forced to 1
         assert engine._effective_concurrency == 5
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -2874,7 +2968,9 @@ class TestCrawlConcurrency:
         # With delay=None, concurrency should NOT be forced to 1
         assert engine._effective_concurrency == 5
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -2939,7 +3035,9 @@ class TestCrawlConcurrency:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             return MockPage.success(url, f"# Content of {url}")
 
         mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
@@ -2974,7 +3072,9 @@ class TestCrawlConcurrency:
 
         scraped_urls = []
 
-        async def scrape_and_track(url: str, force_browser: bool = False) -> dict:
+        async def scrape_and_track(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             scraped_urls.append(url)
             return MockPage.success(url, f"# Content of {url}")
 
@@ -3025,7 +3125,9 @@ class TestCrawlConcurrency:
             ),
         )
 
-        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
             if "fail" in url:
                 return MockPage.failure(url, "Connection error")
             return MockPage.success(url, f"# Content of {url}")
@@ -3153,3 +3255,194 @@ class TestCrawlRequestConcurrencyValidation:
 
         with pytest.raises(ValidationError, match="delay"):
             CrawlRequest(url="http://example.com", delay=-1)
+
+
+# ── Politeness integration tests ─────────────────────────────────
+
+
+class TestPolitenessFields:
+    """Tests for the ignore_robots_txt and robots_user_agent fields."""
+
+    def test_ignore_robots_txt_default_false(self):
+        """ignore_robots_txt defaults to False."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com")
+        assert req.ignore_robots_txt is False
+
+    def test_ignore_robots_txt_true_accepted(self):
+        """ignore_robots_txt=True is accepted."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com", ignore_robots_txt=True)
+        assert req.ignore_robots_txt is True
+
+    def test_robots_user_agent_default_none(self):
+        """robots_user_agent defaults to None."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com")
+        assert req.robots_user_agent is None
+
+    def test_robots_user_agent_custom_accepted(self):
+        """Custom robots_user_agent string is accepted."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com", robots_user_agent="MyBot/1.0")
+        assert req.robots_user_agent == "MyBot/1.0"
+
+    def test_crawl_options_accepts_politeness_fields(self):
+        """CrawlOptions accepts ignore_robots_txt and robots_user_agent."""
+        from agent.crawler import CrawlOptions
+
+        opts = CrawlOptions(
+            max_pages=5,
+            ignore_robots_txt=True,
+            robots_user_agent="TestBot/2.0",
+        )
+        assert opts.ignore_robots_txt is True
+        assert opts.robots_user_agent == "TestBot/2.0"
+
+    def test_crawl_result_has_robots_blocked(self):
+        """CrawlResult includes robots_blocked list."""
+        from agent.crawler import CrawlResult
+
+        result = CrawlResult()
+        assert hasattr(result, "robots_blocked")
+        assert result.robots_blocked == []
+
+    @pytest.mark.asyncio
+    async def test_ignore_robots_txt_passed_to_scraper(self, mock_scraper):
+        """ignore_robots_txt is passed through to the scraper client."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        mock_scraper.scrape = AsyncMock(
+            return_value=MockPage.success("http://example.com/")
+        )
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=1,
+                max_depth=0,
+                ignore_robots_txt=True,
+                robots_user_agent="CustomBot/1.0",
+            ),
+        )
+
+        await engine.run("http://example.com/")
+
+        # Verify the scraper was called with the correct params
+        mock_scraper.scrape.assert_called_once_with(
+            "http://example.com/",
+            ignore_robots_txt=True,
+            robots_user_agent="CustomBot/1.0",
+        )
+
+    @pytest.mark.asyncio
+    async def test_politeness_blocked_results_collected(self, mock_scraper):
+        """Politeness-blocked scrape results are collected in robots_blocked list."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        async def scrape_side_effect(url: str, **kwargs) -> dict:
+            if "blocked" in url:
+                return {
+                    "success": False,
+                    "error": "Blocked by politeness: Disallowed by robots.txt: /admin/",
+                }
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(max_pages=10, max_depth=1),
+        )
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/good">Good page</a>
+                <a href="http://example.com/blocked">Blocked page</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/", job_id="test-politeness")
+
+        assert result.completed == 2
+        assert len(result.pages) == 2
+        assert len(result.robots_blocked) == 1
+        assert result.robots_blocked[0]["url"] == "http://example.com/blocked"
+        assert result.robots_blocked[0]["error_code"] == "ROBOTS_BLOCKED"
+
+    @pytest.mark.asyncio
+    async def test_non_politeness_errors_not_in_robots_blocked(self, mock_scraper):
+        """Non-politeness errors appear in errors but not in robots_blocked."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        async def scrape_side_effect(url: str, **kwargs) -> dict:
+            if "timeout" in url:
+                return {"success": False, "error": "Scraper timed out"}
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(max_pages=10, max_depth=1),
+        )
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/good">Good page</a>
+                <a href="http://example.com/timeout">Timeout page</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/", job_id="test-errors")
+
+        assert result.completed == 2
+        assert len(result.errors) == 1
+        assert len(result.robots_blocked) == 0
+        assert "timeout" in result.errors[0]["url"]
+
+
+# ── CrawlRequest ignore_robots_txt and robots_user_agent validation ────
+
+
+class TestCrawlRequestPoliteness:
+    """Tests for CrawlRequest politeness field validation."""
+
+    def test_ignore_robots_txt_field_accepted(self):
+        """CrawlRequest accepts and serializes ignore_robots_txt."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(
+            url="http://example.com",
+            ignore_robots_txt=True,
+        )
+        d = req.model_dump(by_alias=True)
+        assert d.get("ignoreRobotsTxt") is True
+
+    def test_robots_user_agent_field_accepted(self):
+        """CrawlRequest accepts and serializes robots_user_agent."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(
+            url="http://example.com",
+            robots_user_agent="MyBot/1.0",
+        )
+        d = req.model_dump(by_alias=True)
+        assert d.get("robotsUserAgent") == "MyBot/1.0"
+
+    def test_both_politeness_fields_default(self):
+        """Default values are False and None."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com")
+        assert req.ignore_robots_txt is False
+        assert req.robots_user_agent is None

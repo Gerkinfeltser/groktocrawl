@@ -104,6 +104,8 @@ METRICS.counter("meta_calls_total", "Total meta requests", ["status"])
 class ScrapeRequest(BaseModel):
     url: str
     force_browser: bool = False
+    ignore_robots_txt: bool = False
+    robots_user_agent: str | None = None
 
 
 class DownloadData(BaseModel):
@@ -213,7 +215,12 @@ async def metrics():
 async def scrape(request: ScrapeRequest):
     """Scrape a URL and return its content as clean markdown."""
     try:
-        result = await smart_scrape(request.url, force_browser=request.force_browser)
+        result = await smart_scrape(
+            request.url,
+            force_browser=request.force_browser,
+            ignore_robots_txt=request.ignore_robots_txt,
+            robots_user_agent=request.robots_user_agent,
+        )
         if result.get("error"):
             METRICS.counter(
                 "scrape_calls_total", "Total scrape requests", ["status"]

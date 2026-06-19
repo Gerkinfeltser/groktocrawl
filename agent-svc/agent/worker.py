@@ -119,6 +119,8 @@ async def _process_crawl_async(
     allow_external_links: bool = False,
     max_concurrency: int = 3,
     delay: float | None = None,
+    ignore_robots_txt: bool = False,
+    robots_user_agent: str | None = None,
 ) -> None:
     """Process a crawl job with full lifecycle support.
 
@@ -170,6 +172,8 @@ async def _process_crawl_async(
             crawl_entire_domain=crawl_entire_domain,
             max_concurrency=max_concurrency,
             delay=delay,
+            ignore_robots_txt=ignore_robots_txt,
+            robots_user_agent=robots_user_agent,
             max_duration_seconds=settings.crawl_max_duration_seconds,
             idle_timeout_seconds=settings.crawl_idle_timeout_seconds,
         )
@@ -197,6 +201,7 @@ async def _process_crawl_async(
             "total": result.total,
             "pages": result.pages,
             "errors": result.errors,
+            "robots_blocked": result.robots_blocked,
         }
         if verbose:
             payload["filtered_out"] = result.filtered_out

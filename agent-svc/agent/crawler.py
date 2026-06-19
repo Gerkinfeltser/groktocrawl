@@ -60,6 +60,12 @@ class CrawlOptions:
             When delay is set, this is forced to 1.
         delay: Seconds to wait between successive scrapes. When set,
             forces max_concurrency to 1.
+        ignore_robots_txt: If True, bypass robots.txt enforcement. All
+            discovered URLs are scraped regardless of robots.txt Disallow
+            rules. Politeness rate limiting (crawl-delay) still applies.
+        robots_user_agent: Custom User-Agent string for robots.txt
+            evaluation. When set, robots.txt rules are evaluated against
+            this User-Agent instead of the default bot UA.
     """
 
     max_pages: int = 10
@@ -77,6 +83,8 @@ class CrawlOptions:
     idle_timeout_seconds: int = 300
     max_concurrency: int = 3
     delay: float | None = None
+    ignore_robots_txt: bool = False
+    robots_user_agent: str | None = None
 
 
 @dataclass
@@ -87,6 +95,7 @@ class CrawlResult:
     total: int = 0
     completed: int = 0
     errors: list[dict] = field(default_factory=list)
+    robots_blocked: list[dict] = field(default_factory=list)
     filtered_out: list[dict] = field(default_factory=list)
 
 
@@ -357,6 +366,7 @@ class CrawlEngine:
         self._queue: deque[tuple[str, int]] = deque()
         self._pages: list[dict] = []
         self._errors: list[dict] = []
+        self._robots_blocked: list[dict] = []
         self._filtered_out: list[dict] = []
         self._cancel_flag: bool = False
         self._update_interval: float = 1.0
@@ -545,6 +555,7 @@ class CrawlEngine:
                             total=0,
                             completed=len(self._pages),
                             errors=self._errors,
+                            robots_blocked=self._robots_blocked,
                         )
                         await self.close()
                         return result_obj
@@ -584,6 +595,7 @@ class CrawlEngine:
             total=len(self._pages) + len(self._queue),
             completed=len(self._pages),
             errors=self._errors,
+            robots_blocked=self._robots_blocked,
             filtered_out=self._filtered_out,
         )
 
@@ -693,7 +705,11 @@ class CrawlEngine:
             # Scrape the page
             scrape_start = time.monotonic()
             try:
-                result = await self.scraper.scrape(url)
+                result = await self.scraper.scrape(
+                    url,
+                    ignore_robots_txt=self.options.ignore_robots_txt,
+                    robots_user_agent=self.options.robots_user_agent,
+                )
             except Exception as exc:
                 self._errors.append({"url": url, "error": str(exc)})
                 logger.warning("Scrape exception for %s: %s", url, exc)
@@ -705,8 +721,24 @@ class CrawlEngine:
 
             if not result.get("success"):
                 error_msg = result.get("error", "Unknown scrape error")
-                self._errors.append({"url": url, "error": error_msg})
-                logger.warning("Scrape failed for %s: %s", url, error_msg)
+
+                # Detect politeness-blocked results
+                if "Blocked by politeness" in error_msg:
+                    robots_entry = {
+                        "url": url,
+                        "error": error_msg,
+                        "error_code": "ROBOTS_BLOCKED",
+                    }
+                    self._robots_blocked.append(robots_entry)
+                    self._errors.append(robots_entry)
+                    logger.info(
+                        "Politeness blocked %s (job %s): %s", url, job_id, error_msg
+                    )
+                    # Blocked start URL is not a fatal error — it's expected
+                    return
+                else:
+                    self._errors.append({"url": url, "error": error_msg})
+                    logger.warning("Scrape failed for %s: %s", url, error_msg)
 
                 # Start URL failure — raise to signal immediate stop
                 if depth == 0:
@@ -985,6 +1017,7 @@ class CrawlEngine:
                 "total": len(self._pages) + len(self._queue),
                 "pages": self._pages,
                 "errors": self._errors,
+                "robots_blocked": self._robots_blocked,
             }
             # Write data key directly without changing meta status
             self.store.redis.set(
