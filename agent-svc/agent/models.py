@@ -3,7 +3,7 @@
 from typing import Any
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ErrorDetail(BaseModel):
@@ -97,6 +97,8 @@ class CrawlRequest(BaseModel):
     ignore_query_parameters: bool = False
     include_paths: list[str] | None = None
     exclude_paths: list[str] | None = None
+    regex_on_full_url: bool = False
+    verbose: bool = False
     webhook: dict[str, Any] | None = None
 
     @field_validator("url")
@@ -111,6 +113,27 @@ class CrawlRequest(BaseModel):
         if not parsed.netloc:
             raise ValueError("URL must have a network location (host)")
         return value
+
+    @model_validator(mode="after")
+    def validate_regex_patterns(self) -> "CrawlRequest":
+        """When regex_on_full_url is True, validate that all path
+        patterns are valid Python regular expressions."""
+        if not self.regex_on_full_url:
+            return self
+        import re as _re
+
+        for field_name in ("include_paths", "exclude_paths"):
+            patterns = getattr(self, field_name)
+            if not patterns:
+                continue
+            for i, pattern in enumerate(patterns):
+                try:
+                    _re.compile(pattern)
+                except _re.error as exc:
+                    raise ValueError(
+                        f"Invalid regex in {field_name}[{i}]: '{pattern}' — {exc}"
+                    ) from exc
+        return self
 
 
 class CrawlCreateResponse(BaseModel):

@@ -111,6 +111,8 @@ async def _process_crawl_async(
     ignore_query_parameters: bool = False,
     include_paths: list[str] | None = None,
     exclude_paths: list[str] | None = None,
+    regex_on_full_url: bool = False,
+    verbose: bool = False,
 ) -> None:
     settings = _get_worker_settings()
     store = JobStore(
@@ -127,6 +129,8 @@ async def _process_crawl_async(
             ignore_query_parameters=ignore_query_parameters,
             include_paths=include_paths,
             exclude_paths=exclude_paths,
+            regex_on_full_url=regex_on_full_url,
+            verbose=verbose,
         )
         engine = CrawlEngine(scraper, store=store, options=options)
         result = await engine.run(url, job_id=job_id)
@@ -152,12 +156,14 @@ async def _process_crawl_async(
                     )
                 )
 
-        payload = {
+        payload: dict[str, Any] = {
             "completed": result.completed,
             "total": result.total,
             "pages": result.pages,
             "errors": result.errors,
         }
+        if verbose:
+            payload["filtered_out"] = result.filtered_out
         return payload
 
     await _run_job_with_observability(

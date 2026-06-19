@@ -46,6 +46,7 @@ class CrawlOptions:
             same base URL are collapsed to one fetch.
         regex_on_full_url: If True, include/exclude paths are treated as
             regex patterns (default: glob).
+        verbose: If True, track filtered-out URLs with reasons.
         allow_subdomains: If True, follow links to subdomains.
         allow_external_links: If True, follow links to external domains.
     """
@@ -56,6 +57,7 @@ class CrawlOptions:
     exclude_paths: list[str] | None = None
     ignore_query_parameters: bool = False
     regex_on_full_url: bool = False
+    verbose: bool = False
     allow_subdomains: bool = False
     allow_external_links: bool = False
 
@@ -68,6 +70,7 @@ class CrawlResult:
     total: int = 0
     completed: int = 0
     errors: list[dict] = field(default_factory=list)
+    filtered_out: list[dict] = field(default_factory=list)
 
 
 # ── Public functions ─────────────────────────────────────────────
@@ -231,6 +234,32 @@ def _match_path(
     return True  # No include_paths constraint, or passed all
 
 
+def _matches_pattern(
+    target: str, pattern: str, regex_on_full_url: bool = False
+) -> bool:
+    """Check whether ``target`` matches a single path pattern.
+
+    Args:
+        target: The string (path or full URL) to check.
+        pattern: The glob or regex pattern to match against.
+        regex_on_full_url: If True, ``pattern`` is a regex; else glob.
+
+    Returns:
+        True if the target matches the pattern.
+    """
+    if regex_on_full_url:
+        try:
+            return bool(re.search(pattern, target))
+        except re.error:
+            return False
+    else:
+        regex = _glob_to_regex(pattern)
+        try:
+            return bool(re.search(regex, target))
+        except re.error:
+            return False
+
+
 def _glob_to_regex(pattern: str) -> str:
     """Convert a simple glob pattern to an anchored regex pattern.
 
@@ -287,6 +316,7 @@ class CrawlEngine:
         self._queue: deque[tuple[str, int]] = deque()
         self._pages: list[dict] = []
         self._errors: list[dict] = []
+        self._filtered_out: list[dict] = []
         self._cancel_flag: bool = False
         self._update_interval: float = 1.0
         self._html_client: httpx.AsyncClient | None = None
@@ -348,13 +378,25 @@ class CrawlEngine:
             # Mark as seen immediately to prevent re-enqueue
             self._seen.add(normalized)
 
-            # Path filter check
+            # Determine the URL for path filtering.
+            # When ignore_query_parameters is True, strip query params
+            # before matching so that patterns match against the path
+            # only (VAL-SCOPE-073).
+            filter_url = (
+                urlparse(url)._replace(query="").geturl()
+                if self.options.ignore_query_parameters
+                else url
+            )
             if not _match_path(
-                url,
+                filter_url,
                 self.options.include_paths,
                 self.options.exclude_paths,
                 self.options.regex_on_full_url,
             ):
+                if self.options.verbose:
+                    filter_reason = self._get_filter_reason(filter_url)
+                    if filter_reason:
+                        self._filtered_out.append(filter_reason)
                 logger.debug("Skipping URL excluded by path filter: %s", url)
                 continue
 
@@ -421,6 +463,7 @@ class CrawlEngine:
             total=len(self._pages) + len(self._queue),
             completed=len(self._pages),
             errors=self._errors,
+            filtered_out=self._filtered_out,
         )
 
     def normalize_url(self, url: str) -> str:
@@ -432,6 +475,47 @@ class CrawlEngine:
     def cancel(self) -> None:
         """Signal the crawl to stop at the next opportunity."""
         self._cancel_flag = True
+
+    def _get_filter_reason(self, url: str) -> dict | None:
+        """Determine which path filter excluded a URL and why.
+
+        Only called when ``verbose`` is True and the URL has already
+        been determined to NOT pass ``_match_path()``.
+
+        Returns:
+            A dict with ``url``, ``reason``, and ``pattern`` keys, or
+            ``None`` if no filter reason could be determined.
+        """
+        target = url if self.options.regex_on_full_url else urlparse(url).path
+
+        # Check exclude_paths first (they bypass include_paths)
+        if self.options.exclude_paths:
+            for pattern in self.options.exclude_paths:
+                if _matches_pattern(target, pattern, self.options.regex_on_full_url):
+                    return {
+                        "url": url,
+                        "reason": "exclude_paths",
+                        "pattern": pattern,
+                    }
+
+        # Check include_paths
+        if self.options.include_paths:
+            for pattern in self.options.include_paths:
+                if _matches_pattern(target, pattern, self.options.regex_on_full_url):
+                    # Would match include, so not excluded by include
+                    return {
+                        "url": url,
+                        "reason": "include_paths",
+                        "pattern": None,
+                    }
+            # No include_paths matched
+            return {
+                "url": url,
+                "reason": "include_paths",
+                "pattern": None,
+            }
+
+        return None
 
     def _update_store(self, job_id: str) -> None:
         """Write current progress to the job data key (not meta).

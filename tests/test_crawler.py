@@ -920,3 +920,526 @@ class TestCrawlEngine:
         # Should complete without infinite loop
         # Start URL + page1 = 2 pages
         assert result.completed == 2
+
+
+# ── Path filtering tests ────────────────────────────────────────
+
+
+class TestPathFiltering:
+    """Tests for path filtering in CrawlEngine."""
+
+    @pytest.mark.asyncio
+    async def test_include_paths_start_url_matches(self, mock_scraper):
+        """When start URL matches include_paths, it is crawled."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=1,
+                include_paths=["/blog/*"],
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/blog/post1">Blog Post 1</a>
+                <a href="http://example.com/blog/post2">Blog Post 2</a>
+                <a href="http://example.com/about">About</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/blog/index")
+
+        # Start URL matches /blog/*, children under /blog/ are included
+        assert result.completed >= 2  # start + at least one blog child
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/blog/index" in urls
+        assert "http://example.com/about" not in urls
+
+    @pytest.mark.asyncio
+    async def test_include_paths_start_url_no_match_returns_zero(self, mock_scraper):
+        """When start URL doesn't match include_paths, 0 pages are crawled."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=2,
+                include_paths=["/section/*"],
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/section/page-1">Section 1</a>
+                <a href="http://example.com/about">About</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/")
+
+        # Start URL / doesn't match /section/* so it's skipped
+        assert result.completed == 0
+        assert len(result.pages) == 0
+
+    @pytest.mark.asyncio
+    async def test_include_paths_regex_mode(self, mock_scraper):
+        """include_paths with regex_on_full_url=True uses regex matching."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=1,
+                include_paths=["/section/page-[12]"],
+                regex_on_full_url=True,
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/section/page-1">Page 1</a>
+                <a href="http://example.com/section/page-2">Page 2</a>
+                <a href="http://example.com/section/page-3">Page 3</a>
+                <a href="http://example.com/about">About</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/section/page-1")
+
+        # Start URL /section/page-1 should match /section/page-[12]
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/section/page-1" in urls
+        assert "http://example.com/section/page-2" in urls
+        assert "http://example.com/section/page-3" not in urls
+        assert "http://example.com/about" not in urls
+
+    @pytest.mark.asyncio
+    async def test_include_paths_empty_is_identity(self, mock_scraper):
+        """Empty include_paths list means 'include all' (identity)."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=1,
+                include_paths=[],
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/pricing">Pricing</a>
+                <a href="http://example.com/about">About</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/")
+
+        # All URLs should pass (identity filter)
+        assert result.completed >= 2
+
+    @pytest.mark.asyncio
+    async def test_exclude_paths_empty_is_identity(self, mock_scraper):
+        """Empty exclude_paths list means 'exclude none' (identity)."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=1,
+                exclude_paths=[],
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/pricing">Pricing</a>
+                <a href="http://example.com/about">About</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/")
+
+        # All URLs should pass (identity filter)
+        assert result.completed >= 2
+
+    @pytest.mark.asyncio
+    async def test_exclude_overrides_include(self, mock_scraper):
+        """exclude_paths takes precedence over include_paths."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=1,
+                include_paths=["/section/*"],
+                exclude_paths=["/section/page-2"],
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/section/page-1">Page 1</a>
+                <a href="http://example.com/section/page-2">Page 2</a>
+                <a href="http://example.com/about">About</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/section/index")
+
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/section/page-1" in urls
+        assert "http://example.com/section/page-2" not in urls  # excluded
+        assert "http://example.com/about" not in urls  # not in include_paths
+
+    @pytest.mark.asyncio
+    async def test_exclude_all_returns_zero_pages(self, mock_scraper):
+        """exclude_paths matching everything returns 0 pages."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=2,
+                exclude_paths=["/*"],
+            ),
+        )
+
+        mock_scraper.scrape = AsyncMock(
+            return_value=MockPage.success("http://example.com/")
+        )
+
+        result = await engine.run("http://example.com/")
+
+        assert result.completed == 0
+        assert len(result.pages) == 0
+
+    @pytest.mark.asyncio
+    async def test_include_nonexistent_returns_zero_pages(self, mock_scraper):
+        """include_paths that match nothing returns 0 pages."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=2,
+                include_paths=["/nonexistent/*"],
+            ),
+        )
+
+        mock_scraper.scrape = AsyncMock(
+            return_value=MockPage.success("http://example.com/")
+        )
+
+        result = await engine.run("http://example.com/")
+
+        assert result.completed == 0
+        assert len(result.pages) == 0
+
+    @pytest.mark.asyncio
+    async def test_glob_double_star_matches_any_depth(self, mock_scraper):
+        """Glob ** matches across directory boundaries."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=20,
+                max_depth=3,
+                include_paths=["/blog/**"],
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/blog/2024/01/post">Deep post</a>
+                <a href="http://example.com/blog/2024">Year index</a>
+                <a href="http://example.com/about">About</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/blog/index")
+
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/blog/index" in urls
+        # Deep paths under /blog/ should match /blog/**
+        assert "http://example.com/blog/2024" in urls
+        assert "http://example.com/blog/2024/01/post" in urls
+        assert "http://example.com/about" not in urls
+
+    @pytest.mark.asyncio
+    async def test_regex_on_full_url_with_query_params(self, mock_scraper):
+        """regex_on_full_url matches against full URL including query params."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=1,
+                include_paths=[r"\?ref=partner"],
+                regex_on_full_url=True,
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/page?ref=partner">Partner link</a>
+                <a href="http://example.com/page?ref=other">Other link</a>
+                <a href="http://example.com/about">About</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/start?ref=partner")
+
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/page?ref=partner" in urls
+        assert "http://example.com/page?ref=other" not in urls
+
+    @pytest.mark.asyncio
+    async def test_verbose_tracks_filtered_out_urls(self, mock_scraper):
+        """Verbose mode collects URLs that were filtered out with reasons."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=1,
+                include_paths=["/section/*"],
+                exclude_paths=["/section/secret"],
+                verbose=True,
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/section/page-1">Page 1</a>
+                <a href="http://example.com/section/secret">Secret</a>
+                <a href="http://example.com/about">About</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/")
+
+        # Start URL / doesn't match /section/* → should be filtered out
+        assert result.completed == 0
+        assert len(result.pages) == 0
+        if result.filtered_out:
+            # At least one filtered URL should be recorded
+            assert any(f["reason"] == "include_paths" for f in result.filtered_out)
+
+    @pytest.mark.asyncio
+    async def test_verbose_tracks_exclude_reason(self, mock_scraper):
+        """Verbose mode records exclude_paths as filter reason."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=1,
+                exclude_paths=["/admin/*"],
+                verbose=True,
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/pricing">Pricing</a>
+                <a href="http://example.com/admin/secret">Admin</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/")
+
+        assert result.completed >= 2  # start URL + pricing
+        if result.filtered_out:
+            assert any(f["reason"] == "exclude_paths" for f in result.filtered_out), (
+                "Expected exclude_paths reason in filtered_out"
+            )
+
+    @pytest.mark.asyncio
+    async def test_glob_escapes_regex_special_chars(self, mock_scraper):
+        """Glob mode treats regex special chars as literals."""
+        from agent.crawler import _match_path
+
+        # In glob mode, '.' should be literal, not 'any char'
+        assert _match_path(
+            "http://example.com/file.html",
+            ["/file.html"],
+            None,
+            regex_on_full_url=False,
+        )
+        # Should NOT match fileXhtml when . is treated literally
+        assert not _match_path(
+            "http://example.com/fileXhtml",
+            ["/file.html"],
+            None,
+            regex_on_full_url=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_regex_on_full_url_with_exclude_paths(self, mock_scraper):
+        """exclude_paths with regex_on_full_url=True uses regex matching."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=1,
+                exclude_paths=[r"/section/page-[23]"],
+                regex_on_full_url=True,
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/section/page-1">Page 1</a>
+                <a href="http://example.com/section/page-2">Page 2</a>
+                <a href="http://example.com/section/page-3">Page 3</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/")
+
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/section/page-1" in urls
+        assert "http://example.com/section/page-2" not in urls
+        assert "http://example.com/section/page-3" not in urls
+
+    @pytest.mark.asyncio
+    async def test_regex_on_full_url_with_ignore_query_params(self, mock_scraper):
+        """ignoreQueryParameters strips query first, then regex applies to path.
+
+        Per VAL-SCOPE-073: when both regexOnFullURL and ignoreQueryParameters
+        are set, query string is stripped from the URL BEFORE regex matching.
+        """
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=1,
+                include_paths=[r"/page$"],
+                regex_on_full_url=True,
+                ignore_query_parameters=True,
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/other-page?ref=test">Other page with query</a>
+                <a href="http://example.com/pages">Pages (plural)</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/page")
+
+        # Start URL /page matches /page$ include pattern
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/page" in urls
+        # With ignore_query_parameters, /other-page?ref=test normalizes to /other-page
+        # and the filter_url (without query) matches /page$? No — /other-page doesn't end with /page
+        # So /other-page should be excluded by the path filter
+        assert "http://example.com/other-page" not in urls
+        # /pages should NOT match /page$ (because $ anchors to end)
+        assert "http://example.com/pages" not in urls
