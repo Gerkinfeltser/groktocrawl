@@ -26,6 +26,12 @@ class AgentSettings(BaseModel):
         default=5, alias="AGENT_MAX_SEARCHES_PER_REQUEST"
     )
     search_rate_limit: str = Field(default="10/60s", alias="AGENT_SEARCH_RATE_LIMIT")
+    crawl_max_duration_seconds: int = Field(
+        default=1800, alias="CRAWL_MAX_DURATION_SECONDS"
+    )
+    crawl_idle_timeout_seconds: int = Field(
+        default=300, alias="CRAWL_IDLE_TIMEOUT_SECONDS"
+    )
 
 
 @functools.cache

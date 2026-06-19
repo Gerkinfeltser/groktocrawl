@@ -9,6 +9,7 @@ job store for status polling.
 
 from __future__ import annotations
 
+import collections.abc
 import json
 import logging
 import posixpath
@@ -61,6 +62,8 @@ class CrawlOptions:
     verbose: bool = False
     allow_subdomains: bool = False
     allow_external_links: bool = False
+    max_duration_seconds: int = 1800
+    idle_timeout_seconds: int = 300
 
 
 @dataclass
@@ -340,12 +343,23 @@ class CrawlEngine:
             await self._html_client.aclose()
             self._html_client = None
 
-    async def run(self, start_url: str, job_id: str | None = None) -> CrawlResult:
+    async def run(
+        self,
+        start_url: str,
+        job_id: str | None = None,
+        page_callback: collections.abc.Callable[
+            [str, dict], collections.abc.Awaitable[None]
+        ]
+        | None = None,
+    ) -> CrawlResult:
         """Execute a BFS crawl starting from ``start_url``.
 
         Args:
             start_url: The URL to begin crawling from.
-            job_id: Optional job ID for periodic store updates.
+            job_id: Optional job ID for periodic store updates and
+                cancellation checking.
+            page_callback: Optional async callback invoked after each
+                successful page scrape, receiving (job_id, page_dict).
 
         Returns:
             A ``CrawlResult`` with scraped pages, totals, and errors.
@@ -356,11 +370,50 @@ class CrawlEngine:
         # Seed the BFS queue
         self._queue.append((start_url, 0))
         last_store_update = time.monotonic()
+        crawl_start_time = time.monotonic()
+        last_completion_time = crawl_start_time
 
         while self._queue and len(self._pages) < self.options.max_pages:
             if self._cancel_flag:
                 logger.info("Crawl cancelled via cancel flag")
                 break
+
+            # Cooperative cancellation: check Redis for cancelled status
+            # between pages (checked before each page scrape).
+            if self.store is not None and job_id is not None:
+                job_meta = self.store.get_job(job_id)
+                if job_meta and job_meta.get("status") == "cancelled":
+                    self._cancel_flag = True
+                    logger.info("Crawl %s cancelled via Redis status check", job_id)
+                    break
+
+            # Maximum duration timeout check
+            now = time.monotonic()
+            elapsed = now - crawl_start_time
+            if elapsed > self.options.max_duration_seconds:
+                logger.warning(
+                    "Crawl %s exceeded max duration of %ds (elapsed=%.1fs)",
+                    job_id,
+                    self.options.max_duration_seconds,
+                    elapsed,
+                )
+                raise TimeoutError(
+                    f"Crawl exceeded max duration of {self.options.max_duration_seconds}s"
+                )
+
+            # Idle timeout (stuck-crawl) check
+            idle_elapsed = now - last_completion_time
+            if idle_elapsed > self.options.idle_timeout_seconds:
+                logger.warning(
+                    "Crawl %s idle for %ds (timeout=%ds) — killing zombie crawl",
+                    job_id,
+                    idle_elapsed,
+                    self.options.idle_timeout_seconds,
+                )
+                raise TimeoutError(
+                    f"Crawl idle for {idle_elapsed:.0f}s — "
+                    f"exceeded idle timeout of {self.options.idle_timeout_seconds}s"
+                )
 
             url, depth = self._queue.popleft()
             normalized = self.normalize_url(url)
@@ -466,6 +519,19 @@ class CrawlEngine:
                 "duration_ms": scrape_duration_ms,
             }
             self._pages.append(page)
+            last_completion_time = time.monotonic()
+
+            # Fire per-page webhook callback
+            if page_callback is not None and job_id is not None:
+                try:
+                    await page_callback(job_id, page)
+                except Exception:
+                    logger.warning(
+                        "Page callback failed for %s (job %s)",
+                        url,
+                        job_id,
+                        exc_info=True,
+                    )
 
             # Discover child links if within max_depth
             if depth < self.options.max_depth:

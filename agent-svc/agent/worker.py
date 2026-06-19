@@ -114,13 +114,40 @@ async def _process_crawl_async(
     regex_on_full_url: bool = False,
     verbose: bool = False,
 ) -> None:
+    """Process a crawl job with full lifecycle support.
+
+    Lifecycle webhooks (when configured):
+        - ``crawl.started``: fired before the crawl begins
+        - ``crawl.page``: fired after each individual page is scraped
+        - ``crawl.completed``: fired on terminal states (completed, cancelled)
+        - ``crawl.failed``: fired on unexpected exception
+
+    Cancellation is cooperative: DELETE /v2/crawl/{id} sets the job meta
+    status to ``cancelled`` in Redis; the engine checks this between
+    page scrapes and stops early. The job store is NOT overwritten when
+    the engine detects cancellation (``cancel_job()`` already set it).
+    """
     settings = _get_worker_settings()
     store = JobStore(
         f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
     )
     scraper = ScraperClient(scraper_url)
+    start = time.monotonic()
+    job_type = "crawl"
 
-    async def work_fn() -> dict[str, Any]:
+    METRICS.counter("jobs_submitted_total", "Total jobs submitted", ["type"]).inc(
+        {"type": job_type}
+    )
+
+    try:
+        # ── Fire crawl.started webhook ────────────────────────
+        await deliver_webhook(
+            webhook_config,
+            "crawl.started",
+            job_id,
+            {"url": url, "max_pages": max_pages, "max_depth": max_depth},
+        )
+
         from .crawler import CrawlEngine, CrawlOptions
 
         options = CrawlOptions(
@@ -131,9 +158,16 @@ async def _process_crawl_async(
             exclude_paths=exclude_paths,
             regex_on_full_url=regex_on_full_url,
             verbose=verbose,
+            max_duration_seconds=settings.crawl_max_duration_seconds,
+            idle_timeout_seconds=settings.crawl_idle_timeout_seconds,
         )
         engine = CrawlEngine(scraper, store=store, options=options)
-        result = await engine.run(url, job_id=job_id)
+
+        # Per-page webhook callback
+        async def _page_callback(_job_id: str, page: dict[str, Any]) -> None:
+            await deliver_webhook(webhook_config, "crawl.page", _job_id, page)
+
+        result = await engine.run(url, job_id=job_id, page_callback=_page_callback)
 
         # Fire-and-forget indexing for each page
         for page in result.pages:
@@ -141,20 +175,10 @@ async def _process_crawl_async(
             markdown = page.get("markdown", "")
             if task_tracker is not None:
                 task_tracker.create_background_task(
-                    _index_page_async(
-                        page_url,
-                        "",
-                        markdown[:2000],
-                    )
+                    _index_page_async(page_url, "", markdown[:2000])
                 )
             else:
-                asyncio.create_task(
-                    _index_page_async(
-                        page_url,
-                        "",
-                        markdown[:2000],
-                    )
-                )
+                asyncio.create_task(_index_page_async(page_url, "", markdown[:2000]))
 
         payload: dict[str, Any] = {
             "completed": result.completed,
@@ -164,11 +188,47 @@ async def _process_crawl_async(
         }
         if verbose:
             payload["filtered_out"] = result.filtered_out
-        return payload
 
-    await _run_job_with_observability(
-        job_id, "crawl", store, webhook_config, work_fn, scraper.close
-    )
+        # ── Check if job was cancelled via DELETE ─────────────
+        job_meta = store.get_job(job_id)
+        was_cancelled = job_meta is not None and job_meta.get("status") == "cancelled"
+
+        if was_cancelled:
+            # Store is already marked cancelled by cancel_job();
+            # do NOT overwrite with complete_job().
+            logger.info("Crawl %s was cancelled — preserving cancelled status", job_id)
+            await deliver_webhook(
+                webhook_config,
+                "crawl.completed",
+                job_id,
+                {**payload, "status": "cancelled"},
+            )
+        else:
+            store.complete_job(job_id, payload)
+            await deliver_webhook(webhook_config, "crawl.completed", job_id, payload)
+
+        elapsed = time.monotonic() - start
+        METRICS.histogram(
+            "job_duration_seconds", "Job processing duration", ["type", "status"]
+        ).observe({"type": job_type, "status": "completed"}, elapsed)
+        METRICS.counter("jobs_completed_total", "Total completed jobs", ["type"]).inc(
+            {"type": job_type}
+        )
+        logger.info("Crawl job %s completed in %.2fs", job_id, elapsed)
+
+    except Exception as e:
+        logger.exception("Crawl job %s failed", job_id)
+        store.fail_job(job_id, str(e))
+        await deliver_webhook(webhook_config, "crawl.failed", job_id, {"error": str(e)})
+        elapsed = time.monotonic() - start
+        METRICS.histogram(
+            "job_duration_seconds", "Job processing duration", ["type", "status"]
+        ).observe({"type": job_type, "status": "failed"}, elapsed)
+        METRICS.counter("jobs_failed_total", "Total failed jobs", ["type"]).inc(
+            {"type": job_type}
+        )
+    finally:
+        await scraper.close()
 
 
 async def _process_batch_scrape_async(
