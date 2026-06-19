@@ -556,6 +556,35 @@ class CrawlCreateResponse(BaseModel):
 
 
 class CrawlStatusResponse(BaseModel):
+    """Firecrawl v2-compatible crawl status response.
+
+    Attributes:
+        success: Whether the API call succeeded.
+        status: Job status: ``processing``, ``completed``, ``failed``,
+            or ``cancelled``.
+        completed: Number of pages successfully scraped.
+        total: Total number of pages discovered (scraped + queued).
+        credits_used: Number of credits consumed (1 per page scraped).
+        data: List of page documents, each containing ``url``, ``markdown``,
+            ``metadata`` (with ``title``, ``description``, ``language``,
+            ``sourceURL``, ``statusCode``), and other optional fields.
+        error: Error message if the job failed.
+        next: URL for the next chunk of paginated results. ``null`` when
+            all data fits in a single response (under ~10MB).
+        created_at: ISO 8601 timestamp when the crawl was created.
+        completed_at: ISO 8601 timestamp when the crawl finished
+            (``null`` while processing).
+        expires_at: ISO 8601 timestamp when results expire
+            (24h after creation).
+        duration: Elapsed milliseconds between ``created_at`` and
+            ``completed_at`` (``null`` while processing).
+    """
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        alias_generator=to_camel,
+    )
+
     success: bool = True
     status: str = "processing"
     completed: int = 0
@@ -563,6 +592,13 @@ class CrawlStatusResponse(BaseModel):
     credits_used: int | None = None
     data: list[dict[str, Any]] | None = None
     error: str | None = None
+    next: str | None = Field(
+        default=None,
+        description=(
+            "URL for the next chunk of paginated results. Present when the response"
+            " data exceeds ~10MB. Null when all data fits in a single response."
+        ),
+    )
     created_at: str | None = None
     completed_at: str | None = None
     expires_at: str | None = None

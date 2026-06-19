@@ -504,12 +504,34 @@ async def list_active_crawls(
 
 
 @router.get("/v2/crawl/{job_id}", response_model=CrawlStatusResponse)
-async def get_crawl_status(request: Request, job_id: str) -> CrawlStatusResponse:
+async def get_crawl_status(
+    request: Request,
+    job_id: str,
+    offset: int = 0,
+) -> CrawlStatusResponse:
+    """Get crawl job status and paginated results.
+
+    Supports pagination via the ``offset`` query parameter and ``next``
+    response field. When the serialized response exceeds ~10MB, a ``next``
+    URL is included in the response pointing to the next chunk.
+
+    Args:
+        request: FastAPI request object.
+        job_id: The crawl job UUID.
+        offset: Zero-based index of the first page to return in this chunk.
+            Used for paginated retrieval (default: 0). The ``next`` field
+            in the response points to the next offset.
+
+    Returns:
+        ``CrawlStatusResponse`` with ``data`` (paginated), ``next`` URL,
+        ``credits_used``, timestamps, and per-page metadata.
+    """
     store: JobStore = request.app.state.job_store
     job = store.get_job(job_id)
     if job is None:
         raise NotFoundError(detail="Job not found", details={"job_id": job_id})
     data = job.get("data") or {}
+    all_pages: list[dict] = data.get("pages", []) or []
 
     # Compute duration in milliseconds from created_at to completed_at
     created_at = job.get("created_at")
@@ -525,12 +547,45 @@ async def get_crawl_status(request: Request, job_id: str) -> CrawlStatusResponse
         except (ValueError, TypeError):
             duration = None
 
+    # Determine the credits used (1 per completed page)
+    completed_count = data.get("completed", 0)
+    credits_used = completed_count or len(all_pages)
+
+    # ── Pagination: determine the chunk to return ───────────────
+    # We aim for each response to be under ~10MB to match Firecrawl's
+    # pagination behavior. Each page is roughly estimated at 10KB on
+    # average, so we return pages in chunks of ~1000.
+    # If the user provided an offset, slice from there.
+    # Otherwise, start from 0 and estimate chunk size.
+    _max_chunk_bytes = 10 * 1024 * 1024  # 10MB
+    _estimated_page_bytes = 10 * 1024  # ~10KB per page (conservative estimate)
+    _max_pages_per_chunk = max(1, _max_chunk_bytes // _estimated_page_bytes)
+
+    chunk_pages = all_pages[offset:]
+    next_url: str | None = None
+
+    # If the remaining pages might exceed the size limit, paginate
+    if len(chunk_pages) > _max_pages_per_chunk:
+        chunk_pages = all_pages[offset : offset + _max_pages_per_chunk]
+        next_offset = offset + _max_pages_per_chunk
+        if next_offset < len(all_pages):
+            # Build the next URL — use the request's base URL
+            scheme = request.url.scheme
+            host = request.url.netloc
+            path = request.url.path
+            next_url = f"{scheme}://{host}{path}?offset={next_offset}"
+    elif offset > 0 and not chunk_pages:
+        # Offset beyond end — return empty data
+        chunk_pages = []
+
     return CrawlStatusResponse(
         status=job.get("status", "processing"),
-        completed=data.get("completed", 0),
+        completed=completed_count,
         total=data.get("total", 0),
-        data=data.get("pages"),
+        credits_used=credits_used,
+        data=chunk_pages or (all_pages if offset == 0 else []),
         error=job.get("error"),
+        next=next_url,
         created_at=created_at,
         completed_at=completed_at,
         expires_at=job.get("expires_at"),
