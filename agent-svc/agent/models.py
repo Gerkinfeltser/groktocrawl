@@ -111,6 +111,9 @@ class CrawlRequest(BaseModel):
     regex_on_full_url: bool = False
     verbose: bool = False
     webhook: dict[str, Any] | None = None
+    crawl_entire_domain: bool = False
+    allow_subdomains: bool = False
+    allow_external_links: bool = False
 
     @field_validator("url")
     @classmethod

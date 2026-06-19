@@ -114,6 +114,9 @@ async def _process_crawl_async(
     regex_on_full_url: bool = False,
     verbose: bool = False,
     sitemap_mode: str = "include",
+    crawl_entire_domain: bool = False,
+    allow_subdomains: bool = False,
+    allow_external_links: bool = False,
 ) -> None:
     """Process a crawl job with full lifecycle support.
 
@@ -160,6 +163,9 @@ async def _process_crawl_async(
             regex_on_full_url=regex_on_full_url,
             verbose=verbose,
             sitemap_mode=sitemap_mode,
+            allow_subdomains=allow_subdomains,
+            allow_external_links=allow_external_links,
+            crawl_entire_domain=crawl_entire_domain,
             max_duration_seconds=settings.crawl_max_duration_seconds,
             idle_timeout_seconds=settings.crawl_idle_timeout_seconds,
         )
