@@ -9,7 +9,10 @@ job store for status polling.
 
 from __future__ import annotations
 
+import json
 import logging
+import posixpath
+import re
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -76,8 +79,6 @@ def _clean_path(path: str) -> str:
     Collapses ``/./`` and ``/../`` segments, and reduces ``/.`` at the
     end to ``/``.
     """
-    import posixpath
-
     if not path:
         return "/"
 
@@ -188,8 +189,6 @@ def _match_path(
     Returns:
         True if the URL should be crawled (passes all filters).
     """
-    import re
-
     target = url if regex_on_full_url else urlparse(url).path
 
     if regex_on_full_url:
@@ -435,7 +434,13 @@ class CrawlEngine:
         self._cancel_flag = True
 
     def _update_store(self, job_id: str) -> None:
-        """Write current progress to the job store."""
+        """Write current progress to the job data key (not meta).
+
+        Updates only the ``data`` key in Valkey so the job's ``meta``
+        status (``processing``) remains unchanged during the crawl.
+        The caller's final ``store.complete_job()`` call sets both the
+        final data and the ``completed`` status.
+        """
         if self.store is None:
             return
         try:
@@ -445,6 +450,11 @@ class CrawlEngine:
                 "pages": self._pages,
                 "errors": self._errors,
             }
-            self.store.complete_job(job_id, payload)
+            # Write data key directly without changing meta status
+            self.store.redis.set(
+                f"job:{job_id}:data",
+                json.dumps(payload),
+                ex=86400,
+            )
         except Exception:
             logger.warning("Failed to update job store", exc_info=True)

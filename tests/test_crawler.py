@@ -270,8 +270,9 @@ def mock_scraper():
 
 @pytest.fixture
 def mock_store():
-    """Create a mock JobStore."""
+    """Create a mock JobStore with a mock Redis client."""
     store = MagicMock()
+    store.redis = MagicMock()
     store.complete_job = MagicMock()
     return store
 
@@ -728,8 +729,8 @@ class TestCrawlEngine:
         result = await engine.run("http://example.com/", job_id="test-job-123")
 
         assert result.completed == 1
-        # complete_job should have been called at least once (final update)
-        assert mock_store.complete_job.call_count >= 1
+        # redis.set should have been called at least once (final update)
+        assert mock_store.redis.set.call_count >= 1
 
     @pytest.mark.asyncio
     async def test_crawl_with_include_paths(self, mock_scraper):
