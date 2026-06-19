@@ -15,7 +15,6 @@ dev = [
     "httpx>=0.28.0",
     "vulture>=2.14",
     "deptry>=0.23",
-    "jscpd>=4.0",
 ]
 
 [tool.ruff]
@@ -62,12 +61,17 @@ ignore = [
     "FURB101",# TypeVar name check — not always applicable
     "RUF006", # fire-and-forget create_task — intentional pattern
     "C901",   # complexity — tracked separately, not a blocker
+    "SIM102", # nested if — sometimes clearer separate
+    "RUF012", # mutable class attribute — intentional in adapter registry
+    "RUF002", # ambiguous char in docstring — intentional en-dash usage
+    "B904",   # raise from — sometimes raises a different exception type intentionally
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
 "**/tests/**" = ["T20"]
 "tests/*" = ["T20"]
+"scraper-svc/scraper/adapters/github_social.py" = ["E741"]
 
 [tool.black]
 target-version = ["py312"]
