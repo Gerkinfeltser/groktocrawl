@@ -56,5 +56,6 @@ An Architecture Decision Record captures an important architectural decision mad
 | 0035 | [Graceful Shutdown for Fire-and-Forget Tasks](0035-graceful-shutdown.md) | accepted |
 | 0036 | [Split Scraper fetch.py into Focused Modules](0036-split-scraper-fetch-modules.md) | proposed |
 | 0037 | [Split Semantic Service app.py into Focused Modules](0037-split-semantic-svc-app-modules.md) | proposed |
+| 0038 | [Crawl Engine — BFS Orchestrator with Shared Link Extraction](0038-crawl-engine.md) | accepted |
 
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full ADR workflow: when to write an ADR, how to number it, and how to get it reviewed in a PR.
