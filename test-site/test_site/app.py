@@ -81,6 +81,13 @@ async def root():
             <a href="/content/multi-sentence">Multi Sentence</a>
             <a href="/content/with-meta">With Meta</a>
             <a href="/content/with-boilerplate">With Boilerplate</a>
+            <a href="/canonical-source">Canonical Source</a>
+            <a href="/canonical-duplicate">Canonical Duplicate</a>
+            <a href="/canonical-self">Canonical Self</a>
+            <a href="/external-canonical">External Canonical</a>
+            <a href="/mirror-a">Mirror A</a>
+            <a href="/mirror-b">Mirror B</a>
+            <a href="/near-duplicate-timestamp">Near Duplicate Timestamp</a>
           </body>
         </html>
         """
@@ -219,6 +226,13 @@ def _build_sitemap_xml() -> str:
         {"loc": "/section/page-3/subpage", "priority": "0.5"},
         {"loc": "/external-links", "priority": "0.5"},
         {"loc": "/subdomain-links", "priority": "0.5"},
+        {"loc": "/canonical-source", "priority": "0.5"},
+        {"loc": "/canonical-duplicate", "priority": "0.5"},
+        {"loc": "/canonical-self", "priority": "0.5"},
+        {"loc": "/external-canonical", "priority": "0.5"},
+        {"loc": "/mirror-a", "priority": "0.5"},
+        {"loc": "/mirror-b", "priority": "0.5"},
+        {"loc": "/near-duplicate-timestamp", "priority": "0.5"},
     ]
 
     ns = "http://www.sitemaps.org/schemas/sitemap/0.9"
@@ -473,6 +487,137 @@ async def content_near_duplicate():
             <h1>Near Duplicate Page</h1>
             <p>This page has content that is similar to but not identical to other pages, for testing content deduplication.</p>
             <p>GroktoCrawl is a self-hosted alternative to Firecrawl. It provides web scraping, crawling, and search capabilities through a unified API. This paragraph is intentionally similar to other content on the site to test near-duplicate detection.</p>
+            <a href="/">Home</a>
+          </body>
+        </html>
+        """
+    )
+
+
+# ----- Content-dedup test fixtures -----
+
+
+@app.get("/canonical-source")
+async def canonical_source():
+    """A page that serves as a canonical target."""
+    return HTMLResponse(
+        """
+        <html>
+          <head>
+            <link rel="canonical" href="http://test-site:8005/canonical-source">
+          </head>
+          <body>
+            <h1>Canonical Source Page</h1>
+            <p>This is the original page that other pages canonical-point to.</p>
+            <a href="/">Home</a>
+          </body>
+        </html>
+        """
+    )
+
+
+@app.get("/canonical-duplicate")
+async def canonical_duplicate():
+    """A page with a canonical tag pointing to /canonical-source."""
+    return HTMLResponse(
+        """
+        <html>
+          <head>
+            <link rel="canonical" href="http://test-site:8005/canonical-source">
+          </head>
+          <body>
+            <h1>Canonical Duplicate Page</h1>
+            <p>This page should be skipped during crawl because it points to /canonical-source.</p>
+            <a href="/">Home</a>
+          </body>
+        </html>
+        """
+    )
+
+
+@app.get("/canonical-self")
+async def canonical_self():
+    """A page with a self-referencing canonical tag (should be scraped normally)."""
+    return HTMLResponse(
+        """
+        <html>
+          <head>
+            <link rel="canonical" href="http://test-site:8005/canonical-self">
+          </head>
+          <body>
+            <h1>Self-Referencing Canonical Page</h1>
+            <p>This page has a self-referencing canonical tag and should be scraped normally.</p>
+            <a href="/">Home</a>
+          </body>
+        </html>
+        """
+    )
+
+
+@app.get("/external-canonical")
+async def external_canonical():
+    """A page with a canonical tag pointing to an external domain."""
+    return HTMLResponse(
+        """
+        <html>
+          <head>
+            <link rel="canonical" href="https://example.com/some-page">
+          </head>
+          <body>
+            <h1>External Canonical Page</h1>
+            <p>This page has a canonical pointing to an external domain. It should be scraped normally.</p>
+            <a href="/">Home</a>
+          </body>
+        </html>
+        """
+    )
+
+
+@app.get("/mirror-a")
+async def mirror_a():
+    """Page A with content identical to /mirror-b for content hash dedup testing."""
+    return HTMLResponse(
+        """
+        <html>
+          <body>
+            <h1>Mirror Content</h1>
+            <p>This content is byte-for-byte identical to /mirror-b for testing content hash deduplication.</p>
+            <p>This is a test page with predictable content.</p>
+            <a href="/">Home</a>
+          </body>
+        </html>
+        """
+    )
+
+
+@app.get("/mirror-b")
+async def mirror_b():
+    """Page B with content identical to /mirror-a for content hash dedup testing."""
+    return HTMLResponse(
+        """
+        <html>
+          <body>
+            <h1>Mirror Content</h1>
+            <p>This content is byte-for-byte identical to /mirror-b for testing content hash deduplication.</p>
+            <p>This is a test page with predictable content.</p>
+            <a href="/">Home</a>
+          </body>
+        </html>
+        """
+    )
+
+
+@app.get("/near-duplicate-timestamp")
+async def near_duplicate_timestamp():
+    """Page with near-identical content to /content/near-duplicate but with a different timestamp."""
+    return HTMLResponse(
+        """
+        <html>
+          <body>
+            <h1>Near Duplicate Page</h1>
+            <p>This page has content that is similar to but not identical to other pages, for testing content deduplication.</p>
+            <p>GroktoCrawl is a self-hosted alternative to Firecrawl. It provides web scraping, crawling, and search capabilities through a unified API. This paragraph is intentionally similar to other content on the site to test near-duplicate detection.</p>
+            <meta name="generated-at" content="2024-06-19T12:00:01Z">
             <a href="/">Home</a>
           </body>
         </html>

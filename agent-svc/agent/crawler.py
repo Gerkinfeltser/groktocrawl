@@ -25,6 +25,7 @@ import httpx
 
 from common.url import is_private_host
 
+from .dedup import DedupManager
 from .link_extractor import classify_links, extract_links, filter_links
 from .scraper_client import ScraperClient
 from .sitemap_parser import SitemapParser
@@ -379,6 +380,9 @@ class CrawlEngine:
         self._scraped_count: int = 0
         # Track in-flight tasks for cancellation
         self._pending_tasks: set[asyncio.Task] = set()
+        # Content-level dedup (canonical + content hash)
+        self.dedup_manager = DedupManager()
+        self._dedup_skipped: int = 0  # Pages skipped by content-level dedup
 
     def _resolve_concurrency(self) -> int:
         """Determine the effective concurrency value.
@@ -596,7 +600,7 @@ class CrawlEngine:
 
         return CrawlResult(
             pages=self._pages,
-            total=len(self._pages) + len(self._queue),
+            total=len(self._pages) + len(self._queue) + self._dedup_skipped,
             completed=len(self._pages),
             errors=self._errors,
             robots_blocked=self._robots_blocked,
@@ -832,6 +836,69 @@ class CrawlEngine:
                 "scraped_at": scraped_at,
                 "duration_ms": scrape_duration_ms,
             }
+
+            # ── Content-level dedup checks ──────────────────────────
+            # Layer 2: Canonical tag check (runs first).
+            # Layer 3: Content hash check (runs second, only if canonical
+            #          check did not skip the page).
+            markdown = data.get("markdown", "")
+            canonical_dup_url: str | None = None
+            content_is_dup: bool = False
+
+            # Fetch HTML for canonical checking (also reused for link
+            # extraction below if needed).
+            html = await self._get_html(url)
+
+            if html:
+                canonical_dup_url = self.dedup_manager.check_canonical(html, url)
+
+            if canonical_dup_url:
+                # Canonical duplicate — skip this page (VAL-SCRAPE-021,
+                # VAL-SCRAPE-026).
+                error_entry = {
+                    "url": url,
+                    "error": f"Duplicate canonical URL: {canonical_dup_url}",
+                    "error_type": "duplicate_canonical",
+                    "canonical_url": canonical_dup_url,
+                }
+                self._errors.append(error_entry)
+                self._dedup_skipped += 1
+                logger.info(
+                    "Canonical dedup skipped %s → canonical %s already scraped (job %s)",
+                    url,
+                    canonical_dup_url,
+                    job_id,
+                )
+                # Skip link extraction and page storage for dedup'd pages
+                return
+            else:
+                # Layer 3: Content hash dedup (VAL-SCRAPE-024, VAL-SCRAPE-026).
+                content_hash = self.dedup_manager.compute_content_hash(markdown)
+                if content_hash is not None and self.dedup_manager.is_duplicate_content(
+                    content_hash
+                ):
+                    content_is_dup = True
+
+                if content_is_dup:
+                    error_entry = {
+                        "url": url,
+                        "error": "Duplicate content (identical markdown hash)",
+                        "error_type": "duplicate_content",
+                    }
+                    self._errors.append(error_entry)
+                    self._dedup_skipped += 1
+                    logger.info(
+                        "Content dedup skipped %s — identical content already scraped (job %s)",
+                        url,
+                        job_id,
+                    )
+                    return
+
+                # Page passed all dedup checks — register it.
+                self.dedup_manager.mark_scraped(
+                    url, canonical_url=canonical_dup_url, content_hash=content_hash
+                )
+
             self._pages.append(page)
             self._scraped_count += 1
 
@@ -854,7 +921,10 @@ class CrawlEngine:
             # Discover child links if within max_depth
             # In "only" mode, sitemap URLs are the exclusive source
             if depth < self.options.max_depth and self.options.sitemap_mode != "only":
-                html = await self._get_html(url)
+                # Reuse the HTML fetched for canonical check if available;
+                # otherwise fetch it now for link extraction only.
+                if html is None and depth < self.options.max_depth:
+                    html = await self._get_html(url)
                 if html:
                     child_links = extract_links(html, url)
                     child_links = filter_links(
@@ -1064,7 +1134,7 @@ class CrawlEngine:
         if self.store is None:
             return
         try:
-            total = len(self._pages) + len(self._queue)
+            total = len(self._pages) + len(self._queue) + self._dedup_skipped
             self.store.update_job_progress(
                 job_id=job_id,
                 pages=self._pages,

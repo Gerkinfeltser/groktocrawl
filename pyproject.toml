@@ -3,6 +3,15 @@ name = "groktocrawl"
 version = "0.8.0"
 description = "Self-hosted, Firecrawl-compatible web scraping and AI research API"
 requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4>=4.15.0",
+    "fastapi>=0.137.2",
+    "httpx>=0.28.1",
+    "prometheus-client>=0.25.0",
+    "redis>=8.0.0",
+    "requests>=2.34.2",
+    "uvicorn>=0.49.0",
+]
 
 [tool.setuptools.packages.find]
 include = ["groktocrawl*", "common*"]
@@ -125,3 +134,11 @@ module = [
     "python_multipart.*",
 ]
 ignore_missing_imports = true
+
+[dependency-groups]
+dev = [
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.8.0",
+    "vulture>=2.16",
+]
