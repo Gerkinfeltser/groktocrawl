@@ -584,3 +584,54 @@ class ActivityResponse(BaseModel):
 
     success: bool = True
     data: list[ActivityItem] = Field(default_factory=list)
+
+
+class CrawlErrorItem(BaseModel):
+    """A single error entry for the GET /v2/crawl/{id}/errors endpoint.
+
+    Attributes:
+        url: The URL that failed.
+        error: Human-readable error description (maps to ``message`` in
+            the validation contract).
+        error_type: Machine-readable error category (e.g., ``timeout``,
+            ``robots_blocked``, ``dns_error``, ``http_error``,
+            ``scrape_error``, ``cache_miss``, ``duplicate_canonical``,
+            ``duplicate_content``).
+        error_code: Machine-readable error code string (e.g., ``TIMEOUT``,
+            ``ROBOTS_BLOCKED``, ``SCRAPE_ERROR``).
+        timestamp: ISO 8601 timestamp of when the error occurred.
+        timeout_ms: For timeout errors, the configured per-scrape timeout
+            in milliseconds.
+        elapsed_ms: For timeout errors, the actual elapsed time before
+            the timeout fired, in milliseconds.
+        http_status: For HTTP errors, the HTTP status code (e.g., 404,
+            403, 500).
+    """
+
+    url: str
+    error: str = ""
+    error_type: str = "scrape_error"
+    error_code: str = ""
+    timestamp: str = ""
+    timeout_ms: int | None = None
+    elapsed_ms: int | None = None
+    http_status: int | None = None
+
+
+class CrawlErrorsResponse(BaseModel):
+    """Response model for GET /v2/crawl/{id}/errors.
+
+    Attributes:
+        success: Always ``True`` for a successful response.
+        errors: List of error objects. Includes all scrape failures,
+            cache misses, and duplicate-detection errors. Politeness-
+            blocked URLs are also included here (with ``error_type:
+            "robots_blocked"``) and in ``robots_blocked``.
+        robots_blocked: Subset of ``errors`` containing only URLs that
+            were blocked by robots.txt or politeness rate limiting.
+    """
+
+    success: bool = True
+    errors: list[CrawlErrorItem] = Field(default_factory=list)
+    robots_blocked: list[CrawlErrorItem] = Field(default_factory=list)
+    error: str | None = None
