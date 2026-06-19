@@ -369,6 +369,63 @@ async def create_crawl(
     if body.limit is not None:
         effective_max_pages = min(body.max_pages, body.limit)
 
+    # ── Streaming path: run inline, return SSE ────────────
+    if body.stream:
+        from fastapi.responses import StreamingResponse
+
+        from .crawl_stream import crawl_event_stream
+        from .settings import load_settings as _load_crawl_settings
+
+        _settings = _load_crawl_settings()
+
+        async def event_stream() -> Any:
+            async for event in crawl_event_stream(
+                job_id=job_id,
+                url=body.url,
+                max_pages=effective_max_pages,
+                max_depth=max_depth,
+                scraper_url=request.app.state.scraper_url,
+                store=store,
+                task_tracker=request.app.state.task_tracker,
+                webhook_config=body.webhook,
+                ignore_query_parameters=body.ignore_query_parameters,
+                include_paths=include_paths,
+                exclude_paths=exclude_paths,
+                regex_on_full_url=body.regex_on_full_url,
+                verbose=body.verbose,
+                sitemap_mode=body.sitemap,
+                crawl_entire_domain=body.crawl_entire_domain,
+                allow_subdomains=body.allow_subdomains,
+                allow_external_links=body.allow_external_links,
+                max_concurrency=body.max_concurrency,
+                delay=body.delay,
+                ignore_robots_txt=body.ignore_robots_txt,
+                robots_user_agent=body.robots_user_agent,
+                scrape_options=body.scrape_options.model_dump(
+                    mode="json", by_alias=True
+                )
+                if body.scrape_options
+                else None,
+                max_duration_seconds=_settings.crawl_max_duration_seconds,
+                idle_timeout_seconds=_settings.crawl_idle_timeout_seconds,
+            ):
+                yield event
+            yield "data: [DONE]\n\n"
+
+        sse_headers = {
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Location": f"/v2/crawl/{job_id}/stream",
+            "X-Accel-Buffering": "no",
+        }
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers=sse_headers,
+        )
+
+    # ── Sync path (non-streaming): create background task ─────────
     from .worker import _process_crawl_async
 
     request.app.state.task_tracker.create_background_task(
@@ -489,6 +546,117 @@ async def cancel_crawl(request: Request, job_id: str) -> AgentCancelResponse:
             detail="Job not found or already completed", details={"job_id": job_id}
         )
     return AgentCancelResponse(success=True)
+
+
+@router.get("/v2/crawl/{job_id}/stream")
+async def stream_crawl(request: Request, job_id: str) -> Any:
+    """Reconnect to a crawl SSE stream or replay completed results.
+
+    For a processing crawl, streams current progress plus future events.
+    For a completed crawl, replays all results as SSE events.
+    Returns 404 if the job does not exist.
+
+    SSE events include:
+        - ``page``: per-page data with url, markdown, metadata
+        - ``progress``: periodic progress with completed/total
+        - ``done``: final result with summary stats
+        - ``error``: per-page failure or overall failure
+    """
+    store: JobStore = request.app.state.job_store
+    job = store.get_job(job_id)
+    if job is None:
+        raise NotFoundError(detail="Job not found", details={"job_id": job_id})
+
+    status = job.get("status", "processing")
+    data = job.get("data") or {}
+    pages = data.get("pages", []) if isinstance(data, dict) else []
+    errors = data.get("errors", []) if isinstance(data, dict) else []
+    total = data.get("total", 0) if isinstance(data, dict) else 0
+    completed = data.get("completed", 0) if isinstance(data, dict) else 0
+
+    from fastapi.responses import StreamingResponse
+
+    async def event_stream() -> Any:
+        import json
+
+        event_id = 0
+
+        # Replay already-scraped pages
+        for page in pages:
+            event_id += 1
+            page_payload = {
+                "type": "page",
+                "url": page.get("url", ""),
+                "markdown": page.get("markdown", ""),
+                "metadata": page.get("metadata", {}),
+            }
+            yield f"id: {event_id}\ndata: {json.dumps(page_payload)}\n\n"
+
+        # Replay errors
+        for error_entry in errors:
+            event_id += 1
+            error_payload = {
+                "type": "error",
+                "url": error_entry.get("url", ""),
+                "error": error_entry.get("error", "Unknown error"),
+            }
+            yield f"id: {event_id}\ndata: {json.dumps(error_payload)}\n\n"
+
+        # Send final done event for completed/failed/cancelled jobs
+        if status == "completed":
+            event_id += 1
+            done_payload = {
+                "type": "done",
+                "id": job_id,
+                "status": "completed",
+                "pages": pages,
+                "total": total,
+                "completed": completed,
+                "latency_ms": 0,
+            }
+            yield f"id: {event_id}\ndata: {json.dumps(done_payload)}\n\n"
+        elif status == "failed":
+            event_id += 1
+            error_payload = {
+                "type": "error",
+                "content": job.get("error", "Crawl failed"),
+            }
+            yield f"id: {event_id}\ndata: {json.dumps(error_payload)}\n\n"
+        else:
+            # For processing/cancelled jobs, send current status
+            event_id += 1
+            progress_payload = {
+                "type": "progress",
+                "completed": completed,
+                "total": total or completed,
+                "status": status,
+            }
+            yield f"id: {event_id}\ndata: {json.dumps(progress_payload)}\n\n"
+            event_id += 1
+            done_payload = {
+                "type": "done",
+                "id": job_id,
+                "status": status,
+                "pages": pages,
+                "total": total or completed,
+                "completed": completed,
+                "latency_ms": 0,
+            }
+            yield f"id: {event_id}\ndata: {json.dumps(done_payload)}\n\n"
+
+        yield "data: [DONE]\n\n"
+
+    sse_headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Access-Control-Allow-Origin": "*",
+        "X-Accel-Buffering": "no",
+    }
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers=sse_headers,
+    )
 
 
 @router.post("/v2/crawl/params-preview", response_model=ParamsPreviewResponse)

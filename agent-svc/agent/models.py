@@ -275,6 +275,10 @@ class CrawlRequest(BaseModel):
         max_length=10000,
         description="Natural language description of what to crawl. Used to derive crawl parameters (includePaths, excludePaths, maxDepth) via LLM. Explicitly-set parameters override LLM-derived ones.",
     )
+    stream: bool = Field(
+        default=False,
+        description="When True, the crawl response is delivered as Server-Sent Events (SSE) stream. Per-page data is streamed incrementally as pages are scraped, with a final done event on completion.",
+    )
 
     @field_validator("url")
     @classmethod
