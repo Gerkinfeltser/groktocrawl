@@ -34,6 +34,8 @@ from .models import (
     BrowserExecuteResponse,
     BrowserListResponse,
     Citation,
+    CrawlActiveItem,
+    CrawlActiveResponse,
     CrawlCreateResponse,
     CrawlErrorItem,
     CrawlErrorsResponse,
@@ -352,6 +354,51 @@ async def create_crawl(
         )
     )
     return CrawlCreateResponse(id=job_id)
+
+
+@router.get("/v2/crawl/active", response_model=CrawlActiveResponse)
+async def list_active_crawls(
+    request: Request,
+    status: str = "processing",
+) -> CrawlActiveResponse:
+    """List all active crawl jobs.
+
+    Returns only jobs with ``kind: "crawl"``. By default returns jobs
+    with ``status: "processing"`` (excluding completed, failed, and
+    cancelled crawls). Filterable via the ``status`` query parameter.
+
+    Each item includes crawl-specific fields: ``url``, ``max_pages``,
+    ``max_depth``, ``completed``, ``total``, ``status``, and ``created_at``.
+
+    Returns an empty ``data`` array (HTTP 200) when no active crawls exist.
+    """
+    store: JobStore = request.app.state.job_store
+    jobs = store.list_active_jobs(kind="crawl", status=status, limit=50)
+    items: list[CrawlActiveItem] = []
+    for job in jobs:
+        payload = job.get("payload") or {}
+        url = payload.get("url") if isinstance(payload, dict) else None
+        max_pages = payload.get("max_pages") if isinstance(payload, dict) else None
+        max_depth = payload.get("max_depth") if isinstance(payload, dict) else None
+
+        # Get completed/total from data payload (set during crawl progress)
+        data = job.get("data") or {}
+        completed = data.get("completed", 0) if isinstance(data, dict) else 0
+        total = data.get("total", 0) if isinstance(data, dict) else 0
+
+        items.append(
+            CrawlActiveItem(
+                id=job["id"],
+                url=url,
+                status=job.get("status", "processing"),
+                created_at=job.get("created_at", ""),
+                completed=completed,
+                total=total,
+                max_pages=max_pages,
+                max_depth=max_depth,
+            )
+        )
+    return CrawlActiveResponse(data=items)
 
 
 @router.get("/v2/crawl/{job_id}", response_model=CrawlStatusResponse)

@@ -586,6 +586,35 @@ class ActivityResponse(BaseModel):
     data: list[ActivityItem] = Field(default_factory=list)
 
 
+class CrawlActiveItem(BaseModel):
+    """A single active crawl job entry for ``GET /v2/crawl/active``.
+
+    Includes crawl-specific fields (``url``, ``max_pages``, ``max_depth``,
+    ``completed``, ``total``) that distinguish it from the generic
+    ``ActivityItem`` used by the unified ``/v2/activity`` endpoint.
+    """
+
+    id: str
+    url: str | None = None
+    status: str = "processing"
+    created_at: str
+    completed: int = 0
+    total: int = 0
+    max_pages: int | None = None
+    max_depth: int | None = None
+
+
+class CrawlActiveResponse(BaseModel):
+    """Response model for ``GET /v2/crawl/active``.
+
+    Returns only jobs with ``kind: "crawl"``. Excludes completed, failed,
+    and cancelled crawls by default (filterable via ``status`` query param).
+    """
+
+    success: bool = True
+    data: list[CrawlActiveItem] = Field(default_factory=list)
+
+
 class CrawlErrorItem(BaseModel):
     """A single error entry for the GET /v2/crawl/{id}/errors endpoint.
 

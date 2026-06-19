@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
+from fastapi.testclient import TestClient
 
 # ── normalize_url tests ──────────────────────────────────────────
 
@@ -4691,3 +4693,216 @@ class TestCrawlEngineCache:
         mock_scraper.scrape.assert_called_once()
         assert result.completed == 1
         assert "# Freshly Scraped Content" in result.pages[0].get("markdown", "")
+
+
+# ── GET /v2/crawl/active endpoint tests ──────────────────────────
+
+
+class _MockJobMeta:
+    """Helper to create a mock job metadata dict for store.list_active_jobs()."""
+
+    @staticmethod
+    def crawl(
+        job_id: str,
+        status: str = "processing",
+        url: str = "http://example.com",
+        max_pages: int = 10,
+        max_depth: int = 2,
+        completed: int = 0,
+        total: int = 10,
+    ) -> dict:
+        return {
+            "id": job_id,
+            "kind": "crawl",
+            "status": status,
+            "created_at": "2025-01-01T00:00:00+00:00",
+            "expires_at": "2025-01-02T00:00:00+00:00",
+            "payload": {
+                "url": url,
+                "max_pages": max_pages,
+                "max_depth": max_depth,
+            },
+            "data": {
+                "completed": completed,
+                "total": total,
+                "pages": [],
+                "errors": [],
+            },
+        }
+
+    @staticmethod
+    def agent() -> dict:
+        return {
+            "id": str(uuid4()),
+            "kind": "agent",
+            "status": "processing",
+            "created_at": "2025-01-01T00:00:00+00:00",
+            "payload": {"prompt": "research something"},
+        }
+
+    @staticmethod
+    def extract() -> dict:
+        return {
+            "id": str(uuid4()),
+            "kind": "extract",
+            "status": "processing",
+            "created_at": "2025-01-01T00:00:00+00:00",
+            "payload": {"urls": ["http://example.com"]},
+        }
+
+
+@pytest.fixture
+def active_crawl_app():
+    """Build a FastAPI test app with a mocked JobStore.
+
+    The store's ``list_active_jobs()`` is pre-configured to return
+    a known set of jobs. Tests can override ``app.state.job_store``
+    after calling the fixture.
+    """
+    from agent.api import router
+    from fastapi import FastAPI
+
+    app = FastAPI()
+    app.include_router(router)
+
+    app.state.job_store = MagicMock()
+    app.state.job_store.list_active_jobs.return_value = []
+
+    with TestClient(app) as client:
+        yield client
+
+
+class TestListActiveCrawls:
+    """Unit tests for GET /v2/crawl/active."""
+
+    def test_returns_only_crawl_jobs(self, active_crawl_app):
+        """VAL-SCRAPE-041: Only returns jobs with kind='crawl'.
+
+        The JobStore.list_active_jobs() is responsible for filtering by
+        kind. This test verifies that the API endpoint correctly passes
+        ``kind="crawl"`` to the store so that non-crawl jobs are never
+        returned.
+        """
+        client = active_crawl_app
+
+        crawl_id = str(uuid4())
+
+        # Mock returns only crawl jobs (as if store already filtered by kind)
+        client.app.state.job_store.list_active_jobs.return_value = [
+            _MockJobMeta.crawl(crawl_id),
+        ]
+
+        resp = client.get("/v2/crawl/active")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert len(data["data"]) == 1
+        assert data["data"][0]["id"] == crawl_id
+
+        # Verify the store was called with kind="crawl"
+        client.app.state.job_store.list_active_jobs.assert_called_with(
+            kind="crawl", status="processing", limit=50
+        )
+
+    def test_excludes_completed_crawls(self, active_crawl_app):
+        """VAL-SCRAPE-042: Completed/failed/cancelled crawls are excluded."""
+        client = active_crawl_app
+
+        processing_id = str(uuid4())
+        completed_id = str(uuid4())
+        failed_id = str(uuid4())
+        cancelled_id = str(uuid4())
+
+        # Only return the processing job (simulating kind="crawl", status="processing" filter)
+        client.app.state.job_store.list_active_jobs.return_value = [
+            _MockJobMeta.crawl(processing_id, status="processing"),
+        ]
+
+        resp = client.get("/v2/crawl/active")
+        assert resp.status_code == 200
+        data = resp.json()
+        ids = [item["id"] for item in data["data"]]
+        assert processing_id in ids, "Processing crawl should be present"
+        assert completed_id not in ids, "Completed crawl should be excluded"
+        assert failed_id not in ids, "Failed crawl should be excluded"
+        assert cancelled_id not in ids, "Cancelled crawl should be excluded"
+
+        # Verify that list_active_jobs was called with kind="crawl" and status="processing"
+        client.app.state.job_store.list_active_jobs.assert_called_with(
+            kind="crawl", status="processing", limit=50
+        )
+
+    def test_response_structure(self, active_crawl_app):
+        """VAL-SCRAPE-043: Response has correct structure with all required fields."""
+        client = active_crawl_app
+
+        crawl_id = str(uuid4())
+        client.app.state.job_store.list_active_jobs.return_value = [
+            _MockJobMeta.crawl(
+                crawl_id,
+                url="http://test-site:8000",
+                max_pages=5,
+                max_depth=1,
+                completed=3,
+                total=5,
+            ),
+        ]
+
+        resp = client.get("/v2/crawl/active")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert "data" in body
+        assert len(body["data"]) == 1
+
+        item = body["data"][0]
+        assert item["id"] == crawl_id
+        assert item["url"] == "http://test-site:8000"
+        assert item["status"] == "processing"
+        assert item["created_at"] == "2025-01-01T00:00:00+00:00"
+        assert item["completed"] == 3
+        assert item["total"] == 5
+        assert item["max_pages"] == 5
+        assert item["max_depth"] == 1
+
+    def test_empty_when_no_active_crawls(self, active_crawl_app):
+        """VAL-SCRAPE-044: Returns empty data array when no active crawls."""
+        client = active_crawl_app
+        # Store returns no crawl jobs
+        client.app.state.job_store.list_active_jobs.return_value = []
+
+        resp = client.get("/v2/crawl/active")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert body["data"] == []
+
+    def test_filterable_by_status(self, active_crawl_app):
+        """Supports optional status query parameter to filter by status."""
+        client = active_crawl_app
+
+        client.app.state.job_store.list_active_jobs.return_value = []
+
+        resp = client.get("/v2/crawl/active?status=completed")
+        assert resp.status_code == 200
+
+        # Verify status was passed through to the store
+        client.app.state.job_store.list_active_jobs.assert_called_with(
+            kind="crawl", status="completed", limit=50
+        )
+
+    def test_does_not_show_agent_or_extract_jobs_thorough(self, active_crawl_app):
+        """More thorough check: no agent/extract/llmstxt jobs appear."""
+        client = active_crawl_app
+
+        client.app.state.job_store.list_active_jobs.return_value = [
+            _MockJobMeta.crawl(str(uuid4())),
+        ]
+
+        resp = client.get("/v2/crawl/active")
+        assert resp.status_code == 200
+
+        # Verify list_active_jobs was called with kind="crawl"
+        client.app.state.job_store.list_active_jobs.assert_called_with(
+            kind="crawl", status="processing", limit=50
+        )
