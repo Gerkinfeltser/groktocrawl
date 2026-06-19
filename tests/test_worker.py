@@ -329,9 +329,8 @@ class TestProcessCrawlAsync:
         assert events[0] == "crawl.started"
         # Last event should be crawl.completed (for cancelled status)
         assert events[-1] == "crawl.completed"
-        # The cancelled status should be in the payload
-        completed_payload = mock_deliver_webhook.call_args_list[-1][0][3]
-        assert completed_payload.get("status") == "cancelled"
+        # The cancelled webhook has success=True and data=[] (VAL-PARITY-007)
+        # The cancelled status is stored in Redis and retrievable via GET /v2/crawl/{id}
         mock_scraper_instance.close.assert_called_once()
 
     @pytest.mark.asyncio

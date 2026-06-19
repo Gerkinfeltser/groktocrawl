@@ -150,14 +150,16 @@ async def _process_crawl_async(
 
     try:
         # ── Fire crawl.started webhook ────────────────────────
+        # Per VAL-PARITY-030: crawl.started fires BEFORE any page scraping.
+        # The data field is an empty list (no pages yet), and metadata is
+        # echoed from the webhook config (VAL-PARITY-009).
         if task_tracker is not None:
             task_tracker.create_background_task(
                 deliver_webhook(
                     webhook_config,
                     "crawl.started",
                     job_id,
-                    {"url": url, "max_pages": max_pages, "max_depth": max_depth},
-                    webhook_id_key="crawl.started",
+                    data=[],
                     task_tracker=task_tracker,
                 )
             )
@@ -166,8 +168,7 @@ async def _process_crawl_async(
                 webhook_config,
                 "crawl.started",
                 job_id,
-                {"url": url, "max_pages": max_pages, "max_depth": max_depth},
-                webhook_id_key="crawl.started",
+                data=[],
             )
 
         from .crawl_cache import CrawlCache
@@ -205,15 +206,14 @@ async def _process_crawl_async(
         async def _page_callback(_job_id: str, page: dict[str, Any]) -> None:
             # Deliver webhook as a tracked background task to avoid
             # blocking the crawl loop on webhook delivery latency.
-            webhook_id_key = f"crawl.page-{page.get('url', 'unknown')}"
+            # Per VAL-PARITY-006: data is an array containing one page document.
             if task_tracker is not None:
                 task_tracker.create_background_task(
                     deliver_webhook(
                         webhook_config,
                         "crawl.page",
                         _job_id,
-                        page,
-                        webhook_id_key=webhook_id_key,
+                        data=[page],
                         task_tracker=task_tracker,
                     )
                 )
@@ -222,8 +222,7 @@ async def _process_crawl_async(
                     webhook_config,
                     "crawl.page",
                     _job_id,
-                    page,
-                    webhook_id_key=webhook_id_key,
+                    data=[page],
                 )
 
         result = await engine.run(url, job_id=job_id, page_callback=_page_callback)
@@ -262,8 +261,7 @@ async def _process_crawl_async(
                         webhook_config,
                         "crawl.completed",
                         job_id,
-                        {**payload, "status": "cancelled"},
-                        webhook_id_key="crawl.completed",
+                        data=[],
                         task_tracker=task_tracker,
                     )
                 )
@@ -272,8 +270,7 @@ async def _process_crawl_async(
                     webhook_config,
                     "crawl.completed",
                     job_id,
-                    {**payload, "status": "cancelled"},
-                    webhook_id_key="crawl.completed",
+                    data=[],
                 )
         else:
             store.complete_job(job_id, payload)
@@ -283,8 +280,7 @@ async def _process_crawl_async(
                         webhook_config,
                         "crawl.completed",
                         job_id,
-                        payload,
-                        webhook_id_key="crawl.completed",
+                        data=[],
                         task_tracker=task_tracker,
                     )
                 )
@@ -293,8 +289,7 @@ async def _process_crawl_async(
                     webhook_config,
                     "crawl.completed",
                     job_id,
-                    payload,
-                    webhook_id_key="crawl.completed",
+                    data=[],
                 )
 
         elapsed = time.monotonic() - start
@@ -333,8 +328,9 @@ async def _process_crawl_async(
                     webhook_config,
                     "crawl.failed",
                     job_id,
-                    {"error": str(e)},
-                    webhook_id_key="crawl.failed",
+                    data=[],
+                    success=False,
+                    error=str(e),
                     task_tracker=task_tracker,
                 )
             )
@@ -343,8 +339,9 @@ async def _process_crawl_async(
                 webhook_config,
                 "crawl.failed",
                 job_id,
-                {"error": str(e)},
-                webhook_id_key="crawl.failed",
+                data=[],
+                success=False,
+                error=str(e),
             )
         elapsed = time.monotonic() - start
 
