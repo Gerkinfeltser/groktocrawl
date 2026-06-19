@@ -208,12 +208,30 @@ async def _process_crawl_async(
             await deliver_webhook(webhook_config, "crawl.completed", job_id, payload)
 
         elapsed = time.monotonic() - start
+
+        # ── Existing job-type-agnostic metrics (keep for backward compat) ──
         METRICS.histogram(
             "job_duration_seconds", "Job processing duration", ["type", "status"]
         ).observe({"type": job_type, "status": "completed"}, elapsed)
         METRICS.counter("jobs_completed_total", "Total completed jobs", ["type"]).inc(
             {"type": job_type}
         )
+
+        # ── Crawl-specific metrics ──────────────────────────────────────────
+        crawl_status = "cancelled" if was_cancelled else "completed"
+        METRICS.counter(
+            "groktocrawl_crawl_jobs_total", "Total crawl jobs by status", ["status"]
+        ).inc({"status": crawl_status})
+        METRICS.histogram(
+            "groktocrawl_crawl_duration_seconds",
+            "Crawl job duration in seconds",
+            ["status"],
+        ).observe({"status": crawl_status}, elapsed)
+        METRICS.counter(
+            "groktocrawl_crawl_pages_scraped_total",
+            "Total pages scraped by crawl jobs",
+        ).inc(value=float(result.completed))
+
         logger.info("Crawl job %s completed in %.2fs", job_id, elapsed)
 
     except Exception as e:
@@ -221,12 +239,24 @@ async def _process_crawl_async(
         store.fail_job(job_id, str(e))
         await deliver_webhook(webhook_config, "crawl.failed", job_id, {"error": str(e)})
         elapsed = time.monotonic() - start
+
+        # ── Existing job-type-agnostic metrics ─────────────────────────────
         METRICS.histogram(
             "job_duration_seconds", "Job processing duration", ["type", "status"]
         ).observe({"type": job_type, "status": "failed"}, elapsed)
         METRICS.counter("jobs_failed_total", "Total failed jobs", ["type"]).inc(
             {"type": job_type}
         )
+
+        # ── Crawl-specific metrics ─────────────────────────────────────────
+        METRICS.counter(
+            "groktocrawl_crawl_jobs_total", "Total crawl jobs by status", ["status"]
+        ).inc({"status": "failed"})
+        METRICS.histogram(
+            "groktocrawl_crawl_duration_seconds",
+            "Crawl job duration in seconds",
+            ["status"],
+        ).observe({"status": "failed"}, elapsed)
     finally:
         await scraper.close()
 
