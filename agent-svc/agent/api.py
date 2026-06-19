@@ -294,17 +294,25 @@ async def create_crawl(request: Request, body: CrawlRequest) -> CrawlCreateRespo
     store: JobStore = request.app.state.job_store
     job_id = store.create_job(kind="crawl", payload=body.model_dump())
 
+    # Resolve limit vs max_pages conflict (stricter wins, per VAL-CRAWL-089)
+    effective_max_pages = body.max_pages
+    if body.limit is not None:
+        effective_max_pages = min(body.max_pages, body.limit)
+
     from .worker import _process_crawl_async
 
     request.app.state.task_tracker.create_background_task(
         _process_crawl_async(
             job_id=job_id,
             url=body.url,
-            max_pages=body.max_pages,
+            max_pages=effective_max_pages,
             max_depth=body.max_depth,
             scraper_url=request.app.state.scraper_url,
             webhook_config=body.webhook,
             task_tracker=request.app.state.task_tracker,
+            ignore_query_parameters=body.ignore_query_parameters,
+            include_paths=body.include_paths,
+            exclude_paths=body.exclude_paths,
         )
     )
     return CrawlCreateResponse(id=job_id)

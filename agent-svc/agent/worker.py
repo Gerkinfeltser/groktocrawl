@@ -108,6 +108,9 @@ async def _process_crawl_async(
     scraper_url: str,
     webhook_config: dict[str, Any] | None = None,
     task_tracker: Any = None,
+    ignore_query_parameters: bool = False,
+    include_paths: list[str] | None = None,
+    exclude_paths: list[str] | None = None,
 ) -> None:
     settings = _get_worker_settings()
     store = JobStore(
@@ -116,25 +119,45 @@ async def _process_crawl_async(
     scraper = ScraperClient(scraper_url)
 
     async def work_fn() -> dict[str, Any]:
-        result = await scraper.scrape(url)
-        pages = []
-        if result.get("success"):
-            data = result["data"]
-            pages.append({"url": url, "markdown": data.get("markdown", "")})
-            # Extract title from metadata if available
-            metadata = data.get("metadata") or {}
-            og = metadata.get("og") or {}
-            meta = metadata.get("meta") or {}
-            title = og.get("title") or meta.get("title") or data.get("title", "")
+        from .crawler import CrawlEngine, CrawlOptions
+
+        options = CrawlOptions(
+            max_pages=max_pages,
+            max_depth=max_depth,
+            ignore_query_parameters=ignore_query_parameters,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
+        )
+        engine = CrawlEngine(scraper, store=store, options=options)
+        result = await engine.run(url, job_id=job_id)
+
+        # Fire-and-forget indexing for each page
+        for page in result.pages:
+            page_url = page.get("url", "")
+            markdown = page.get("markdown", "")
             if task_tracker is not None:
                 task_tracker.create_background_task(
-                    _index_page_async(url, title, data.get("markdown", "")[:2000])
+                    _index_page_async(
+                        page_url,
+                        "",
+                        markdown[:2000],
+                    )
                 )
             else:
                 asyncio.create_task(
-                    _index_page_async(url, title, data.get("markdown", "")[:2000])
+                    _index_page_async(
+                        page_url,
+                        "",
+                        markdown[:2000],
+                    )
                 )
-        payload = {"completed": len(pages), "total": 1, "pages": pages}
+
+        payload = {
+            "completed": result.completed,
+            "total": result.total,
+            "pages": result.pages,
+            "errors": result.errors,
+        }
         return payload
 
     await _run_job_with_observability(
