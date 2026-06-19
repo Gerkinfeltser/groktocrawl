@@ -114,6 +114,16 @@ class CrawlRequest(BaseModel):
     crawl_entire_domain: bool = False
     allow_subdomains: bool = False
     allow_external_links: bool = False
+    max_concurrency: int = Field(
+        default=3,
+        ge=1,
+        description="Maximum concurrent page scrapes (1-50, values > 50 are capped)",
+    )
+    delay: float | None = Field(
+        default=None,
+        ge=0,
+        description="Delay in seconds between scrapes. Forces concurrency to 1 when set.",
+    )
 
     @field_validator("url")
     @classmethod
@@ -126,6 +136,26 @@ class CrawlRequest(BaseModel):
             raise ValueError(f"URL scheme must be http or https, got '{parsed.scheme}'")
         if not parsed.netloc:
             raise ValueError("URL must have a network location (host)")
+        return value
+
+    @field_validator("max_concurrency")
+    @classmethod
+    def validate_max_concurrency(cls, value: int) -> int:
+        """Validate and cap max_concurrency values.
+
+        Values of 0 or negative are rejected (would deadlock the semaphore).
+        Values above 50 are silently capped to 50 to prevent resource exhaustion.
+        """
+        if value < 1:
+            raise ValueError(f"max_concurrency must be >= 1, got {value}")
+        return min(value, 50)
+
+    @field_validator("delay")
+    @classmethod
+    def validate_delay(cls, value: float | None) -> float | None:
+        """Reject negative delay values."""
+        if value is not None and value < 0:
+            raise ValueError(f"delay must be >= 0, got {value}")
         return value
 
     @model_validator(mode="after")

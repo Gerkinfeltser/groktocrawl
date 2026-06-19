@@ -319,6 +319,8 @@ async def create_crawl(request: Request, body: CrawlRequest) -> CrawlCreateRespo
             crawl_entire_domain=body.crawl_entire_domain,
             allow_subdomains=body.allow_subdomains,
             allow_external_links=body.allow_external_links,
+            max_concurrency=body.max_concurrency,
+            delay=body.delay,
         )
     )
     return CrawlCreateResponse(id=job_id)

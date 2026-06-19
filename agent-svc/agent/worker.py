@@ -117,6 +117,8 @@ async def _process_crawl_async(
     crawl_entire_domain: bool = False,
     allow_subdomains: bool = False,
     allow_external_links: bool = False,
+    max_concurrency: int = 3,
+    delay: float | None = None,
 ) -> None:
     """Process a crawl job with full lifecycle support.
 
@@ -166,6 +168,8 @@ async def _process_crawl_async(
             allow_subdomains=allow_subdomains,
             allow_external_links=allow_external_links,
             crawl_entire_domain=crawl_entire_domain,
+            max_concurrency=max_concurrency,
+            delay=delay,
             max_duration_seconds=settings.crawl_max_duration_seconds,
             idle_timeout_seconds=settings.crawl_idle_timeout_seconds,
         )

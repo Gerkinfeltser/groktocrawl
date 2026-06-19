@@ -257,12 +257,18 @@ class TestProcessCrawlAsync:
                 scraper_url="http://scraper:8001",
             )
 
-        mock_store.fail_job.assert_called_once_with("crawl-fail", "Crawl error")
-        # Webhook called 2 times: crawl.started, then crawl.failed
+        # The CrawlEngine now handles start URL scrape failures internally
+        # and returns a CrawlResult with errors rather than raising.
+        # The crawl completes with 0 pages and error entries.
+        mock_store.complete_job.assert_called_once()
+        call_args = mock_store.complete_job.call_args[0][1]
+        assert call_args["completed"] == 0
+        assert len(call_args["errors"]) > 0
+        # Webhook called 2 times: crawl.started, then crawl.completed
         assert mock_deliver_webhook.call_count == 2
         events = [call[0][1] for call in mock_deliver_webhook.call_args_list]
         assert events[0] == "crawl.started"
-        assert events[1] == "crawl.failed"
+        assert events[1] == "crawl.completed"
         # scraper.close() called in finally
         mock_scraper_instance.close.assert_called_once()
 
