@@ -113,6 +113,7 @@ async def _process_crawl_async(
     exclude_paths: list[str] | None = None,
     regex_on_full_url: bool = False,
     verbose: bool = False,
+    sitemap_mode: str = "include",
 ) -> None:
     """Process a crawl job with full lifecycle support.
 
@@ -158,6 +159,7 @@ async def _process_crawl_async(
             exclude_paths=exclude_paths,
             regex_on_full_url=regex_on_full_url,
             verbose=verbose,
+            sitemap_mode=sitemap_mode,
             max_duration_seconds=settings.crawl_max_duration_seconds,
             idle_timeout_seconds=settings.crawl_idle_timeout_seconds,
         )

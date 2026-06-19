@@ -1555,6 +1555,43 @@ class TestCrawlRequestValidation:
         req = CrawlRequest(url="http://example.com")
         assert req.max_pages == 10
 
+    def test_sitemap_default_is_include(self):
+        """Default sitemap mode is 'include'."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com")
+        assert req.sitemap == "include"
+
+    def test_sitemap_skip_accepted(self):
+        """sitemap='skip' is accepted."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com", sitemap="skip")
+        assert req.sitemap == "skip"
+
+    def test_sitemap_only_accepted(self):
+        """sitemap='only' is accepted."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com", sitemap="only")
+        assert req.sitemap == "only"
+
+    def test_sitemap_invalid_rejected(self):
+        """Invalid sitemap mode returns validation error."""
+        from agent.models import CrawlRequest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="sitemap"):
+            CrawlRequest(url="http://example.com", sitemap="banana")
+
+    def test_ignore_sitemap_true_maps_to_skip(self):
+        """ignore_sitemap=true maps to sitemap='skip' for backward compatibility."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com", ignore_sitemap=True)
+        assert req.sitemap == "skip"
+        assert req.ignore_sitemap is True
+
 
 # ── Store tests ──────────────────────────────────────────────────
 
@@ -1706,3 +1743,292 @@ class TestPerPageMetadata:
         assert page["content_type"] == "text/html"  # default
         assert page["scraped_at"] is not None
         assert isinstance(page["duration_ms"], int)
+
+
+# ── Sitemap integration tests ────────────────────────────────────
+
+
+class TestCrawlEngineSitemap:
+    """Tests for sitemap integration in CrawlEngine."""
+
+    @pytest.mark.asyncio
+    async def test_sitemap_include_seeds_urls(self, mock_scraper):
+        """sitemap_mode='include' seeds sitemap URLs into the BFS queue."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=5,
+                max_depth=2,
+                sitemap_mode="include",
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        # Mock sitemap fetch to return some URLs
+        with patch.object(engine, "_fetch_sitemap_urls") as mock_fetch:
+            mock_fetch.return_value = [
+                "http://example.com/sitemap-page1",
+                "http://example.com/sitemap-page2",
+            ]
+
+            # Mock HTML fetch to simulate no HTML link discovery
+            with patch.object(engine, "_get_html") as mock_html:
+                mock_html.return_value = """<html><body><p>No links</p></body></html>"""
+
+                result = await engine.run("http://example.com/")
+
+        # Should have start URL + 2 sitemap URLs = 3 pages
+        assert result.completed == 3
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/" in urls
+        assert "http://example.com/sitemap-page1" in urls
+        assert "http://example.com/sitemap-page2" in urls
+
+    @pytest.mark.asyncio
+    async def test_sitemap_skip_no_fetch(self, mock_scraper):
+        """sitemap_mode='skip' does NOT fetch sitemaps."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=5,
+                max_depth=2,
+                sitemap_mode="skip",
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_fetch_sitemap_urls") as mock_fetch:
+            mock_fetch.return_value = [
+                "http://example.com/sitemap-page1",
+                "http://example.com/sitemap-page2",
+            ]
+
+            with patch.object(engine, "_get_html") as mock_html:
+                mock_html.return_value = """
+                    <html><body>
+                    <a href="http://example.com/pricing">Pricing</a>
+                    <a href="http://example.com/about">About</a>
+                    </body></html>
+                """
+
+                result = await engine.run("http://example.com/")
+
+        # Should NOT have sitemap URLs
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/sitemap-page1" not in urls
+        assert "http://example.com/sitemap-page2" not in urls
+        # Should still discover HTML links
+        assert "http://example.com/pricing" in urls
+        assert "http://example.com/about" in urls
+        # _fetch_sitemap_urls should NOT have been called
+        mock_fetch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sitemap_only_exclusive(self, mock_scraper):
+        """sitemap_mode='only' crawls exclusively sitemap URLs, no HTML link discovery."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=2,
+                sitemap_mode="only",
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_fetch_sitemap_urls") as mock_fetch:
+            mock_fetch.return_value = [
+                "http://example.com/sitemap-only-page1",
+                "http://example.com/sitemap-only-page2",
+            ]
+
+            with patch.object(engine, "_get_html"):
+                result = await engine.run("http://example.com/")
+
+        # Should have start URL + 2 sitemap URLs
+        assert result.completed == 3
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/" in urls
+        assert "http://example.com/sitemap-only-page1" in urls
+        assert "http://example.com/sitemap-only-page2" in urls
+        # No extra pages from HTML link discovery
+        assert len(urls) == 3
+
+    @pytest.mark.asyncio
+    async def test_sitemap_urls_respect_max_pages(self, mock_scraper):
+        """Sitemap URLs are counted toward max_pages."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=2,
+                max_depth=2,
+                sitemap_mode="include",
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_fetch_sitemap_urls") as mock_fetch:
+            mock_fetch.return_value = [
+                "http://example.com/sitemap-page1",
+                "http://example.com/sitemap-page2",
+                "http://example.com/sitemap-page3",
+            ]
+
+            with patch.object(engine, "_get_html") as mock_html:
+                mock_html.return_value = """<html><body><p>No links</p></body></html>"""
+
+                result = await engine.run("http://example.com/")
+
+        # max_pages=2 should give us exactly 2 pages
+        assert result.completed == 2
+        assert len(result.pages) == 2
+
+    @pytest.mark.asyncio
+    async def test_sitemap_dedup_against_start_url(self, mock_scraper):
+        """Sitemap URLs that match the start URL are deduplicated."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=5,
+                max_depth=2,
+                sitemap_mode="include",
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_fetch_sitemap_urls") as mock_fetch:
+            # Sitemap contains the start URL
+            mock_fetch.return_value = [
+                "http://example.com/",
+                "http://example.com/about",
+            ]
+
+            with patch.object(engine, "_get_html") as mock_html:
+                mock_html.return_value = """<html><body><p>No links</p></body></html>"""
+
+                result = await engine.run("http://example.com/")
+
+        # Should have start URL + about = 2 pages (start URL deduplicated)
+        assert result.completed == 2
+        urls = [p["url"] for p in result.pages]
+        assert len(urls) == 2
+        assert "http://example.com/" in urls
+        assert "http://example.com/about" in urls
+
+    @pytest.mark.asyncio
+    async def test_sitemap_fetch_failure_falls_back(self, mock_scraper):
+        """When sitemap fetch fails, crawl falls back to HTML-only discovery."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=5,
+                max_depth=2,
+                sitemap_mode="include",
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        # Simulate sitemap fetch failure
+        with patch.object(engine, "_fetch_sitemap_urls") as mock_fetch:
+            mock_fetch.side_effect = Exception("Sitemap fetch failed")
+
+            with patch.object(engine, "_get_html") as mock_html:
+                mock_html.return_value = """
+                    <html><body>
+                    <a href="http://example.com/pricing">Pricing</a>
+                    <a href="http://example.com/about">About</a>
+                    </body></html>
+                """
+
+                result = await engine.run("http://example.com/")
+
+        # Should fall back to HTML discovery
+        assert result.completed >= 2
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/pricing" in urls
+        assert "http://example.com/about" in urls
+
+    @pytest.mark.asyncio
+    async def test_sitemap_only_with_max_depth_zero(self, mock_scraper):
+        """sitemap='only' with max_depth=0 still scrapes sitemap URLs (they are depth 0)."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=5,
+                max_depth=0,
+                sitemap_mode="include",
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_fetch_sitemap_urls") as mock_fetch:
+            mock_fetch.return_value = [
+                "http://example.com/sitemap-page1",
+                "http://example.com/sitemap-page2",
+            ]
+
+            with patch.object(engine, "_get_html") as mock_html:
+                mock_html.return_value = """
+                    <html><body>
+                    <a href="http://example.com/pricing">Pricing</a>
+                    </body></html>
+                """
+
+                result = await engine.run("http://example.com/")
+
+        # Should scrape start URL + sitemap URLs (all depth 0)
+        # But NOT follow HTML links (max_depth=0)
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/" in urls
+        assert "http://example.com/sitemap-page1" in urls
+        assert "http://example.com/sitemap-page2" in urls
+        assert "http://example.com/pricing" not in urls  # HTML link, not followed
