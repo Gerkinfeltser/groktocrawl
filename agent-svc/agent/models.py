@@ -147,6 +147,8 @@ class MapRequest(BaseModel):
     url: str
     limit: int = 100
     search: str | None = None
+    allow_subdomains: bool = False
+    allow_external_links: bool = False
 
 
 class MapResponse(BaseModel):

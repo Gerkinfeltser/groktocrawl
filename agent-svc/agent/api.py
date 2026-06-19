@@ -8,10 +8,7 @@ from datetime import UTC
 from typing import Any
 
 import httpx
-from bs4 import BeautifulSoup
 from fastapi import APIRouter, Request, Response
-
-from common.url import extract_domain, is_same_origin
 
 from .exceptions import (
     BrowserError,
@@ -744,22 +741,33 @@ async def map_site(request: Request, body: MapRequest) -> MapResponse:
             resp = await client.get(body.url)
             if resp.status_code != 200:
                 raise UpstreamError(detail=f"Site returned HTTP {resp.status_code}")
-            soup = BeautifulSoup(resp.text, "html.parser")
-            links: list[str] = []
-            for a in soup.find_all("a", href=True):
-                href: str = a["href"]  # type: ignore[assignment,union-attr]
-                if href.startswith("/"):
-                    href = f"{extract_domain(body.url, include_scheme=True)}{href}"
-                href_start = href.startswith(body.url.rstrip("/")) or is_same_origin(
-                    body.url, href
-                )
-                if href_start and href not in links:
-                    links.append(href)
-                    if len(links) >= body.limit:
-                        break
+
+            # Use shared LinkExtractor instead of inline BeautifulSoup parsing
+            from urllib.parse import urlparse
+
+            from .link_extractor import extract_links, filter_links
+
+            all_links = extract_links(resp.text, body.url)
+
+            # Filter links by domain scope (default: same-origin only)
+            base_domain = (urlparse(body.url).hostname or "").lower()
+            filtered = filter_links(
+                all_links,
+                base_domain=base_domain,
+                allow_subdomains=body.allow_subdomains,
+                allow_external_links=body.allow_external_links,
+            )
+
+            # Apply limit (truncates AFTER filtering)
+            result = filtered[: body.limit]
+
+            # Apply search filter (case-insensitive substring match)
             if body.search:
-                links = [link for link in links if body.search.lower() in link.lower()]
-            return MapResponse(links=links)
+                result = [
+                    link for link in result if body.search.lower() in link.lower()
+                ]
+
+            return MapResponse(links=result)
     except Exception as e:
         logger.error("Map failed for %s: %s", body.url, e)
         raise UpstreamError(detail=str(e)) from e
