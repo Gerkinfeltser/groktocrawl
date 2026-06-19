@@ -25,6 +25,7 @@ import httpx
 
 from common.url import is_private_host
 
+from .crawl_cache import CrawlCache
 from .dedup import DedupManager
 from .link_extractor import classify_links, extract_links, filter_links
 from .scraper_client import ScraperClient
@@ -358,10 +359,12 @@ class CrawlEngine:
         scraper_client: ScraperClient,
         store: JobStore | None = None,
         options: CrawlOptions | None = None,
+        crawl_cache: CrawlCache | None = None,
     ):
         self.scraper = scraper_client
         self.store = store
         self.options = options or CrawlOptions()
+        self.crawl_cache = crawl_cache
 
         # Resolve effective concurrency: delay forces sequential
         self._effective_concurrency = self._resolve_concurrency()
@@ -714,52 +717,104 @@ class CrawlEngine:
 
             self._last_scrape_start = time.monotonic()
 
-            # Scrape the page with a per-scrape timeout to prevent semaphore
-            # slot starvation (VAL-CONC-043 / VAL-CONC-051).
-            scrape_start = time.monotonic()
-            # Default timeout: 60 seconds per individual scrape
-            per_scrape_timeout = 60.0
-            try:
-                result = await asyncio.wait_for(
-                    self.scraper.scrape(
-                        url,
-                        ignore_robots_txt=self.options.ignore_robots_txt,
-                        robots_user_agent=self.options.robots_user_agent,
-                        scrape_options=self.options.scrape_options,
-                    ),
-                    timeout=per_scrape_timeout,
-                )
-            except TimeoutError:
-                elapsed = time.monotonic() - scrape_start
-                timeout_entry = {
-                    "url": url,
-                    "error": f"Scrape timed out after {elapsed:.1f}s",
-                    "error_code": "TIMEOUT",
-                }
-                self._errors.append(timeout_entry)
-                logger.warning(
-                    "Scrape timed out for %s after %.1fs (job %s)",
+            # ── Cache check ──────────────────────────────────────
+            cache_max_age_ms: int | None = None
+            cache_min_age_ms: int | None = None
+            if self.options.scrape_options:
+                cache_max_age_ms = self.options.scrape_options.get("max_age")
+                cache_min_age_ms = self.options.scrape_options.get("min_age")
+
+            _result_from_cache: dict | None = None
+            if self.crawl_cache is not None and (
+                cache_max_age_ms is not None or cache_min_age_ms is not None
+            ):
+                use_cached, cached_data, cache_err = self.crawl_cache.check_cache(
                     url,
-                    elapsed,
+                    max_age_ms=cache_max_age_ms,
+                    min_age_ms=cache_min_age_ms,
+                )
+                if cache_err:
+                    # minAge cache miss → record error, skip scrape
+                    self._errors.append(
+                        {
+                            "url": url,
+                            "error": cache_err,
+                            "error_code": "CACHE_MISS",
+                        }
+                    )
+                    logger.info(
+                        "Cache miss (minAge) for %s (job %s): %s",
+                        url,
+                        job_id,
+                        cache_err,
+                    )
+                    return
+                if use_cached and cached_data is not None:
+                    _result_from_cache = cached_data
+
+            if _result_from_cache is not None:
+                # Use cached result — skip the scraper call entirely.
+                result = _result_from_cache
+                scrape_duration_ms = 0  # Cache hit — no network latency
+                logger.debug(
+                    "Cache HIT for %s (job %s) — skipping scraper call",
+                    url,
                     job_id,
                 )
-                return
-            except asyncio.CancelledError:
-                logger.debug("Scrape cancelled for %s (job %s)", url, job_id)
-                return
-            except Exception as exc:
-                error_entry = {
-                    "url": url,
-                    "error": str(exc),
-                    "error_code": "SCRAPE_ERROR",
-                }
-                self._errors.append(error_entry)
-                logger.warning("Scrape exception for %s: %s", url, exc)
-                if depth == 0:
-                    raise  # let the caller handle start URL failure
-                return
+            else:
+                # ── Fresh scrape — full scraper call ─────────────
+                scrape_start = time.monotonic()
+                per_scrape_timeout = 60.0
+                try:
+                    result = await asyncio.wait_for(
+                        self.scraper.scrape(
+                            url,
+                            ignore_robots_txt=self.options.ignore_robots_txt,
+                            robots_user_agent=self.options.robots_user_agent,
+                            scrape_options=self.options.scrape_options,
+                        ),
+                        timeout=per_scrape_timeout,
+                    )
+                except TimeoutError:
+                    elapsed = time.monotonic() - scrape_start
+                    timeout_entry = {
+                        "url": url,
+                        "error": f"Scrape timed out after {elapsed:.1f}s",
+                        "error_code": "TIMEOUT",
+                    }
+                    self._errors.append(timeout_entry)
+                    logger.warning(
+                        "Scrape timed out for %s after %.1fs (job %s)",
+                        url,
+                        elapsed,
+                        job_id,
+                    )
+                    return
+                except asyncio.CancelledError:
+                    logger.debug("Scrape cancelled for %s (job %s)", url, job_id)
+                    return
+                except Exception as exc:
+                    error_entry = {
+                        "url": url,
+                        "error": str(exc),
+                        "error_code": "SCRAPE_ERROR",
+                    }
+                    self._errors.append(error_entry)
+                    logger.warning("Scrape exception for %s: %s", url, exc)
+                    if depth == 0:
+                        raise  # let the caller handle start URL failure
+                    return
 
-            scrape_duration_ms = int((time.monotonic() - scrape_start) * 1000)
+                scrape_duration_ms = int((time.monotonic() - scrape_start) * 1000)
+
+                # Cache the fresh scrape result if maxAge > 0
+                if (
+                    self.crawl_cache is not None
+                    and cache_max_age_ms is not None
+                    and cache_max_age_ms > 0
+                    and result.get("success")
+                ):
+                    self.crawl_cache.set(url, result, ttl_ms=cache_max_age_ms)
 
             if not result.get("success"):
                 error_msg = result.get("error", "Unknown scrape error")

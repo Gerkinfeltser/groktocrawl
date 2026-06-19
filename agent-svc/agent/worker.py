@@ -170,7 +170,12 @@ async def _process_crawl_async(
                 webhook_id_key="crawl.started",
             )
 
+        from .crawl_cache import CrawlCache
         from .crawler import CrawlEngine, CrawlOptions
+
+        crawl_cache = CrawlCache(
+            f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+        )
 
         options = CrawlOptions(
             max_pages=max_pages,
@@ -192,7 +197,9 @@ async def _process_crawl_async(
             idle_timeout_seconds=settings.crawl_idle_timeout_seconds,
             scrape_options=scrape_options,
         )
-        engine = CrawlEngine(scraper, store=store, options=options)
+        engine = CrawlEngine(
+            scraper, store=store, options=options, crawl_cache=crawl_cache
+        )
 
         # Per-page webhook callback using task_tracker (VAL-CONC-049)
         async def _page_callback(_job_id: str, page: dict[str, Any]) -> None:

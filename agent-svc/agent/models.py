@@ -84,6 +84,24 @@ class ScrapeOptions(BaseModel):
     remove_base64_images: bool = Field(
         default=False, description="Strip data:image/... URIs from output"
     )
+    max_age: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Maximum age of cached content in milliseconds. If the cached response"
+            " is younger than ``max_age``, it is returned without re-scraping."
+            " When set to 0, caching is bypassed entirely (every request is fresh)."
+        ),
+    )
+    min_age: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Minimum age for cache-only mode in milliseconds. When set, only cached"
+            " content is returned. A cache miss produces a cache_miss error for that"
+            " URL rather than fetching fresh content."
+        ),
+    )
 
     @field_validator("formats")
     @classmethod
@@ -112,6 +130,31 @@ class ScrapeOptions(BaseModel):
         if value is not None and value < 0:
             raise ValueError(f"wait_for must be >= 0, got {value}")
         return value
+
+    @field_validator("max_age")
+    @classmethod
+    def validate_max_age(cls, value: int | None) -> int | None:
+        """Reject negative max_age values.
+
+        VAL-SCRAPE-032: negative maxAge returns 422.
+        """
+        if value is not None and value < 0:
+            raise ValueError(f"max_age must be >= 0, got {value}")
+        return value
+
+    @model_validator(mode="after")
+    def validate_cache_ages(self) -> "ScrapeOptions":
+        """Validate that min_age does not exceed max_age.
+
+        VAL-SCRAPE-033: minAge greater than maxAge is rejected.
+        """
+        min_age = self.min_age
+        max_age = self.max_age
+        if min_age is not None and max_age is not None and min_age > max_age:
+            raise ValueError(
+                f"min_age ({min_age}ms) cannot exceed max_age ({max_age}ms)"
+            )
+        return self
 
 
 class ScrapeRequest(BaseModel):
