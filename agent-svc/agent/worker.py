@@ -121,6 +121,7 @@ async def _process_crawl_async(
     delay: float | None = None,
     ignore_robots_txt: bool = False,
     robots_user_agent: str | None = None,
+    scrape_options: dict | None = None,
 ) -> None:
     """Process a crawl job with full lifecycle support.
 
@@ -189,6 +190,7 @@ async def _process_crawl_async(
             robots_user_agent=robots_user_agent,
             max_duration_seconds=settings.crawl_max_duration_seconds,
             idle_timeout_seconds=settings.crawl_idle_timeout_seconds,
+            scrape_options=scrape_options,
         )
         engine = CrawlEngine(scraper, store=store, options=options)
 

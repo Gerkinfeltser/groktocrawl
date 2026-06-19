@@ -6,6 +6,11 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 
+# ── Valid scrape format values ──────────────────────────────────
+VALID_SCRAPE_FORMATS: frozenset[str] = frozenset(
+    {"markdown", "html", "links", "screenshot", "rawHtml", "screenshot@fullPage"}
+)
+
 
 class ErrorDetail(BaseModel):
     """A single field-level validation error."""
@@ -21,6 +26,92 @@ class ErrorResponse(BaseModel):
     error: str = "An unexpected error occurred"
     error_code: str = "INTERNAL_ERROR"
     details: list[ErrorDetail] | dict | None = None
+
+
+class ScrapeOptions(BaseModel):
+    """Firecrawl-compatible scrape options for controlling per-page extraction.
+
+    All fields are optional with documented defaults. When ``None`` (or omitted),
+    the scraper-svc applies its own sensible defaults for each field.
+
+    Attributes:
+        formats: List of output formats to return. Allowed values:
+            ``markdown`` (default), ``html``, ``links``, ``screenshot``,
+            ``rawHtml``, ``screenshot@fullPage``.
+        only_main_content: When True, strip navigation, header, footer and
+            other boilerplate from the extracted content (default: True).
+        include_tags: If set, only content from these CSS/tag selectors is
+            included in the output.
+        exclude_tags: If set, content from these CSS/tag selectors is removed
+            from the output.
+        wait_for: Time in milliseconds to wait for the page to load/stabilize
+            before extracting content. Useful for JS-rendered SPAs.
+        mobile: When True, use a mobile user-agent and viewport dimensions
+            (default: False).
+        timeout: Per-page timeout in milliseconds (default: 30000, minimum: 1000).
+        headers: Custom HTTP headers to forward with the request (e.g.,
+            ``{"Authorization": "Bearer ..."}``).
+        remove_base64_images: When True, strip ``data:image/...`` URIs from
+            the extracted content (default: False).
+    """
+
+    model_config = ConfigDict(populate_by_name=True, alias_generator=to_camel)
+
+    formats: list[str] = Field(
+        default=["markdown"],
+        description="Output formats: markdown, html, links, etc.",
+    )
+    only_main_content: bool = Field(
+        default=True,
+        description="Strip navigation/header/footer boilerplate",
+    )
+    include_tags: list[str] | None = Field(
+        default=None, description="Only include content from these selectors"
+    )
+    exclude_tags: list[str] | None = Field(
+        default=None, description="Exclude content from these selectors"
+    )
+    wait_for: int | None = Field(
+        default=None, ge=0, description="Wait time in milliseconds before extraction"
+    )
+    mobile: bool = Field(default=False, description="Use mobile viewport and UA")
+    timeout: int = Field(
+        default=30000, ge=1000, description="Per-page timeout in milliseconds"
+    )
+    headers: dict[str, str] | None = Field(
+        default=None, description="Custom HTTP headers"
+    )
+    remove_base64_images: bool = Field(
+        default=False, description="Strip data:image/... URIs from output"
+    )
+
+    @field_validator("formats")
+    @classmethod
+    def validate_formats(cls, value: list[str]) -> list[str]:
+        """Validate that each format is a known/recognised value."""
+        if not value:
+            raise ValueError("formats must be a non-empty list")
+        for fmt in value:
+            if fmt not in VALID_SCRAPE_FORMATS:
+                allowed = ", ".join(sorted(VALID_SCRAPE_FORMATS))
+                raise ValueError(f"Invalid format '{fmt}'. Allowed values: {allowed}")
+        return value
+
+    @field_validator("timeout")
+    @classmethod
+    def validate_timeout(cls, value: int) -> int:
+        """Reject out-of-range timeout values."""
+        if value < 1000:
+            raise ValueError(f"timeout must be >= 1000ms, got {value}")
+        return value
+
+    @field_validator("wait_for")
+    @classmethod
+    def validate_wait_for(cls, value: int | None) -> int | None:
+        """Reject negative wait_for values."""
+        if value is not None and value < 0:
+            raise ValueError(f"wait_for must be >= 0, got {value}")
+        return value
 
 
 class ScrapeRequest(BaseModel):
@@ -131,6 +222,10 @@ class CrawlRequest(BaseModel):
     robots_user_agent: str | None = Field(
         default=None,
         description="Custom User-Agent string for robots.txt evaluation. When set, robots.txt rules are evaluated against this User-Agent instead of the default bot UA.",
+    )
+    scrape_options: ScrapeOptions | None = Field(
+        default=None,
+        description="Per-page scrape options controlling output format, content filtering, viewport, and timeout behavior. Applied to every page in the crawl, including the start URL.",
     )
 
     @field_validator("url")

@@ -344,6 +344,9 @@ async def create_crawl(
             delay=body.delay,
             ignore_robots_txt=body.ignore_robots_txt,
             robots_user_agent=body.robots_user_agent,
+            scrape_options=body.scrape_options.model_dump(mode="json", by_alias=True)
+            if body.scrape_options
+            else None,
         )
     )
     return CrawlCreateResponse(id=job_id)

@@ -234,6 +234,7 @@ async def smart_scrape(
     force_browser: bool = False,
     ignore_robots_txt: bool = False,
     robots_user_agent: str | None = None,
+    scrape_options: dict | None = None,
 ) -> dict:
     """Try each tier in order. Return the first successful result with acceptable quality.
 

@@ -65,6 +65,10 @@ class CrawlOptions:
         robots_user_agent: Custom User-Agent string for robots.txt
             evaluation. When set, robots.txt rules are evaluated against
             this User-Agent instead of the default bot UA.
+        scrape_options: Optional dict of per-page scrape options (formats,
+            only_main_content, include_tags, exclude_tags, wait_for, mobile,
+            timeout, headers, remove_base64_images). Forwarded to scraper-svc
+            on every page fetch.
     """
 
     max_pages: int = 10
@@ -84,6 +88,7 @@ class CrawlOptions:
     delay: float | None = None
     ignore_robots_txt: bool = False
     robots_user_agent: str | None = None
+    scrape_options: dict | None = None
 
 
 @dataclass
@@ -716,6 +721,7 @@ class CrawlEngine:
                         url,
                         ignore_robots_txt=self.options.ignore_robots_txt,
                         robots_user_agent=self.options.robots_user_agent,
+                        scrape_options=self.options.scrape_options,
                     ),
                     timeout=per_scrape_timeout,
                 )

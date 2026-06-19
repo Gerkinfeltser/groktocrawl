@@ -37,6 +37,7 @@ class ScraperClient:
         force_browser: bool = False,
         ignore_robots_txt: bool = False,
         robots_user_agent: str | None = None,
+        scrape_options: dict | None = None,
     ) -> dict:
         """Scrape a URL via the scraper service.
 
@@ -51,6 +52,10 @@ class ScraperClient:
 
         When ``robots_user_agent`` is set, it is used as the User-Agent for
         robots.txt evaluation instead of the default bot UA.
+
+        When ``scrape_options`` is set, it is forwarded as-is to the
+        scraper-svc ``/scrape`` endpoint so that per-page extraction
+        options (formats, content filtering, viewport, etc.) are applied.
         """
         start = time.monotonic()
         try:
@@ -61,6 +66,8 @@ class ScraperClient:
                 body["ignore_robots_txt"] = True
             if robots_user_agent is not None:
                 body["robots_user_agent"] = robots_user_agent
+            if scrape_options:
+                body["scrape_options"] = scrape_options
             resp = await self._client.post(
                 f"{self.base_url}/scrape",
                 json=body,

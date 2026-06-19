@@ -3674,3 +3674,235 @@ class TestCrawlRequestPoliteness:
         req = CrawlRequest(url="http://example.com")
         assert req.ignore_robots_txt is False
         assert req.robots_user_agent is None
+
+
+class TestScrapeOptionsModel:
+    """Unit tests for the ScrapeOptions Pydantic model.
+
+    Covers:
+    - Default values
+    - All fields accept and return correct types
+    - Invalid formats produce validation error
+    - Negative/zero timeout produces validation error
+    - Negative wait_for produces validation error
+    - CamelCase input via populate_by_name
+    - model_dump(by_alias=True) produces camelCase keys
+    - CrawlRequest accepts optional scrape_options
+    - model_dump produces dict suitable for JSON serialization
+    """
+
+    def test_defaults(self):
+        """ScrapeOptions default values match Firecrawl defaults."""
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions()
+        assert opts.formats == ["markdown"]
+        assert opts.only_main_content is True
+        assert opts.include_tags is None
+        assert opts.exclude_tags is None
+        assert opts.wait_for is None
+        assert opts.mobile is False
+        assert opts.timeout == 30000
+        assert opts.headers is None
+        assert opts.remove_base64_images is False
+
+    def test_all_fields_custom(self):
+        """All ScrapeOptions fields accept custom values."""
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions(
+            formats=["markdown", "html", "links"],
+            only_main_content=False,
+            include_tags=["article", "p"],
+            exclude_tags=[".nav", "footer"],
+            wait_for=1000,
+            mobile=True,
+            timeout=30000,
+            headers={"Authorization": "Bearer test"},
+            remove_base64_images=True,
+        )
+        assert opts.formats == ["markdown", "html", "links"]
+        assert opts.only_main_content is False
+        assert opts.include_tags == ["article", "p"]
+        assert opts.exclude_tags == [".nav", "footer"]
+        assert opts.wait_for == 1000
+        assert opts.mobile is True
+        assert opts.timeout == 30000
+        assert opts.headers == {"Authorization": "Bearer test"}
+        assert opts.remove_base64_images is True
+
+    def test_invalid_format_raises_error(self):
+        """Invalid format name in formats list raises ValidationError."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ScrapeOptions(formats=["invalid_format"])
+
+    def test_negative_timeout_raises_error(self):
+        """Negative timeout value raises ValidationError."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ScrapeOptions(timeout=-1)
+
+    def test_zero_timeout_raises_error(self):
+        """Timeout of 0 raises ValidationError (minimum is 1000ms)."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ScrapeOptions(timeout=0)
+
+    def test_negative_wait_for_raises_error(self):
+        """Negative wait_for raises ValidationError."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ScrapeOptions(wait_for=-100)
+
+    def test_camelcase_input_accepted(self):
+        """CamelCase field names are accepted (populate_by_name)."""
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions(
+            **{
+                "formats": ["html"],
+                "onlyMainContent": False,
+                "includeTags": ["h1"],
+                "excludeTags": [".nav"],
+                "waitFor": 2000,
+                "mobile": True,
+                "timeout": 15000,
+                "headers": {"X-Custom": "val"},
+                "removeBase64Images": True,
+            }
+        )
+        assert opts.formats == ["html"]
+        assert opts.only_main_content is False
+        assert opts.include_tags == ["h1"]
+        assert opts.exclude_tags == [".nav"]
+        assert opts.wait_for == 2000
+        assert opts.mobile is True
+        assert opts.timeout == 15000
+        assert opts.headers == {"X-Custom": "val"}
+        assert opts.remove_base64_images is True
+
+    def test_model_dump_by_alias_produces_camelcase(self):
+        """model_dump(by_alias=True) produces camelCase keys."""
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions(
+            formats=["markdown"],
+            only_main_content=True,
+            include_tags=["article"],
+            exclude_tags=[".nav"],
+            wait_for=500,
+            mobile=False,
+            timeout=20000,
+            headers={"X-Test": "value"},
+            remove_base64_images=True,
+        )
+        dumped = opts.model_dump(mode="json", by_alias=True)
+        assert dumped["formats"] == ["markdown"]
+        assert dumped["onlyMainContent"] is True
+        assert dumped["includeTags"] == ["article"]
+        assert dumped["excludeTags"] == [".nav"]
+        assert dumped["waitFor"] == 500
+        assert dumped["mobile"] is False
+        assert dumped["timeout"] == 20000
+        assert dumped["headers"] == {"X-Test": "value"}
+        assert dumped["removeBase64Images"] is True
+        # snake_case keys should not appear
+        assert "only_main_content" not in dumped
+
+    def test_crawl_request_accepts_scrape_options(self):
+        """CrawlRequest accepts optional scrape_options field."""
+        from agent.models import CrawlRequest, ScrapeOptions
+
+        req = CrawlRequest(
+            url="http://example.com",
+            scrape_options=ScrapeOptions(formats=["links"], only_main_content=False),
+        )
+        assert req.scrape_options is not None
+        assert req.scrape_options.formats == ["links"]
+        assert req.scrape_options.only_main_content is False
+
+    def test_crawl_request_without_scrape_options(self):
+        """CrawlRequest without scrape_options defaults to None."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com")
+        assert req.scrape_options is None
+
+    def test_model_dump_json_serializable(self):
+        """model_dump(mode='json') produces JSON-serializable dict."""
+        import json
+
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions(
+            formats=["markdown", "html"],
+            only_main_content=False,
+            include_tags=["article", "p"],
+            exclude_tags=[".nav"],
+            wait_for=1000,
+            mobile=True,
+            timeout=30000,
+            headers={"Authorization": "Bearer test123"},
+            remove_base64_images=True,
+        )
+        dumped = opts.model_dump(mode="json")
+        # Should be JSON-serializable
+        json_str = json.dumps(dumped)
+        parsed = json.loads(json_str)
+        assert parsed["formats"] == ["markdown", "html"]
+        assert parsed["only_main_content"] is False
+        assert parsed["include_tags"] == ["article", "p"]
+        assert parsed["exclude_tags"] == [".nav"]
+        assert parsed["wait_for"] == 1000
+        assert parsed["mobile"] is True
+        assert parsed["timeout"] == 30000
+        assert parsed["headers"] == {"Authorization": "Bearer test123"}
+        assert parsed["remove_base64_images"] is True
+
+    def test_empty_formats_rejected(self):
+        """Empty formats list is rejected by validator."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ScrapeOptions(formats=[])
+
+    def test_valid_formats_enum(self):
+        """VAL_SCRAPE_FORMATS contains expected values."""
+        from agent.models import VALID_SCRAPE_FORMATS
+
+        assert "markdown" in VALID_SCRAPE_FORMATS
+        assert "html" in VALID_SCRAPE_FORMATS
+        assert "links" in VALID_SCRAPE_FORMATS
+        assert "screenshot" in VALID_SCRAPE_FORMATS
+        assert "rawHtml" in VALID_SCRAPE_FORMATS
+
+    def test_none_fields_in_model_dump(self):
+        """None fields like wait_for are not dropped in model_dump."""
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions()
+        dumped = opts.model_dump(mode="json")
+        # wait_for is None by default, should be present
+        assert "wait_for" in dumped
+        assert dumped["wait_for"] is None
+        assert "include_tags" in dumped
+        assert dumped["include_tags"] is None
+        assert "exclude_tags" in dumped
+        assert dumped["exclude_tags"] is None
+        assert "headers" in dumped
+        assert dumped["headers"] is None

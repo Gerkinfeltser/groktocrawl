@@ -106,6 +106,7 @@ class ScrapeRequest(BaseModel):
     force_browser: bool = False
     ignore_robots_txt: bool = False
     robots_user_agent: str | None = None
+    scrape_options: dict | None = None
 
 
 class DownloadData(BaseModel):
@@ -220,6 +221,7 @@ async def scrape(request: ScrapeRequest):
             force_browser=request.force_browser,
             ignore_robots_txt=request.ignore_robots_txt,
             robots_user_agent=request.robots_user_agent,
+            scrape_options=request.scrape_options,
         )
         if result.get("error"):
             METRICS.counter(
