@@ -48,12 +48,12 @@ class TestClientCrawl:
     """Tests for Client.crawl() parameter mapping."""
 
     def test_basic_crawl_sends_correct_data(self, client):
-        """Basic crawl sends url, limit, and maxDepth."""
+        """Basic crawl sends url, limit, and max_depth."""
 
         def _fake_request(method, path, json_data=None, params=None):
             assert json_data["url"] == "http://example.com"
             assert json_data["limit"] == 50
-            assert json_data["maxDepth"] == 2
+            assert json_data["max_depth"] == 2
             return {"success": True, "id": "crawl-1234-uuid"}
 
         client._request = _fake_request
@@ -61,10 +61,10 @@ class TestClientCrawl:
         assert result["id"] == "crawl-1234-uuid"
 
     def test_crawl_sends_include_paths(self, client):
-        """include_paths is passed as includePaths."""
+        """include_paths is passed as include_paths."""
 
         def _fake_request(method, path, json_data=None, params=None):
-            assert json_data["includePaths"] == ["/blog/*", "/docs/*"]
+            assert json_data["include_paths"] == ["/blog/*", "/docs/*"]
             return {"success": True, "id": "job-1"}
 
         client._request = _fake_request
@@ -75,10 +75,10 @@ class TestClientCrawl:
         assert result["id"] == "job-1"
 
     def test_crawl_sends_exclude_paths(self, client):
-        """exclude_paths is passed as excludePaths."""
+        """exclude_paths is passed as exclude_paths."""
 
         def _fake_request(method, path, json_data=None, params=None):
-            assert json_data["excludePaths"] == ["/admin/*"]
+            assert json_data["exclude_paths"] == ["/admin/*"]
             return {"success": True, "id": "job-1"}
 
         client._request = _fake_request
@@ -89,10 +89,10 @@ class TestClientCrawl:
         assert result["id"] == "job-1"
 
     def test_crawl_sends_max_pages(self, client):
-        """max_pages is passed as maxPages."""
+        """max_pages is passed as max_pages."""
 
         def _fake_request(method, path, json_data=None, params=None):
-            assert json_data["maxPages"] == 5
+            assert json_data["max_pages"] == 5
             return {"success": True, "id": "job-1"}
 
         client._request = _fake_request
@@ -103,10 +103,10 @@ class TestClientCrawl:
         assert result["id"] == "job-1"
 
     def test_crawl_sends_max_depth(self, client):
-        """max_depth is passed as maxDepth."""
+        """max_depth is passed as max_depth."""
 
         def _fake_request(method, path, json_data=None, params=None):
-            assert json_data["maxDepth"] == 1
+            assert json_data["max_depth"] == 1
             return {"success": True, "id": "job-1"}
 
         client._request = _fake_request
@@ -117,10 +117,10 @@ class TestClientCrawl:
         assert result["id"] == "job-1"
 
     def test_crawl_sends_ignore_query_parameters(self, client):
-        """ignore_query_parameters=True sends ignoreQueryParameters."""
+        """ignore_query_parameters=True sends ignore_query_parameters."""
 
         def _fake_request(method, path, json_data=None, params=None):
-            assert json_data["ignoreQueryParameters"] is True
+            assert json_data["ignore_query_parameters"] is True
             return {"success": True, "id": "job-1"}
 
         client._request = _fake_request
@@ -134,7 +134,7 @@ class TestClientCrawl:
         """ignore_query_parameters=False does not send the field."""
 
         def _fake_request(method, path, json_data=None, params=None):
-            assert "ignoreQueryParameters" not in json_data
+            assert "ignore_query_parameters" not in json_data
             return {"success": True, "id": "job-1"}
 
         client._request = _fake_request
@@ -145,10 +145,10 @@ class TestClientCrawl:
         assert result["id"] == "job-1"
 
     def test_crawl_does_not_send_max_pages_when_none(self, client):
-        """max_pages=None does not send maxPages."""
+        """max_pages=None does not send max_pages."""
 
         def _fake_request(method, path, json_data=None, params=None):
-            assert "maxPages" not in json_data
+            assert "max_pages" not in json_data
             return {"success": True, "id": "job-1"}
 
         client._request = _fake_request
@@ -163,7 +163,7 @@ class TestClientCrawl:
 
         def _fake_request(method, path, json_data=None, params=None):
             assert json_data["limit"] == 50
-            assert json_data["maxPages"] == 5
+            assert json_data["max_pages"] == 5
             return {"success": True, "id": "job-1"}
 
         client._request = _fake_request
