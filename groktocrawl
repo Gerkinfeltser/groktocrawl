@@ -547,16 +547,16 @@ class Client:
         data: dict[str, Any] = {
             "url": url,
             "limit": limit,
-            "maxDepth": max_depth,
+            "max_depth": max_depth,
         }
         if max_pages is not None:
-            data["maxPages"] = max_pages
+            data["max_pages"] = max_pages
         if include_paths:
-            data["includePaths"] = include_paths
+            data["include_paths"] = include_paths
         if exclude_paths:
-            data["excludePaths"] = exclude_paths
+            data["exclude_paths"] = exclude_paths
         if ignore_query_parameters:
-            data["ignoreQueryParameters"] = True
+            data["ignore_query_parameters"] = True
         data.update(extra)
         return self._request("POST", "/crawl", json_data=data)
 

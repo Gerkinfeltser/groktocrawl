@@ -4,6 +4,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic.alias_generators import to_camel
 
 
 class ErrorDetail(BaseModel):
@@ -89,6 +90,8 @@ class AgentCancelResponse(BaseModel):
 
 
 class CrawlRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, alias_generator=to_camel)
+
     url: str
     max_pages: int = Field(
         default=10, ge=1, description="Maximum pages to scrape, must be >= 1"
