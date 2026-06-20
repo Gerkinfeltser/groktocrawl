@@ -139,11 +139,22 @@ class JobStore:
         return meta  # type: ignore[no-any-return]
 
     def complete_job(self, job_id: str, data: dict) -> None:
-        """Mark a job as completed with its result data."""
+        """Mark a job as completed with its result data.
+
+        Only transitions ``processing`` → ``completed``. If the current
+        status is ``cancelled``, ``failed``, or already ``completed``,
+        the status is left unchanged. This prevents a race where a
+        concurrent ``cancel_job()`` (e.g., via ``DELETE /v2/crawl/{id}``)
+        is silently overwritten.
+        """
         meta_raw = self.redis.get(f"job:{job_id}:meta")
         if meta_raw is None:
             return
         meta = json.loads(meta_raw)
+        if meta["status"] != "processing":
+            # Job was cancelled, failed, or already completed concurrently.
+            # Preserve the existing terminal status — do not overwrite.
+            return
         meta["status"] = "completed"
         meta["completed_at"] = _now_iso()
         self.redis.set(f"job:{job_id}:meta", json.dumps(meta), ex=_default_ttl())
@@ -152,11 +163,20 @@ class JobStore:
         self.redis.set(f"job:{job_id}:data", json.dumps(data), ex=_default_ttl())
 
     def fail_job(self, job_id: str, error: str) -> None:
-        """Mark a job as failed with an error message."""
+        """Mark a job as failed with an error message.
+
+        Only transitions ``processing`` → ``failed``. If the current
+        status is ``cancelled`` or already terminal, the status is left
+        unchanged. This prevents a race where a concurrent
+        ``cancel_job()`` is silently overwritten with ``failed``.
+        """
         meta_raw = self.redis.get(f"job:{job_id}:meta")
         if meta_raw is None:
             return
         meta = json.loads(meta_raw)
+        if meta["status"] != "processing":
+            # Preserve existing terminal status (e.g., cancelled).
+            return
         meta["status"] = "failed"
         meta["error"] = error
         meta["completed_at"] = _now_iso()
