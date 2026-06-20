@@ -12,6 +12,7 @@ Architecture:
     before proceeding.
 """
 
+import contextlib
 import hashlib
 import logging
 import re
@@ -170,10 +171,8 @@ class PolitenessManager:
 
             # Crawl-delay
             if line.lower().startswith("crawl-delay:"):
-                try:
+                with contextlib.suppress(ValueError):
                     crawl_delay = float(line.split(":", 1)[1].strip())
-                except ValueError:
-                    pass
 
             # Sitemap
             if line.lower().startswith("sitemap:"):

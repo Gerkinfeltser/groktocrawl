@@ -200,7 +200,7 @@ async def _run_multi_query_discover_and_scrape(
             *search_tasks, return_exceptions=True
         )
         for i, (query, result_tuple) in enumerate(  # type: ignore[misc]
-            zip(queries_to_run, search_results_list), start=1
+            zip(queries_to_run, search_results_list, strict=False), start=1
         ):
             logger.info("  [%d/%d] Searching: %s", i, len(queries_to_run), query)
             if isinstance(result_tuple, Exception):

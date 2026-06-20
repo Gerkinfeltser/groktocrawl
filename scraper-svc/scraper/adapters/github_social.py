@@ -616,8 +616,8 @@ def _render_discussion(data: dict) -> tuple[str, dict]:
     # Answer (for Q&A discussions)
     answer = data.get("answer")
     if answer and isinstance(answer, dict):
-        aa = answer.get("author", {}).get("login", "unknown")
-        ad = (answer.get("createdAt", "") or "")[:10]
+        answer.get("author", {}).get("login", "unknown")
+        (answer.get("createdAt", "") or "")[:10]
         ab = _fmt_body(answer.get("body"))
         parts.append("---\n## ✅ Answer  by @{aa}  _({ad})_\n")
         if ab:
@@ -767,7 +767,7 @@ def _render_commit(data: dict) -> tuple[str, dict]:
     committer_name = committer_obj.get(
         "name", committer_obj.get("user", {}).get("login", "")
     )
-    url = data.get("url", "")
+    data.get("url", "")
     parents = [p.get("oid", "")[:7] for p in (data.get("parents", {}).get("nodes", []))]
 
     parts.append(f"# {headline or sha}\n")
