@@ -16,6 +16,28 @@ TIER3_SITE = os.getenv("TIER3_FIXTURE_BASE_URL", "http://localhost:8006")
 SEMANTIC = os.getenv("SEMANTIC_BASE_URL", "http://localhost:8003")
 
 
+def _docker_available() -> bool:
+    """Check whether the Docker engine is available and the stack is running."""
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["docker", "compose", "ps", "--status", "running"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return "agent-svc" in result.stdout
+    except Exception:
+        return False
+
+
+require_docker = pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker stack not running — start with `docker compose up --build -d`",
+)
+
+
 def wait_for(url: str, path: str = "/health", timeout_s: int = 120):
     deadline = time.time() + timeout_s
     last_err = None
@@ -157,6 +179,7 @@ def test_agent_endpoints_return_job_and_status():
     assert payload["status"] in {"processing", "completed"}
 
 
+@require_docker
 def test_crawl_batch_search_and_map_endpoints_exist():
     crawl = httpx.post(AGENT + "/v2/crawl", json={"url": TEST_SITE}, timeout=120)
     assert crawl.status_code == 200
@@ -279,6 +302,7 @@ def test_activity_endpoint_structure():
     assert isinstance(payload["data"], list)
 
 
+@require_docker
 def test_activity_shows_active_crawl_job():
     """Creating a crawl job makes it appear in the activity feed."""
     # Create a crawl job
@@ -331,6 +355,7 @@ def test_activity_excludes_completed_agent_job():
     )
 
 
+@require_docker
 def test_activity_multi_type():
     """Multiple job types appear in the activity feed simultaneously."""
     # Create jobs of different types
@@ -829,6 +854,7 @@ def test_agent_streaming_returns_sse_events():
 # ── Crawl SSE Streaming Tests ─────────────────────────────────
 
 
+@require_docker
 def test_crawl_streaming_returns_sse_content_type():
     """POST /v2/crawl with stream:true returns text/event-stream."""
     r = httpx.post(
@@ -865,6 +891,7 @@ def test_crawl_streaming_returns_sse_content_type():
     assert done_event["latency_ms"] > 0
 
 
+@require_docker
 def test_crawl_streaming_page_event_content():
     """SSE page events contain url and markdown per scraped page."""
     r = httpx.post(
@@ -895,6 +922,7 @@ def test_crawl_streaming_page_event_content():
     assert isinstance(page.get("markdown"), str)
 
 
+@require_docker
 def test_crawl_streaming_progress_events():
     """SSE stream includes progress events during multi-page crawl."""
     r = httpx.post(
@@ -927,6 +955,7 @@ def test_crawl_streaming_progress_events():
     assert "done" in event_types
 
 
+@require_docker
 def test_crawl_streaming_done_event_summary():
     """SSE done event includes correct summary statistics."""
     r = httpx.post(
@@ -957,6 +986,7 @@ def test_crawl_streaming_done_event_summary():
     assert done_event["latency_ms"] > 0
 
 
+@require_docker
 def test_crawl_streaming_error_event_on_failure():
     """SSE stream emits error event when crawl start URL fails."""
     r = httpx.post(
@@ -987,6 +1017,7 @@ def test_crawl_streaming_error_event_on_failure():
     assert "error" in event_types or "done" in event_types
 
 
+@require_docker
 def test_crawl_streaming_has_location_header():
     """Streaming crawl response includes Location header for reconnection."""
     r = httpx.post(
@@ -1005,6 +1036,7 @@ def test_crawl_streaming_has_location_header():
     assert "/stream" in location
 
 
+@require_docker
 def test_crawl_streaming_reconnect_endpoint():
     """GET /v2/crawl/{id}/stream returns completed crawl results as SSE."""
     # First create a streaming crawl and capture the job ID from headers
@@ -1051,6 +1083,7 @@ def test_crawl_streaming_reconnect_endpoint():
     )
 
 
+@require_docker
 def test_crawl_streaming_global_headers():
     """SSE crawl response includes correct CORS and cache headers."""
     r = httpx.post(
@@ -1077,6 +1110,7 @@ def test_crawl_streaming_global_headers():
     # We just verify the response has correct streaming headers
 
 
+@require_docker
 def test_crawl_streaming_sse_ids_monotonic():
     """SSE events have monotonically increasing id fields."""
     r = httpx.post(
@@ -1104,6 +1138,7 @@ def test_crawl_streaming_sse_ids_monotonic():
         assert ids[i] > ids[i - 1], f"Non-monotonic id sequence: {ids}"
 
 
+@require_docker
 def test_crawl_streaming_client_disconnect_safe():
     """Client disconnect does not crash the crawl; results stored in Valkey.
 
@@ -1486,6 +1521,7 @@ def _assert_page_urls(pages, expected_urls_subset):
 # ── VAL-CRAWL-076: Full crawl produces expected page set ─────────
 
 
+@require_docker
 def test_crawl_full_fixture_page_set():
     """Crawl the test-site fixture root with default settings.
     Verify that the expected set of pages is present in results.
@@ -1516,6 +1552,7 @@ def test_crawl_full_fixture_page_set():
         assert "markdown" in p, f"Page {p.get('url')} missing markdown"
 
 
+@require_docker
 def test_crawl_two_identical_requests_distinct_jobs():
     """Two crawl requests with identical parameters create two distinct job IDs.
     VAL-CRAWL-077: No idempotency — each request is a separate job.
@@ -1534,6 +1571,7 @@ def test_crawl_two_identical_requests_distinct_jobs():
 # ── VAL-CROSS-001: Full crawl pipeline ────────────────────────────
 
 
+@require_docker
 def test_crawl_full_pipeline_sitemap_path_filters_concurrency():
     """Full crawl pipeline with sitemap + path filters + concurrency + scrapeOptions.
     VAL-CROSS-001: Exercise the complete crawl pipeline spanning all sub-features.
@@ -1577,6 +1615,7 @@ def test_crawl_full_pipeline_sitemap_path_filters_concurrency():
         )
 
 
+@require_docker
 def test_crawl_sitemap_only_mode_with_path_filters():
     """Sitemap-only mode + path filters: only sitemap URLs matching filters appear.
     VAL-CROSS-017: Sitemap-only + path filters compose correctly.
@@ -1599,6 +1638,7 @@ def test_crawl_sitemap_only_mode_with_path_filters():
         assert "/section/" in u, f"URL outside /section/ in sitemap-only mode: {u}"
 
 
+@require_docker
 def test_crawl_sitemap_skip_mode():
     """Sitemap skip mode: no sitemap URLs, HTML-only link discovery.
     VAL-CRAWL-046: sitemap='skip' disables sitemap fetching.
@@ -1628,6 +1668,7 @@ def test_crawl_sitemap_skip_mode():
 # ── VAL-CROSS-015: Crawl status reflects concurrent progress ─────
 
 
+@require_docker
 def test_crawl_status_monotonic_progress():
     """Crawl status endpoint shows monotonically increasing completed count.
     VAL-CROSS-015: During an active crawl, polling shows progress.
@@ -1676,6 +1717,7 @@ def test_crawl_status_monotonic_progress():
 # ── VAL-CROSS-019: Crawl response shape full parity ───────────────
 
 
+@require_docker
 def test_crawl_response_shape_parity():
     """Crawl status response matches Firecrawl v2 contract with all fields.
     VAL-CROSS-019: All fields present with correct types.
@@ -1735,6 +1777,7 @@ def test_crawl_response_shape_parity():
 
 
 @pytest.mark.xfail(strict=False, reason="Qdrant unstable under CI memory pressure")
+@require_docker
 def test_crawl_semantic_indexing():
     """Crawled pages appear in vector search after crawl completion.
     VAL-CROSS-004: Post-crawl, vector search retrieves crawled page content.
@@ -1783,6 +1826,7 @@ def test_crawl_semantic_indexing():
 # ── VAL-CROSS-005: Map → Crawl Pipeline ─────────────────────────
 
 
+@require_docker
 def test_crawl_map_pipeline():
     """Map URLs → feed to crawl via path filters.
     VAL-CROSS-005: Map endpoint discovers URLs that crawl can scrape.
@@ -1827,6 +1871,7 @@ def test_crawl_map_pipeline():
 # ── VAL-CROSS-006: NL→Params + Explicit Path Filters ────────────
 
 
+@require_docker
 def test_crawl_nl_params_preview():
     """Params-preview endpoint returns NL-derived crawl parameters.
     VAL-CROSS-006: /v2/crawl/params-preview returns valid parameters.
@@ -1848,6 +1893,7 @@ def test_crawl_nl_params_preview():
     ), f"Params preview response missing expected fields: {payload}"
 
 
+@require_docker
 def test_crawl_params_preview_to_crawl_fidelity():
     """Params-preview parameters, when used in crawl, produce consistent results.
     VAL-CROSS-016: Preview is an accurate predictor of crawl scope.
@@ -1890,6 +1936,7 @@ def test_crawl_params_preview_to_crawl_fidelity():
 # ── VAL-CROSS-010: CLI Crawl Command ────────────────────────────
 
 
+@require_docker
 def test_crawl_cli_no_poll_returns_job_id():
     """CLI crawl --no-poll returns a job ID and exits.
     VAL-CROSS-010 (partial): CLI creates crawl and returns job ID.
@@ -1926,6 +1973,7 @@ def test_crawl_cli_no_poll_returns_job_id():
     )
 
 
+@require_docker
 def test_crawl_cli_json_output():
     """CLI crawl --json outputs valid JSON.
     VAL-CROSS-010 (partial): --json flag produces machine-readable output.
@@ -1967,6 +2015,7 @@ def test_crawl_cli_json_output():
 # ── VAL-CROSS-008: Batch scrape vs Crawl coexistence ────────────
 
 
+@require_docker
 def test_crawl_and_batch_scrape_coexist():
     """Batch scrape and crawl run simultaneously without interference.
     VAL-CROSS-008: Both job types complete independently.
@@ -2015,6 +2064,7 @@ def test_crawl_and_batch_scrape_coexist():
 # ── VAL-CROSS-021: Crawl error recovery ──────────────────────────
 
 
+@require_docker
 def test_crawl_error_recovery_single_page_failure():
     """Single page failure does not derail the entire crawl.
     VAL-CROSS-021: Crawl continues past failing pages, status is 'completed'.
@@ -2043,6 +2093,7 @@ def test_crawl_error_recovery_single_page_failure():
 # ── VAL-CROSS-025: Crawl → Extract Pipeline ─────────────────────
 
 
+@require_docker
 def test_crawl_extract_pipeline():
     """Crawled page URLs can be fed into /v2/extract.
     VAL-CROSS-025: Crawl output can seed an extract job.
@@ -2096,6 +2147,7 @@ def test_crawl_extract_pipeline():
 # ── VAL-CROSS-026: Crawl → Agent Research Pipeline ──────────────
 
 
+@require_docker
 def test_crawl_agent_pipeline():
     """Crawled page URLs can be fed as context into /v2/agent.
     VAL-CROSS-026: Crawl output can seed an agent research job.
@@ -2148,6 +2200,7 @@ def test_crawl_agent_pipeline():
 # ── VAL-CROSS-040: Activity feed with mixed job types ────────────
 
 
+@require_docker
 def test_crawl_activity_feed_mixed_types():
     """Activity feed lists crawl, agent, and batch scrape simultaneously.
     VAL-CROSS-040: Activity endpoint shows crawl entries with correct kind.
@@ -2181,6 +2234,7 @@ def test_crawl_activity_feed_mixed_types():
 # ── VAL-CROSS-012: Crawl caching + content dedup ─────────────────
 
 
+@require_docker
 def test_crawl_caching_reduces_scraper_calls():
     """Second crawl of same site uses cache, reducing scraper calls.
     VAL-CROSS-012: maxAge caching reuses cached pages.
@@ -2237,6 +2291,7 @@ def test_crawl_caching_reduces_scraper_calls():
     # but log the comparison for debugging
 
 
+@require_docker
 def test_crawl_content_dedup_mirror_pages():
     """Crawl with content hash dedup skips byte-identical pages.
     VAL-CRAWL-012, VAL-CRAWL-013: No duplicate content in crawl results.
@@ -2265,6 +2320,7 @@ def test_crawl_content_dedup_mirror_pages():
 # ── VAL-CROSS-028: Indexing failure does not fail crawl ──────────
 
 
+@require_docker
 def test_crawl_survives_indexing_failure():
     """Crawl completes successfully even if Qdrant is unavailable.
     VAL-CROSS-028: Indexing failure is non-fatal to the crawl job.
@@ -2285,6 +2341,7 @@ def test_crawl_survives_indexing_failure():
 # ── VAL-CROSS-044: scrapeOptions + content dedup ─────────────────
 
 
+@require_docker
 def test_crawl_scrape_options_content_dedup_interaction():
     """scrapeOptions and content dedup work correctly together.
     VAL-CROSS-044: Different scrapeOptions on same URL produce different results.
@@ -2315,6 +2372,7 @@ def test_crawl_scrape_options_content_dedup_interaction():
 # ── Crawl cancellation and status ──────────────────────────────
 
 
+@require_docker
 def test_crawl_cancel_mid_flight():
     """Cancel an in-progress crawl and verify cancelled status.
     VAL-CROSS-003: Mid-flight cancellation stops processing and transitions status.
@@ -2362,6 +2420,7 @@ def test_crawl_cancel_mid_flight():
     )
 
 
+@require_docker
 def test_crawl_cancel_completed_job_returns_error():
     """Cancel an already-completed crawl returns error.
     VAL-CRAWL-028: Cancelling completed job returns 404 or 4xx.
@@ -2386,6 +2445,7 @@ def test_crawl_cancel_completed_job_returns_error():
 # ── VAL-CROSS-039: Per-client rate limit on crawl creation ────────
 
 
+@require_docker
 def test_crawl_rate_limit_respected():
     """Per-client rate limit on crawl creation is respected (429 on excess).
     VAL-CROSS-039: Rate limiter blocks excessive crawl creations.
@@ -2420,6 +2480,7 @@ def test_crawl_rate_limit_respected():
 # ── Crawl pagination ───────────────────────────────────────────
 
 
+@require_docker
 def test_crawl_pagination_next_field():
     """Crawl results with many pages include next field for pagination.
     VAL-CROSS-037: Large results produce paginated response with next URL.
@@ -2453,6 +2514,7 @@ def test_crawl_pagination_next_field():
 # ── Crawl with specific settings ────────────────────────────────
 
 
+@require_docker
 def test_crawl_with_scrape_options():
     """Crawl with custom scrapeOptions applies them to all pages.
     VAL-CRAWL-051: scrape_options affect every page in crawl results.
@@ -2482,6 +2544,7 @@ def test_crawl_with_scrape_options():
     assert len(md) > 0, "Markdown content is empty"
 
 
+@require_docker
 def test_crawl_with_delay():
     """Crawl with delay enforces sequential processing.
     VAL-CRAWL-043: delay forces sequential scrapes with inter-page sleep.
@@ -2516,6 +2579,7 @@ def test_crawl_with_delay():
         )
 
 
+@require_docker
 def test_crawl_max_depth_0():
     """max_depth=0 scrapes only the start URL.
     VAL-CRAWL-006: Depth-0 crawl returns exactly the start page.
@@ -2539,6 +2603,7 @@ def test_crawl_max_depth_0():
     )
 
 
+@require_docker
 def test_crawl_include_paths_filters():
     """include_paths filters to only matching URLs.
     VAL-CRAWL-008: Path filter restricts crawl to matching paths.
@@ -2559,6 +2624,7 @@ def test_crawl_include_paths_filters():
         assert "/pricing" in u, f"URL outside include_paths filter: {u}"
 
 
+@require_docker
 def test_crawl_exclude_paths_filters():
     """exclude_paths prevents scraping of matching URLs.
     VAL-CRAWL-010: Path filter excludes matching paths.
@@ -2580,6 +2646,7 @@ def test_crawl_exclude_paths_filters():
     assert len(pricing_urls) == 0, f"Excluded pricing URLs found: {pricing_urls}"
 
 
+@require_docker
 def test_crawl_include_exclude_precedence():
     """exclude_paths takes precedence over include_paths.
     VAL-CRAWL-011: When both are set, exclude wins.
@@ -2607,6 +2674,7 @@ def test_crawl_include_exclude_precedence():
         assert "page-2" not in u, f"Excluded page-2 URL found: {u}"
 
 
+@require_docker
 def test_crawl_ignore_query_parameters():
     """ignore_query_parameters collapses query-string variants.
     VAL-CRAWL-015: Query parameter variants treated as same page.
@@ -2627,6 +2695,7 @@ def test_crawl_ignore_query_parameters():
     assert result["completed"] >= 1
 
 
+@require_docker
 def test_crawl_empty_site_return_one_page():
     """Crawl a page with no links returns exactly the start page.
     VAL-CRAWL-021: Site with no outgoing links returns 1 page.
@@ -2646,6 +2715,7 @@ def test_crawl_empty_site_return_one_page():
     assert result["completed"] >= 1
 
 
+@require_docker
 def test_crawl_with_max_pages_1():
     """max_pages=1 returns exactly one page.
     VAL-CRAWL-004: Single page crawl stops at the start URL.
@@ -2664,6 +2734,7 @@ def test_crawl_with_max_pages_1():
     assert len(pages) == 1
 
 
+@require_docker
 def test_crawl_active_endpoint():
     """GET /v2/crawl/active lists running crawl jobs.
     VAL-CRAWL-064: Active endpoint shows crawl-specific fields.
@@ -2710,6 +2781,7 @@ def test_crawl_active_endpoint():
     )
 
 
+@require_docker
 def test_crawl_non_existent_job_404():
     """Polling a non-existent crawl job returns 404.
     VAL-CRAWL-066: GET /v2/crawl/<random-uuid> returns 404.
@@ -2723,6 +2795,7 @@ def test_crawl_non_existent_job_404():
     assert data.get("error_code") == "NOT_FOUND"
 
 
+@require_docker
 def test_crawl_active_empty():
     """GET /v2/crawl/active returns empty list when no crawls running."""
     r = httpx.get(AGENT + "/v2/crawl/active", timeout=10)
@@ -2735,6 +2808,7 @@ def test_crawl_active_empty():
 # ── Crawl + /v2/crawl/errors ─────────────────────────────────────
 
 
+@require_docker
 def test_crawl_errors_endpoint_structure():
     """GET /v2/crawl/{id}/errors returns valid structure.
     VAL-CRAWL-019: Errors endpoint returns properly structured error data.
@@ -2765,6 +2839,7 @@ def test_crawl_errors_endpoint_structure():
 # ── Concurrency test ──────────────────────────────────────────────
 
 
+@require_docker
 def test_crawl_concurrent_multiple_jobs():
     """Multiple concurrent crawl jobs are independent.
     VAL-CRAWL-063: Two simultaneous crawls produce independent results.
@@ -2803,6 +2878,7 @@ def test_crawl_concurrent_multiple_jobs():
 # ── Validation error handling ──────────────────────────────────
 
 
+@require_docker
 def test_crawl_invalid_url_rejected():
     """Invalid URL returns 422 validation error at creation.
     VAL-CRAWL-052: Malformed URL is rejected with 422.
@@ -2818,6 +2894,7 @@ def test_crawl_invalid_url_rejected():
     assert data.get("error_code") == "INVALID_REQUEST"
 
 
+@require_docker
 def test_crawl_non_http_scheme_rejected():
     """Non-HTTP/HTTPS URL scheme returns 422.
     VAL-CRAWL-053: ftp://, file:// etc. are rejected.
@@ -2832,6 +2909,7 @@ def test_crawl_non_http_scheme_rejected():
     assert data.get("success") is False
 
 
+@require_docker
 def test_crawl_max_pages_zero_rejected():
     """max_pages=0 returns 422 validation error.
     VAL-CRAWL-067: Zero max_pages rejected at job creation.
@@ -2846,6 +2924,7 @@ def test_crawl_max_pages_zero_rejected():
     assert data.get("success") is False
 
 
+@require_docker
 def test_crawl_max_depth_negative_rejected():
     """Negative max_depth returns 422 validation error.
     VAL-CRAWL-068: Negative max_depth rejected.
@@ -2860,6 +2939,7 @@ def test_crawl_max_depth_negative_rejected():
     assert data.get("success") is False
 
 
+@require_docker
 def test_crawl_max_pages_string_rejected():
     """Non-integer max_pages returns 422 validation error.
     VAL-CRAWL-090: Type mismatch on max_pages rejected.
@@ -2877,6 +2957,7 @@ def test_crawl_max_pages_string_rejected():
 # ── Crawl edge cases ───────────────────────────────────────────
 
 
+@require_docker
 def test_crawl_self_referencing_links_no_infinite_loop():
     """Crawl of a page with self-referencing links completes normally.
     VAL-CRAWL-069: Self-referencing links don't cause infinite loops.
@@ -2895,6 +2976,7 @@ def test_crawl_self_referencing_links_no_infinite_loop():
     assert result["completed"] >= 1
 
 
+@require_docker
 def test_crawl_exclude_paths_matches_all():
     """exclude_paths matching everything returns 0 pages.
     VAL-CRAWL-029: Exclude all returns empty results.
@@ -2912,6 +2994,7 @@ def test_crawl_exclude_paths_matches_all():
     assert len(pages) == 0, f"Expected 0 pages with exclude all, got {len(pages)}"
 
 
+@require_docker
 def test_crawl_include_paths_matches_none():
     """include_paths matching nothing returns 0 pages.
     VAL-CRAWL-030: Include none returns empty results.
@@ -2929,6 +3012,7 @@ def test_crawl_include_paths_matches_none():
     assert len(pages) == 0, f"Expected 0 pages with unmatched include, got {len(pages)}"
 
 
+@require_docker
 def test_crawl_creates_separate_jobs():
     """Two identical crawl requests create distinct job IDs.
     VAL-CRAWL-077: No idempotency — each request is a separate job.
@@ -2944,6 +3028,7 @@ def test_crawl_creates_separate_jobs():
     assert result2["status"] == "completed"
 
 
+@require_docker
 def test_crawl_with_robots_txt():
     """Crawl respects robots.txt by default.
     VAL-CROSS-011: robots.txt disallowed paths are not crawled.
@@ -2968,6 +3053,7 @@ def test_crawl_with_robots_txt():
             assert disallowed not in u, f"robots.txt disallowed URL found: {u}"
 
 
+@require_docker
 def test_crawl_ignore_robots_txt():
     """ignore_robots_txt: true bypasses robots.txt restrictions.
     VAL-CRAWL-044: Bypass disallowed paths when flag is set.
@@ -2986,6 +3072,7 @@ def test_crawl_ignore_robots_txt():
     assert result["completed"] >= 1
 
 
+@require_docker
 def test_crawl_max_depth_1_scrapes_children():
     """max_depth=1 scrapes start URL and direct children.
     VAL-CRAWL-007: Depth-1 crawl follows links on start page.
@@ -3009,6 +3096,7 @@ def test_crawl_max_depth_1_scrapes_children():
     assert len(child_urls) >= 1, f"No child URLs found with max_depth=1: {page_urls}"
 
 
+@require_docker
 def test_crawl_no_duplicate_urls():
     """Crawl produces no duplicate URLs in results.
     VAL-CRAWL-012: Each URL appears at most once.
@@ -3028,6 +3116,7 @@ def test_crawl_no_duplicate_urls():
     assert len(urls) == len(set(urls)), f"Duplicate URLs found: {urls}"
 
 
+@require_docker
 def test_crawl_with_max_concurrency():
     """Crawl with max_concurrency > 1 processes multiple pages.
     VAL-CRAWL-042: Concurrent crawl completes successfully.
@@ -3045,6 +3134,7 @@ def test_crawl_with_max_concurrency():
     assert result["completed"] >= 1
 
 
+@require_docker
 def test_crawl_sitemap_respects_max_pages():
     """Crawl respects max_pages even when sitemap has more URLs.
     VAL-CRAWL-059: max_pages is a hard limit regardless of sitemap size.
