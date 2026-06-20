@@ -230,7 +230,7 @@ jobs:
           docker cp tests/. "$svc":/app/tests/
           # Copy service source packages so tests can import them
           # Each package_dir (e.g. scraper-svc/scraper) becomes /app/<package_dir>/
-          for pkg in scraper-svc/scraper parse-svc/parse_svc portal-svc/portal browser-svc/browser_svc search-svc/search_svc llm-svc/llm_svc; do
+          for pkg in agent-svc/agent scraper-svc/scraper parse-svc/parse_svc portal-svc/portal browser-svc/browser_svc search-svc/search_svc llm-svc/llm_svc; do
             docker compose exec -T agent-svc mkdir -p "/app/$pkg"
             docker cp "$pkg/." "$svc:/app/$pkg/"
           done
