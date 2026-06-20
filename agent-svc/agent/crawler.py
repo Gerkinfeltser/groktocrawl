@@ -24,6 +24,7 @@ import httpx
 
 from .link_extractor import extract_links, filter_links
 from .scraper_client import ScraperClient
+from .sitemap_parser import SitemapParser
 from .store import JobStore
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ class CrawlOptions:
     ignore_query_parameters: bool = False
     regex_on_full_url: bool = False
     verbose: bool = False
+    sitemap_mode: str = "include"  # "include" | "skip" | "only"
     allow_subdomains: bool = False
     allow_external_links: bool = False
     max_duration_seconds: int = 1800
@@ -367,8 +369,52 @@ class CrawlEngine:
         parsed_start = urlparse(start_url)
         base_domain = parsed_start.hostname.lower() if parsed_start.hostname else ""
 
-        # Seed the BFS queue
+        # Seed the BFS queue with start URL (DO NOT add to _seen — the main
+        # loop adds to _seen when it pops each URL. Adding here would cause
+        # the main loop's dedup check to skip the start URL.)
         self._queue.append((start_url, 0))
+        start_normalized = self.normalize_url(start_url)
+
+        # Seed with sitemap URLs if sitemap_mode is not "skip"
+        sitemap_seeded_count = 0
+        if self.options.sitemap_mode != "skip":
+            try:
+                sitemap_urls = await self._fetch_sitemap_urls(base_domain)
+            except Exception as exc:
+                logger.warning(
+                    "Sitemap fetch failed for %s: %s — falling back to HTML-only discovery",
+                    base_domain,
+                    exc,
+                )
+                sitemap_urls = []
+            if sitemap_urls:
+                # Truncate sitemap URLs to respect max_pages (reserve 1 for start URL)
+                remaining = self.options.max_pages - 1
+                if remaining > 0:
+                    sitemap_urls = sitemap_urls[:remaining]
+                sitemap_dedup: set[str] = set()
+                for sm_url in sitemap_urls:
+                    sm_normalized = self.normalize_url(sm_url)
+                    # Skip if duplicate within sitemap, or if it matches
+                    # the start URL (already in queue — will be deduped
+                    # by the main loop's seen-set).  The sitemap URL is
+                    # NOT added to self._seen here because the main loop
+                    # reads _seen to decide whether to scrape. If we added
+                    # it here, the main loop would skip it.
+                    if (
+                        sm_normalized in sitemap_dedup
+                        or sm_normalized == start_normalized
+                    ):
+                        continue
+                    sitemap_dedup.add(sm_normalized)
+                    self._queue.appendleft((sm_url, 0))
+                    sitemap_seeded_count += 1
+                logger.info(
+                    "Seeded %d sitemap URLs into crawl queue for %s",
+                    sitemap_seeded_count,
+                    base_domain,
+                )
+
         last_store_update = time.monotonic()
         crawl_start_time = time.monotonic()
         last_completion_time = crawl_start_time
@@ -534,7 +580,8 @@ class CrawlEngine:
                     )
 
             # Discover child links if within max_depth
-            if depth < self.options.max_depth:
+            # In "only" mode, sitemap URLs are the exclusive source — skip HTML link discovery
+            if depth < self.options.max_depth and self.options.sitemap_mode != "only":
                 html = await self._get_html(url)
                 if html:
                     child_links = extract_links(html, url)
@@ -575,6 +622,39 @@ class CrawlEngine:
         return normalize_url(
             url, ignore_query_parameters=self.options.ignore_query_parameters
         )
+
+    async def _fetch_sitemap_urls(self, domain: str) -> list[str]:
+        """Fetch sitemap URLs for the given domain.
+
+        Uses ``SitemapParser`` to discover and parse sitemaps from
+        robots.txt and common locations.
+
+        Args:
+            domain: The domain (hostname) to fetch sitemaps for.
+
+        Returns:
+            A list of unique, absolute URLs discovered from sitemaps.
+        """
+        try:
+            parser = SitemapParser(
+                client=self._html_client,
+                max_recursion_depth=3,
+            )
+            # Use the parser's own client management — it creates its
+            # own client if we don't pass one (but we already have one).
+            parser._client = self._html_client
+            urls = await parser.get_urls(
+                domain,
+                limit=self.options.max_pages * 2,  # generous outer limit
+            )
+            return urls
+        except Exception as exc:
+            logger.warning(
+                "Failed to fetch sitemaps for %s: %s — falling back to HTML-only discovery",
+                domain,
+                exc,
+            )
+            return []
 
     def cancel(self) -> None:
         """Signal the crawl to stop at the next opportunity."""

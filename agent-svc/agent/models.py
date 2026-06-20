@@ -101,6 +101,10 @@ class CrawlRequest(BaseModel):
     )
     limit: int | None = None
     ignore_sitemap: bool = False
+    sitemap: str = Field(
+        default="include",
+        description="Sitemap mode: 'include' (default), 'skip', or 'only'",
+    )
     ignore_query_parameters: bool = False
     include_paths: list[str] | None = None
     exclude_paths: list[str] | None = None
@@ -140,6 +144,24 @@ class CrawlRequest(BaseModel):
                     raise ValueError(
                         f"Invalid regex in {field_name}[{i}]: '{pattern}' — {exc}"
                     ) from exc
+        return self
+
+    @model_validator(mode="after")
+    def resolve_sitemap_mode(self) -> "CrawlRequest":
+        """Backward compatibility: ignore_sitemap=true → sitemap='skip'.
+
+        Also validates that sitemap is one of the allowed values.
+        """
+        # Backward compatibility: ignore_sitemap overrides sitemap field
+        if self.ignore_sitemap:
+            self.sitemap = "skip"
+
+        # Validate sitemap value
+        allowed = ("include", "skip", "only")
+        if self.sitemap not in allowed:
+            raise ValueError(
+                f"Invalid sitemap mode '{self.sitemap}'. Must be one of: {', '.join(allowed)}"
+            )
         return self
 
 
