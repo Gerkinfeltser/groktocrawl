@@ -56,7 +56,6 @@ async def deliver_webhook(
     event: str,
     job_id: str,
     data: dict | list | None = None,
-    webhook_id_key: str | None = None,
     task_tracker: object = None,
     success: bool = True,
     error: str | None = None,
@@ -83,9 +82,6 @@ async def deliver_webhook(
         data: Payload to include in the body. For crawl lifecycle events
               (started, completed, failed), pass ``[]``. For per-page
               events, pass ``[{url, markdown, ...}]``.
-        webhook_id_key: (Deprecated — UUID v4 is always unique.) Kept for
-                        backward compatibility; no longer used for ID
-                        generation.
         task_tracker: Optional ``TaskTracker`` instance. If provided, the
                       webhook delivery is spawned as a tracked background
                       task instead of executing inline.
