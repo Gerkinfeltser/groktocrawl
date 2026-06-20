@@ -616,13 +616,17 @@ class TestCrawlEngine:
 
     @pytest.mark.asyncio
     async def test_bfs_order(self, mock_scraper):
-        """Pages appear in BFS order: start URL, then depth-1, then depth-2."""
+        """Pages appear in BFS order: start URL, then depth-1, then depth-2.
+
+        Uses crawl_entire_domain=True so that non-child sibling/parent
+        links are followed (e.g., grandchild from child-a).
+        """
         from agent.crawler import CrawlEngine, CrawlOptions
 
         engine = CrawlEngine(
             mock_scraper,
             store=None,
-            options=CrawlOptions(max_pages=10, max_depth=2),
+            options=CrawlOptions(max_pages=10, max_depth=2, crawl_entire_domain=True),
         )
 
         async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
@@ -930,7 +934,11 @@ class TestPathFiltering:
 
     @pytest.mark.asyncio
     async def test_include_paths_start_url_matches(self, mock_scraper):
-        """When start URL matches include_paths, it is crawled."""
+        """When start URL matches include_paths, it is crawled.
+
+        Uses crawl_entire_domain=True to follow sibling paths under
+        /blog/ from /blog/index.
+        """
         from agent.crawler import CrawlEngine, CrawlOptions
 
         engine = CrawlEngine(
@@ -940,6 +948,7 @@ class TestPathFiltering:
                 max_pages=10,
                 max_depth=1,
                 include_paths=["/blog/*"],
+                crawl_entire_domain=True,
             ),
         )
 
@@ -1001,7 +1010,10 @@ class TestPathFiltering:
 
     @pytest.mark.asyncio
     async def test_include_paths_regex_mode(self, mock_scraper):
-        """include_paths with regex_on_full_url=True uses regex matching."""
+        """include_paths with regex_on_full_url=True uses regex matching.
+
+        Uses crawl_entire_domain=True to allow sibling paths to be followed.
+        """
         from agent.crawler import CrawlEngine, CrawlOptions
 
         engine = CrawlEngine(
@@ -1012,6 +1024,7 @@ class TestPathFiltering:
                 max_depth=1,
                 include_paths=["/section/page-[12]"],
                 regex_on_full_url=True,
+                crawl_entire_domain=True,
             ),
         )
 
@@ -1107,7 +1120,11 @@ class TestPathFiltering:
 
     @pytest.mark.asyncio
     async def test_exclude_overrides_include(self, mock_scraper):
-        """exclude_paths takes precedence over include_paths."""
+        """exclude_paths takes precedence over include_paths.
+
+        Uses crawl_entire_domain=True so sibling paths like /section/page-1
+        are followed from /section/index.
+        """
         from agent.crawler import CrawlEngine, CrawlOptions
 
         engine = CrawlEngine(
@@ -1118,6 +1135,7 @@ class TestPathFiltering:
                 max_depth=1,
                 include_paths=["/section/*"],
                 exclude_paths=["/section/page-2"],
+                crawl_entire_domain=True,
             ),
         )
 
@@ -1192,7 +1210,11 @@ class TestPathFiltering:
 
     @pytest.mark.asyncio
     async def test_glob_double_star_matches_any_depth(self, mock_scraper):
-        """Glob ** matches across directory boundaries."""
+        """Glob ** matches across directory boundaries.
+
+        Uses crawl_entire_domain=True so sibling paths like /blog/2024
+        are followed from /blog/index.
+        """
         from agent.crawler import CrawlEngine, CrawlOptions
 
         engine = CrawlEngine(
@@ -1202,6 +1224,7 @@ class TestPathFiltering:
                 max_pages=20,
                 max_depth=3,
                 include_paths=["/blog/**"],
+                crawl_entire_domain=True,
             ),
         )
 
@@ -1230,7 +1253,11 @@ class TestPathFiltering:
 
     @pytest.mark.asyncio
     async def test_regex_on_full_url_with_query_params(self, mock_scraper):
-        """regex_on_full_url matches against full URL including query params."""
+        """regex_on_full_url matches against full URL including query params.
+
+        Uses crawl_entire_domain=True so sibling paths are followed from
+        /start path.
+        """
         from agent.crawler import CrawlEngine, CrawlOptions
 
         engine = CrawlEngine(
@@ -1241,6 +1268,7 @@ class TestPathFiltering:
                 max_depth=1,
                 include_paths=[r"\?ref=partner"],
                 regex_on_full_url=True,
+                crawl_entire_domain=True,
             ),
         )
 
@@ -2032,3 +2060,597 @@ class TestCrawlEngineSitemap:
         assert "http://example.com/sitemap-page1" in urls
         assert "http://example.com/sitemap-page2" in urls
         assert "http://example.com/pricing" not in urls  # HTML link, not followed
+
+
+# ── Domain Scope Controls tests ─────────────────────────────────
+
+
+class TestDomainScopeControls:
+    """Tests for crawlEntireDomain, allowSubdomains, allowExternalLinks."""
+
+    @pytest.mark.asyncio
+    async def test_crawl_entire_domain_false_only_child_paths(self, mock_scraper):
+        """When crawlEntireDomain is False (default), only child paths are followed.
+
+        /section/page → /section/page/deeper ✅, /other ❌, / ❌
+        """
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=2,
+                crawl_entire_domain=False,
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/section/page/deeper">Deeper child</a>
+                <a href="http://example.com/other">Sibling/other</a>
+                <a href="http://example.com/">Root</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/section/page")
+
+        # Start URL + deeper child = 2 pages
+        # Sibling (/other) and root (/) should not be followed
+        assert result.completed == 2
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/section/page" in urls
+        assert "http://example.com/section/page/deeper" in urls
+        assert "http://example.com/other" not in urls
+        assert "http://example.com/" not in urls
+
+    @pytest.mark.asyncio
+    async def test_crawl_entire_domain_true_follows_all_same_domain(self, mock_scraper):
+        """When crawlEntireDomain is True, sibling/parent links are followed.
+
+        /section/page → /other ✅, / ✅
+        """
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=2,
+                crawl_entire_domain=True,
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/section/page/deeper">Deeper child</a>
+                <a href="http://example.com/other">Sibling/other</a>
+                <a href="http://example.com/">Root</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/section/page")
+
+        # Start URL + deeper child + other + root = 4 pages
+        assert result.completed == 4
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/section/page" in urls
+        assert "http://example.com/section/page/deeper" in urls
+        assert "http://example.com/other" in urls
+        assert "http://example.com/" in urls
+
+    @pytest.mark.asyncio
+    async def test_crawl_entire_domain_root_start_identical(self, mock_scraper):
+        """When start URL is root, crawlEntireDomain=false and true produce identical results."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        for crawl_entire in (False, True):
+            engine = CrawlEngine(
+                mock_scraper,
+                store=None,
+                options=CrawlOptions(
+                    max_pages=10,
+                    max_depth=2,
+                    crawl_entire_domain=crawl_entire,
+                ),
+            )
+
+            async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+                return MockPage.success(url, f"# Content of {url}")
+
+            mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+            with patch.object(engine, "_get_html") as mock_html:
+                mock_html.return_value = """
+                    <html><body>
+                    <a href="http://example.com/pricing">Pricing</a>
+                    <a href="http://example.com/about">About</a>
+                    </body></html>
+                """
+
+                result = await engine.run("http://example.com/")
+
+            # Both modes should find all children (everything is a child of root)
+            urls = [p["url"] for p in result.pages]
+            assert "http://example.com/" in urls
+            assert "http://example.com/pricing" in urls
+            assert "http://example.com/about" in urls
+
+    @pytest.mark.asyncio
+    async def test_allow_subdomains_false_blocks_subdomains(self, mock_scraper):
+        """When allowSubdomains is False (default), subdomain links are NOT followed."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=2,
+                allow_subdomains=False,
+                crawl_entire_domain=True,
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/pricing">Pricing</a>
+                <a href="http://docs.example.com/doc">Docs subdomain</a>
+                <a href="http://blog.example.com/post">Blog subdomain</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/")
+
+        # Start URL + pricing = 2 pages (subdomains blocked)
+        assert result.completed == 2
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/" in urls
+        assert "http://example.com/pricing" in urls
+        assert "http://docs.example.com/doc" not in urls
+        assert "http://blog.example.com/post" not in urls
+
+    @pytest.mark.asyncio
+    async def test_allow_subdomains_true_follows_subdomains(self, mock_scraper):
+        """When allowSubdomains is True, subdomain links ARE followed."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=2,
+                allow_subdomains=True,
+                crawl_entire_domain=True,
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/pricing">Pricing</a>
+                <a href="http://docs.example.com/doc">Docs subdomain</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/")
+
+        # Start URL + pricing + docs subdomain = 3 pages
+        assert result.completed == 3
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/" in urls
+        assert "http://example.com/pricing" in urls
+        assert "http://docs.example.com/doc" in urls
+
+    @pytest.mark.asyncio
+    async def test_allow_external_links_false_blocks_external(self, mock_scraper):
+        """When allowExternalLinks is False (default), external links are NOT followed."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=2,
+                allow_external_links=False,
+                crawl_entire_domain=True,
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/pricing">Pricing</a>
+                <a href="http://other.com/page">External other</a>
+                <a href="http://another.org/path">External another</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/")
+
+        # Start URL + pricing = 2 pages (external blocked)
+        assert result.completed == 2
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/" in urls
+        assert "http://example.com/pricing" in urls
+        assert "http://other.com/page" not in urls
+        assert "http://another.org/path" not in urls
+
+    @pytest.mark.asyncio
+    async def test_allow_external_links_true_follows_external(self, mock_scraper):
+        """When allowExternalLinks is True, external domain links ARE followed."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=2,
+                allow_external_links=True,
+                crawl_entire_domain=True,
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/pricing">Pricing</a>
+                <a href="http://other.com/page">External other</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/")
+
+        # Start URL + pricing + external = 3 pages
+        assert result.completed == 3
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/" in urls
+        assert "http://example.com/pricing" in urls
+        assert "http://other.com/page" in urls
+
+    @pytest.mark.asyncio
+    async def test_ssrf_guard_blocks_private_hosts(self, mock_scraper):
+        """SSRF guard blocks private host URLs regardless of allow_external_links."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=2,
+                allow_external_links=True,
+                crawl_entire_domain=True,
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/pricing">Pricing</a>
+                <a href="http://127.0.0.1/secret">Loopback</a>
+                <a href="http://10.0.0.1/internal">RFC 1918 10.x</a>
+                <a href="http://192.168.1.1/admin">RFC 1918 192.168.x</a>
+                <a href="http://169.254.169.254/latest/meta-data/">Metadata IP</a>
+                <a href="http://localhost:6379/valkey">Localhost</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/")
+
+        # Start URL + pricing = 2 pages (all private hosts blocked)
+        assert result.completed == 2
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/" in urls
+        assert "http://example.com/pricing" in urls
+        assert "http://127.0.0.1/secret" not in urls
+        assert "http://10.0.0.1/internal" not in urls
+        assert "http://192.168.1.1/admin" not in urls
+        assert "http://169.254.169.254/latest/meta-data/" not in urls
+        assert "http://localhost:6379/valkey" not in urls
+
+    @pytest.mark.asyncio
+    async def test_crawl_entire_domain_plus_allow_subdomains(self, mock_scraper):
+        """crawlEntireDomain + allowSubdomains: follow sibling/parent on subdomains too."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=20,
+                max_depth=3,
+                crawl_entire_domain=True,
+                allow_subdomains=True,
+                allow_external_links=False,
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/pricing">Pricing</a>
+                <a href="http://blog.example.com/post">Blog subdomain</a>
+                <a href="http://other.com/external">External</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/section/page")
+
+        # Start URL + pricing + blog subdomain = 3 pages
+        # External should be excluded
+        assert result.completed == 3
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/section/page" in urls
+        assert "http://example.com/pricing" in urls
+        assert "http://blog.example.com/post" in urls
+        assert "http://other.com/external" not in urls
+
+    @pytest.mark.asyncio
+    async def test_external_pages_respect_max_pages(self, mock_scraper):
+        """External pages count toward max_pages limit."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=3,
+                max_depth=2,
+                allow_external_links=True,
+                crawl_entire_domain=True,
+            ),
+        )
+
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/pricing">Pricing</a>
+                <a href="http://other.com/page1">External 1</a>
+                <a href="http://another.org/page2">External 2</a>
+                <a href="http://third.net/page3">External 3</a>
+                </body></html>
+            """
+
+            result = await engine.run("http://example.com/")
+
+        # max_pages=3: start URL + pricing + 1 external = 3
+        assert result.completed <= 3
+        assert len(result.pages) <= 3
+
+
+# ── CrawlRequest scope control field validation tests ───────────
+
+
+class TestCrawlRequestScopeControlValidation:
+    """Tests for CrawlRequest scope control field validation."""
+
+    def test_crawl_entire_domain_default_false(self):
+        """crawl_entire_domain defaults to False."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com")
+        assert req.crawl_entire_domain is False
+
+    def test_crawl_entire_domain_can_be_true(self):
+        """crawl_entire_domain can be set to True."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com", crawl_entire_domain=True)
+        assert req.crawl_entire_domain is True
+
+    def test_allow_subdomains_default_false(self):
+        """allow_subdomains defaults to False."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com")
+        assert req.allow_subdomains is False
+
+    def test_allow_subdomains_can_be_true(self):
+        """allow_subdomains can be set to True."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com", allow_subdomains=True)
+        assert req.allow_subdomains is True
+
+    def test_allow_external_links_default_false(self):
+        """allow_external_links defaults to False."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com")
+        assert req.allow_external_links is False
+
+    def test_allow_external_links_can_be_true(self):
+        """allow_external_links can be set to True."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com", allow_external_links=True)
+        assert req.allow_external_links is True
+
+    def test_crawl_entire_domain_coerces_from_string(self):
+        """crawl_entire_domain with truthy string is coerced to True (Pydantic default)."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com", crawl_entire_domain="yes")
+        assert req.crawl_entire_domain is True
+
+
+# ── _filter_child_paths unit tests ──────────────────────────────
+
+
+class TestFilterChildPaths:
+    """Tests for the CrawlEngine._filter_child_paths static method."""
+
+    def test_keeps_child_paths(self):
+        """Links that are children of the current URL path are kept."""
+        from agent.crawler import CrawlEngine
+
+        links = [
+            "http://example.com/section/page/deeper",
+            "http://example.com/section/page/child",
+            "http://example.com/section/page/deep/est",
+        ]
+        result = CrawlEngine._filter_child_paths(
+            links, "http://example.com/section/page"
+        )
+        assert len(result) == 3
+
+    def test_filters_sibling_and_parent(self):
+        """Links to sibling or parent paths are filtered out."""
+        from agent.crawler import CrawlEngine
+
+        links = [
+            "http://example.com/section/other",  # sibling
+            "http://example.com/section",  # parent
+            "http://example.com/",  # grandparent
+            "http://example.com/section/page/deeper",  # child (kept)
+        ]
+        result = CrawlEngine._filter_child_paths(
+            links, "http://example.com/section/page"
+        )
+        assert len(result) == 1
+        assert "http://example.com/section/page/deeper" in result
+
+    def test_keeps_different_domain_links(self):
+        """Links on different domains are kept regardless of path."""
+        from agent.crawler import CrawlEngine
+
+        links = [
+            "http://docs.example.com/other",  # subdomain
+            "http://external.com/anything",  # external
+        ]
+        result = CrawlEngine._filter_child_paths(
+            links, "http://example.com/section/page"
+        )
+        # Different domains always pass through
+        assert len(result) == 2
+
+    def test_current_url_with_trailing_slash(self):
+        """Works correctly when current_url has a trailing slash.
+
+        Both /section/child and /section/other are children of /section/.
+        """
+        from agent.crawler import CrawlEngine
+
+        links = [
+            "http://example.com/section/child",  # child (kept)
+            "http://example.com/section/other",  # also child (kept)
+            "http://example.com/section",  # parent (filtered)
+        ]
+        result = CrawlEngine._filter_child_paths(links, "http://example.com/section/")
+        assert len(result) == 2
+        assert "http://example.com/section/child" in result
+        assert "http://example.com/section/other" in result
+        assert "http://example.com/section" not in result
+
+    def test_empty_links_returns_empty(self):
+        """Empty links list returns empty list."""
+        from agent.crawler import CrawlEngine
+
+        result = CrawlEngine._filter_child_paths([], "http://example.com/page")
+        assert result == []
+
+
+# ── _filter_ssrf_blocked unit tests ─────────────────────────────
+
+
+class TestFilterSsrfBlocked:
+    """Tests for the CrawlEngine._filter_ssrf_blocked static method."""
+
+    def test_allows_public_hosts(self):
+        """Public hosts are allowed through."""
+        from agent.crawler import CrawlEngine
+
+        links = [
+            "http://example.com/page",
+            "http://google.com/search",
+            "https://github.com/repo",
+        ]
+        result = CrawlEngine._filter_ssrf_blocked(links)
+        assert len(result) == 3
+
+    def test_blocks_private_ips(self):
+        """Private IP addresses are blocked."""
+        from agent.crawler import CrawlEngine
+
+        links = [
+            "http://example.com/page",  # allowed
+            "http://127.0.0.1/secret",  # loopback
+            "http://10.0.0.1/internal",  # RFC 1918 10.x
+            "http://192.168.1.1/admin",  # RFC 1918 192.168.x
+        ]
+        result = CrawlEngine._filter_ssrf_blocked(links)
+        assert len(result) == 1
+        assert "http://example.com/page" in result
+
+    def test_blocks_localhost_hostname(self):
+        """Localhost hostname is blocked."""
+        from agent.crawler import CrawlEngine
+
+        links = [
+            "http://localhost:6379/valkey",
+            "http://example.com/page",
+        ]
+        result = CrawlEngine._filter_ssrf_blocked(links)
+        assert len(result) == 1
+        assert "http://example.com/page" in result
+
+    def test_empty_links(self):
+        """Empty links list returns empty list."""
+        from agent.crawler import CrawlEngine
+
+        result = CrawlEngine._filter_ssrf_blocked([])
+        assert result == []

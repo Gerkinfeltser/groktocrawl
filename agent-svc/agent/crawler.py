@@ -22,7 +22,9 @@ from urllib.parse import urlparse, urlunparse
 
 import httpx
 
-from .link_extractor import extract_links, filter_links
+from common.url import is_private_host
+
+from .link_extractor import classify_links, extract_links, filter_links
 from .scraper_client import ScraperClient
 from .sitemap_parser import SitemapParser
 from .store import JobStore
@@ -64,6 +66,7 @@ class CrawlOptions:
     sitemap_mode: str = "include"  # "include" | "skip" | "only"
     allow_subdomains: bool = False
     allow_external_links: bool = False
+    crawl_entire_domain: bool = False
     max_duration_seconds: int = 1800
     idle_timeout_seconds: int = 300
 
@@ -591,6 +594,27 @@ class CrawlEngine:
                         allow_subdomains=self.options.allow_subdomains,
                         allow_external_links=self.options.allow_external_links,
                     )
+                    # SSRF guard: always block private/internal hosts on
+                    # EXTERNAL URLs regardless of allow_external_links setting.
+                    # Internal and subdomain URLs are already vetted and are
+                    # part of the organization's own infrastructure — they
+                    # bypass the SSRF check. (VAL-SCOPE-017)
+                    classified = classify_links(child_links, url)
+                    if classified.get("external"):
+                        classified["external"] = self._filter_ssrf_blocked(
+                            classified["external"]
+                        )
+                    # Rebuild the full link list from classified buckets
+                    child_links = (
+                        classified.get("internal", [])
+                        + classified.get("subdomain", [])
+                        + classified.get("external", [])
+                    )
+                    # When crawl_entire_domain is False, only follow child paths
+                    # (deeper in the path hierarchy). When True, follow all
+                    # same-domain links including siblings and parents.
+                    if not self.options.crawl_entire_domain:
+                        child_links = self._filter_child_paths(child_links, url)
                     for child_url in child_links:
                         child_normalized = self.normalize_url(child_url)
                         if child_normalized not in self._seen:
@@ -659,6 +683,75 @@ class CrawlEngine:
     def cancel(self) -> None:
         """Signal the crawl to stop at the next opportunity."""
         self._cancel_flag = True
+
+    @staticmethod
+    def _filter_child_paths(links: list[str], current_url: str) -> list[str]:
+        """Filter links to only include child paths of the current URL.
+
+        When ``crawl_entire_domain`` is False, only follow links whose path
+        is a child (deeper) of the current page's path. Links on different
+        domains (subdomains or external) are not affected by this constraint.
+
+        Args:
+            links: List of absolute URL strings to filter.
+            current_url: The URL of the page the links were extracted from.
+
+        Returns:
+            Filtered list of URLs that are child paths (or different-domain).
+        """
+        current_path = urlparse(current_url).path.rstrip("/") + "/"
+        current_domain = (urlparse(current_url).hostname or "").lower()
+
+        result: list[str] = []
+        for link in links:
+            parsed = urlparse(link)
+            link_path = parsed.path or "/"
+            link_domain = (parsed.hostname or "").lower()
+
+            # If the link is on a different domain (including subdomain when
+            # already allowed by filter_links), skip the child-path constraint.
+            if link_domain != current_domain:
+                result.append(link)
+                continue
+
+            # On same domain: only allow child paths (deeper in hierarchy)
+            if link_path.startswith(current_path) and link_path != current_path.rstrip(
+                "/"
+            ):
+                result.append(link)
+                continue
+
+            # / page (not a child path of current)
+            logger.debug(
+                "Filtered out non-child path: %s (current=%s, crawl_entire_domain=False)",
+                link,
+                current_url,
+            )
+
+        return result
+
+    @staticmethod
+    def _filter_ssrf_blocked(links: list[str]) -> list[str]:
+        """Filter out links to private/internal hosts (SSRF guard).
+
+        Always active regardless of ``allow_external_links`` setting.
+        Uses ``common.url.is_private_host()`` which checks RFC 1918
+        private ranges, loopback, link-local, metadata IPs, and
+        internal hostname suffixes.
+
+        Args:
+            links: List of absolute URL strings to filter.
+
+        Returns:
+            List of URLs that are NOT private/internal hosts.
+        """
+        result: list[str] = []
+        for link in links:
+            if is_private_host(link):
+                logger.debug("SSRF guard blocked private host URL: %s", link)
+                continue
+            result.append(link)
+        return result
 
     def _get_filter_reason(self, url: str) -> dict | None:
         """Determine which path filter excluded a URL and why.

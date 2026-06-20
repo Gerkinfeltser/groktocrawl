@@ -316,6 +316,9 @@ async def create_crawl(request: Request, body: CrawlRequest) -> CrawlCreateRespo
             regex_on_full_url=body.regex_on_full_url,
             verbose=body.verbose,
             sitemap_mode=body.sitemap,
+            crawl_entire_domain=body.crawl_entire_domain,
+            allow_subdomains=body.allow_subdomains,
+            allow_external_links=body.allow_external_links,
         )
     )
     return CrawlCreateResponse(id=job_id)
