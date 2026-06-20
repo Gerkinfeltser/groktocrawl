@@ -237,7 +237,7 @@ jobs:
 
       - name: Run integration tests
         run: |
-          docker compose exec -T agent-svc pip install pytest pytest-timeout -q
+          docker compose exec -T agent-svc pip install pytest pytest-timeout playwright -q
           docker compose exec -T \
             -e PYTHONPATH=/app/agent-svc:/app/scraper-svc:/app/search-svc:/app/llm-svc:/app/parse-svc:/app/portal-svc:/app/browser-svc:/app \
             -e SCRAPER_BASE_URL=http://scraper-svc:8001 \
