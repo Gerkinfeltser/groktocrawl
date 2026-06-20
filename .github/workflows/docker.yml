@@ -211,7 +211,7 @@ jobs:
           deadline = time.time() + 60
           while time.time() < deadline:
               try:
-                  r = urllib.request.urlopen('http://localhost:8000/health', timeout=5)
+                  r = urllib.request.urlopen('http://localhost:8005/health', timeout=5)
                   if r.status == 200:
                       print('test-site healthy')
                       break
