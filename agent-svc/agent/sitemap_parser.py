@@ -475,7 +475,8 @@ class SitemapParser:
                 raw = gzip.decompress(raw)
             except (gzip.BadGzipFile, OSError) as exc:
                 logger.warning("Failed to decompress gzip content: %s", exc)
-                return None
+                # Content may already be decompressed by httpx; use text directly
+                return resp.text
 
         # Try UTF-8 first, then fall back to common encodings
         for encoding in ("utf-8", "utf-8-sig", "latin-1", "iso-8859-1"):

@@ -34,6 +34,34 @@ from .store import JobStore
 
 logger = logging.getLogger(__name__)
 
+# ── Sitemap URL filter ──────────────────────────────────────────────
+# Path patterns that universally indicate index/aggregation pages across
+# Ghost, Hugo, WordPress, Drupal, and similar CMS platforms.
+# These pages produce thin or duplicate content and are skipped rather
+# than queued.
+_SITEMAP_SKIP_PATTERNS: list[re.Pattern] = [
+    re.compile(r"/tags?/", re.IGNORECASE),
+    re.compile(r"/categories?/", re.IGNORECASE),
+    re.compile(r"/authors?/", re.IGNORECASE),
+    re.compile(r"/page/\d+", re.IGNORECASE),
+    re.compile(r"/search/?$", re.IGNORECASE),
+]
+
+
+def _is_low_value_sitemap_url(url: str) -> bool:
+    """Check whether a sitemap URL points to an index/aggregation page.
+
+    These pages (tags, categories, authors, pagination) universally
+    produce thin or duplicate content across CMS platforms. Skipping
+    them at queue time prevents the output cap from filling with
+    near-identical index pages before real content is crawled.
+    """
+    try:
+        path = urlparse(url).path
+    except Exception:
+        return False
+    return any(pattern.search(path) for pattern in _SITEMAP_SKIP_PATTERNS)
+
 
 def _now_timestamp() -> str:
     """Return the current UTC time as an ISO 8601 timestamp string."""
@@ -571,7 +599,11 @@ class CrawlEngine:
                 if remaining > 0:
                     sitemap_urls = sitemap_urls[:remaining]
                 sitemap_dedup: set[str] = set()
+                sitemap_skipped = 0
                 for sm_url in sitemap_urls:
+                    if _is_low_value_sitemap_url(sm_url):
+                        sitemap_skipped += 1
+                        continue
                     sm_normalized = self.normalize_url(sm_url)
                     if (
                         sm_normalized in sitemap_dedup
@@ -582,9 +614,10 @@ class CrawlEngine:
                     self._queue.appendleft((sm_url, 0, True))
                     sitemap_seeded_count += 1
                 logger.info(
-                    "Seeded %d sitemap URLs into crawl queue for %s",
+                    "Seeded %d sitemap URLs into crawl queue for %s (%d skipped as low-value)",
                     sitemap_seeded_count,
                     base_domain,
+                    sitemap_skipped,
                 )
 
         last_store_update = time.monotonic()
@@ -637,7 +670,11 @@ class CrawlEngine:
             while (
                 self._queue
                 and len(self._pending_tasks) < self._effective_concurrency
-                and len(self._pages) + len(self._pending_tasks) < self.options.max_pages
+                and (
+                    self.options.max_pages <= 0
+                    or len(self._pages) + len(self._pending_tasks)
+                    < self.options.max_pages
+                )
             ):
                 task = self._create_scrape_task(
                     page_callback, error_callback, job_id, base_domain
