@@ -106,7 +106,9 @@ async def _politeness_check_and_delay(
     if not manager.enabled:
         return True, None
 
-    result = await manager.check(url, ignore_robots_txt=ignore_robots_txt)
+    result = await manager.check(
+        url, ignore_robots_txt=ignore_robots_txt, robots_user_agent=robots_user_agent
+    )
     if result.action == "blocked":
         logger.info("Politeness blocked %s: %s", url, result.reason)
         metadata = manager.get_politeness_metadata(url)
@@ -232,6 +234,7 @@ async def smart_scrape(
     force_browser: bool = False,
     ignore_robots_txt: bool = False,
     robots_user_agent: str | None = None,
+    scrape_options: dict | None = None,
 ) -> dict:
     """Try each tier in order. Return the first successful result with acceptable quality.
 

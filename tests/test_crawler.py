@@ -751,8 +751,10 @@ class TestCrawlEngine:
         result = await engine.run("http://example.com/", job_id="test-job-123")
 
         assert result.completed == 1
-        # redis.set should have been called at least once (final update)
-        assert mock_store.redis.set.call_count >= 1
+        # update_job_progress should have been called at least once (final update)
+        assert mock_store.update_job_progress.call_count >= 1
+        # increment_completed should have been called once (for the start page)
+        assert mock_store.increment_completed.call_count >= 1
 
     @pytest.mark.asyncio
     async def test_crawl_with_include_paths(self, mock_scraper):
@@ -925,9 +927,12 @@ class TestCrawlEngine:
         """Self-referencing links don't cause infinite loops."""
         from agent.crawler import CrawlEngine, CrawlOptions
 
-        mock_scraper.scrape = AsyncMock(
-            return_value=MockPage.success("http://example.com/")
-        )
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
 
         engine = CrawlEngine(
             mock_scraper,
@@ -1949,7 +1954,7 @@ class TestCrawlEngineSitemap:
                 "http://example.com/sitemap-only-page2",
             ]
 
-            with patch.object(engine, "_get_html"):
+            with patch.object(engine, "_get_html", return_value=None):
                 result = await engine.run("http://example.com/")
 
         # Should have start URL + 2 sitemap URLs
@@ -3178,7 +3183,236 @@ class TestCrawlConcurrency:
         assert len(result.pages) == 1
 
 
-# ── CrawlRequest concurrency validation tests ───────────────────
+# ── Timeout and semaphore slot release (VAL-CONC-043, VAL-CONC-051) ─
+
+
+class TestCrawlTimeoutAndErrors:
+    """Tests for per-scrape timeout, error accumulation, and error types."""
+
+    @pytest.mark.asyncio
+    async def test_scrape_timeout_recorded_in_errors(self, mock_scraper):
+        """A timed-out scrape is recorded in the errors list."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=2,
+                max_depth=0,
+                max_concurrency=1,
+            ),
+        )
+
+        async def slow_scrape(url: str, force_browser: bool = False, **kwargs) -> dict:
+            raise TimeoutError("timed out")
+
+        mock_scraper.scrape = AsyncMock(side_effect=slow_scrape)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = "<html><body><p>No links</p></body></html>"
+            # The start URL fails, so the crawl finishes early (StartUrlScrapeError)
+            # This is caught in run() and we return the result with the error
+            result = await engine.run("http://example.com/")
+
+        assert len(result.errors) >= 1
+
+    @pytest.mark.asyncio
+    async def test_error_code_distinction(self, mock_scraper):
+        """Errors have distinct error_code for scrape failure vs timeout vs blocked."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=1,
+                max_concurrency=3,
+            ),
+        )
+
+        async def varied_scrape(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
+            if "/blocked" in url:
+                return {
+                    "success": False,
+                    "error": "Blocked by politeness: robots.txt disallows",
+                }
+            if "/fail" in url:
+                return {"success": False, "error": "HTTP 500 Internal Server Error"}
+            return MockPage.success(url)
+
+        mock_scraper.scrape = AsyncMock(side_effect=varied_scrape)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/blocked">Blocked</a>
+                <a href="http://example.com/fail">Fail</a>
+                <a href="http://example.com/good">Good</a>
+                </body></html>
+            """
+            result = await engine.run("http://example.com/")
+
+        blocked_errors = [e for e in result.errors if "/blocked" in e.get("url", "")]
+        fail_errors = [e for e in result.errors if "/fail" in e.get("url", "")]
+
+        for e in blocked_errors:
+            assert e.get("error_code") == "ROBOTS_BLOCKED", (
+                f"Expected ROBOTS_BLOCKED, got: {e}"
+            )
+        for e in fail_errors:
+            assert e.get("error_code") == "SCRAPE_ERROR", (
+                f"Expected SCRAPE_ERROR, got: {e}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_mixed_success_failure_blocked(self, mock_scraper):
+        """Crawl with a mix of successes, failures, and blocked URLs completes correctly."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=1,
+                max_concurrency=3,
+            ),
+        )
+
+        async def mixed_scrape(url: str, **kwargs) -> dict:
+            if "/fail" in url:
+                return MockPage.failure(url, "Connection error")
+            if "/blocked" in url:
+                return {
+                    "success": False,
+                    "error": "Blocked by politeness: robots.txt disallows",
+                }
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=mixed_scrape)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/good1">Good 1</a>
+                <a href="http://example.com/fail1">Fail 1</a>
+                <a href="http://example.com/blocked1">Blocked 1</a>
+                <a href="http://example.com/good2">Good 2</a>
+                </body></html>
+            """
+            result = await engine.run("http://example.com/")
+
+        # Start URL + good1 + good2 = 3 successes
+        assert result.completed >= 2  # at least 2 children (start URL + good pages)
+        assert len(result.errors) >= 2  # at least 2 errors (fail + blocked)
+        assert len(result.robots_blocked) >= 1  # at least 1 blocked
+
+        # Verify error code distinctions
+        for e in result.errors:
+            if "/blocked" in e.get("url", ""):
+                assert e.get("error_code") == "ROBOTS_BLOCKED"
+
+
+# ── Atomic store progress (VAL-CONC-042) ─────────────────────────
+
+
+class TestCrawlStoreAtomicity:
+    """Tests that the CrawlEngine calls atomic progress update methods."""
+
+    @pytest.mark.asyncio
+    async def test_atomic_completed_increment_with_mock_store(
+        self, mock_scraper, mock_store
+    ):
+        """CrawlEngine calls store.increment_completed() for each successful page."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=mock_store,
+            options=CrawlOptions(
+                max_pages=3,
+                max_depth=1,
+                max_concurrency=1,
+            ),
+        )
+
+        mock_store.increment_completed = MagicMock(return_value=1)
+        mock_store.get_completed = MagicMock(return_value=0)
+        mock_store.update_job_progress = MagicMock()
+
+        async def _unique_scrape(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=_unique_scrape)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/page1">Page 1</a>
+                <a href="http://example.com/page2">Page 2</a>
+                </body></html>
+            """
+            result = await engine.run("http://example.com/", job_id="test-job")
+
+        # increment_completed should be called for each successful page
+        assert result.completed == 3
+        assert mock_store.increment_completed.call_count == 3
+        # update_job_progress should be called (final update)
+        assert mock_store.update_job_progress.call_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_increment_only_for_successful_pages(self, mock_scraper, mock_store):
+        """increment_completed is NOT called for failed or blocked pages."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=mock_store,
+            options=CrawlOptions(
+                max_pages=5,
+                max_depth=1,
+                max_concurrency=3,
+            ),
+        )
+
+        mock_store.increment_completed = MagicMock(return_value=1)
+        mock_store.get_completed = MagicMock(return_value=0)
+        mock_store.update_job_progress = MagicMock()
+
+        async def mixed_scrape(url: str, **kwargs) -> dict:
+            if "/fail" in url:
+                return MockPage.failure(url, "Connection error")
+            if "/blocked" in url:
+                return {
+                    "success": False,
+                    "error": "Blocked by politeness: robots.txt disallows",
+                }
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=mixed_scrape)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/good1">Good 1</a>
+                <a href="http://example.com/fail1">Fail 1</a>
+                <a href="http://example.com/blocked1">Blocked 1</a>
+                </body></html>
+            """
+            await engine.run("http://example.com/", job_id="test-job-2")
+
+        # increment_completed should only be called for successful pages
+        # start URL + good1 = 2 successes
+        assert mock_store.increment_completed.call_count == 2
+
+
+# ── CrawlRequest concurrency validation tests (already exist) ───
 
 
 class TestCrawlRequestConcurrencyValidation:
@@ -3334,10 +3568,12 @@ class TestPolitenessFields:
         await engine.run("http://example.com/")
 
         # Verify the scraper was called with the correct params
+        # Note: scrape_options is passed as None when not configured
         mock_scraper.scrape.assert_called_once_with(
             "http://example.com/",
             ignore_robots_txt=True,
             robots_user_agent="CustomBot/1.0",
+            scrape_options=None,
         )
 
     @pytest.mark.asyncio
@@ -3446,3 +3682,760 @@ class TestCrawlRequestPoliteness:
         req = CrawlRequest(url="http://example.com")
         assert req.ignore_robots_txt is False
         assert req.robots_user_agent is None
+
+
+class TestScrapeOptionsModel:
+    """Unit tests for the ScrapeOptions Pydantic model.
+
+    Covers:
+    - Default values
+    - All fields accept and return correct types
+    - Invalid formats produce validation error
+    - Negative/zero timeout produces validation error
+    - Negative wait_for produces validation error
+    - CamelCase input via populate_by_name
+    - model_dump(by_alias=True) produces camelCase keys
+    - CrawlRequest accepts optional scrape_options
+    - model_dump produces dict suitable for JSON serialization
+    """
+
+    def test_defaults(self):
+        """ScrapeOptions default values match Firecrawl defaults."""
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions()
+        assert opts.formats == ["markdown"]
+        assert opts.only_main_content is True
+        assert opts.include_tags is None
+        assert opts.exclude_tags is None
+        assert opts.wait_for is None
+        assert opts.mobile is False
+        assert opts.timeout == 30000
+        assert opts.headers is None
+        assert opts.remove_base64_images is False
+
+    def test_all_fields_custom(self):
+        """All ScrapeOptions fields accept custom values."""
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions(
+            formats=["markdown", "html", "links"],
+            only_main_content=False,
+            include_tags=["article", "p"],
+            exclude_tags=[".nav", "footer"],
+            wait_for=1000,
+            mobile=True,
+            timeout=30000,
+            headers={"Authorization": "Bearer test"},
+            remove_base64_images=True,
+        )
+        assert opts.formats == ["markdown", "html", "links"]
+        assert opts.only_main_content is False
+        assert opts.include_tags == ["article", "p"]
+        assert opts.exclude_tags == [".nav", "footer"]
+        assert opts.wait_for == 1000
+        assert opts.mobile is True
+        assert opts.timeout == 30000
+        assert opts.headers == {"Authorization": "Bearer test"}
+        assert opts.remove_base64_images is True
+
+    def test_invalid_format_raises_error(self):
+        """Invalid format name in formats list raises ValidationError."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ScrapeOptions(formats=["invalid_format"])
+
+    def test_negative_timeout_raises_error(self):
+        """Negative timeout value raises ValidationError."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ScrapeOptions(timeout=-1)
+
+    def test_zero_timeout_raises_error(self):
+        """Timeout of 0 raises ValidationError (minimum is 1000ms)."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ScrapeOptions(timeout=0)
+
+    def test_negative_wait_for_raises_error(self):
+        """Negative wait_for raises ValidationError."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ScrapeOptions(wait_for=-100)
+
+    def test_camelcase_input_accepted(self):
+        """CamelCase field names are accepted (populate_by_name)."""
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions(
+            **{
+                "formats": ["html"],
+                "onlyMainContent": False,
+                "includeTags": ["h1"],
+                "excludeTags": [".nav"],
+                "waitFor": 2000,
+                "mobile": True,
+                "timeout": 15000,
+                "headers": {"X-Custom": "val"},
+                "removeBase64Images": True,
+            }
+        )
+        assert opts.formats == ["html"]
+        assert opts.only_main_content is False
+        assert opts.include_tags == ["h1"]
+        assert opts.exclude_tags == [".nav"]
+        assert opts.wait_for == 2000
+        assert opts.mobile is True
+        assert opts.timeout == 15000
+        assert opts.headers == {"X-Custom": "val"}
+        assert opts.remove_base64_images is True
+
+    def test_model_dump_by_alias_produces_camelcase(self):
+        """model_dump(by_alias=True) produces camelCase keys."""
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions(
+            formats=["markdown"],
+            only_main_content=True,
+            include_tags=["article"],
+            exclude_tags=[".nav"],
+            wait_for=500,
+            mobile=False,
+            timeout=20000,
+            headers={"X-Test": "value"},
+            remove_base64_images=True,
+        )
+        dumped = opts.model_dump(mode="json", by_alias=True)
+        assert dumped["formats"] == ["markdown"]
+        assert dumped["onlyMainContent"] is True
+        assert dumped["includeTags"] == ["article"]
+        assert dumped["excludeTags"] == [".nav"]
+        assert dumped["waitFor"] == 500
+        assert dumped["mobile"] is False
+        assert dumped["timeout"] == 20000
+        assert dumped["headers"] == {"X-Test": "value"}
+        assert dumped["removeBase64Images"] is True
+        # snake_case keys should not appear
+        assert "only_main_content" not in dumped
+
+    def test_crawl_request_accepts_scrape_options(self):
+        """CrawlRequest accepts optional scrape_options field."""
+        from agent.models import CrawlRequest, ScrapeOptions
+
+        req = CrawlRequest(
+            url="http://example.com",
+            scrape_options=ScrapeOptions(formats=["links"], only_main_content=False),
+        )
+        assert req.scrape_options is not None
+        assert req.scrape_options.formats == ["links"]
+        assert req.scrape_options.only_main_content is False
+
+    def test_crawl_request_without_scrape_options(self):
+        """CrawlRequest without scrape_options defaults to None."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com")
+        assert req.scrape_options is None
+
+    def test_model_dump_json_serializable(self):
+        """model_dump(mode='json') produces JSON-serializable dict."""
+        import json
+
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions(
+            formats=["markdown", "html"],
+            only_main_content=False,
+            include_tags=["article", "p"],
+            exclude_tags=[".nav"],
+            wait_for=1000,
+            mobile=True,
+            timeout=30000,
+            headers={"Authorization": "Bearer test123"},
+            remove_base64_images=True,
+        )
+        dumped = opts.model_dump(mode="json")
+        # Should be JSON-serializable
+        json_str = json.dumps(dumped)
+        parsed = json.loads(json_str)
+        assert parsed["formats"] == ["markdown", "html"]
+        assert parsed["only_main_content"] is False
+        assert parsed["include_tags"] == ["article", "p"]
+        assert parsed["exclude_tags"] == [".nav"]
+        assert parsed["wait_for"] == 1000
+        assert parsed["mobile"] is True
+        assert parsed["timeout"] == 30000
+        assert parsed["headers"] == {"Authorization": "Bearer test123"}
+        assert parsed["remove_base64_images"] is True
+
+    def test_empty_formats_rejected(self):
+        """Empty formats list is rejected by validator."""
+        import pytest
+        from agent.models import ScrapeOptions
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ScrapeOptions(formats=[])
+
+    def test_valid_formats_enum(self):
+        """VAL_SCRAPE_FORMATS contains expected values."""
+        from agent.models import VALID_SCRAPE_FORMATS
+
+        assert "markdown" in VALID_SCRAPE_FORMATS
+        assert "html" in VALID_SCRAPE_FORMATS
+        assert "links" in VALID_SCRAPE_FORMATS
+        assert "screenshot" in VALID_SCRAPE_FORMATS
+        assert "rawHtml" in VALID_SCRAPE_FORMATS
+
+    def test_none_fields_in_model_dump(self):
+        """None fields like wait_for are not dropped in model_dump."""
+        from agent.models import ScrapeOptions
+
+        opts = ScrapeOptions()
+        dumped = opts.model_dump(mode="json")
+        # wait_for is None by default, should be present
+        assert "wait_for" in dumped
+        assert dumped["wait_for"] is None
+        assert "include_tags" in dumped
+        assert dumped["include_tags"] is None
+        assert "exclude_tags" in dumped
+        assert dumped["exclude_tags"] is None
+        assert "headers" in dumped
+        assert dumped["headers"] is None
+
+
+# ── DedupManager tests ────────────────────────────────────────────
+
+
+class TestDedupManager:
+    """Tests for the DedupManager multi-layer deduplication."""
+
+    # ── Canonical tag check ──────────────────────────────────────
+
+    def test_canonical_matches_prevents_duplicate(self):
+        """Page A with canonical=page B, when B is scraped, A is skipped."""
+        from agent.dedup import DedupManager
+
+        dedup = DedupManager()
+        # Mark page B as already scraped
+        dedup.mark_scraped("https://example.com/page-b")
+
+        # Page A has canonical pointing to page B
+        html = '<html><head><link rel="canonical" href="https://example.com/page-b"></head><body></body></html>'
+        result = dedup.check_canonical(html, "https://example.com/page-a")
+        assert result == "https://example.com/page-b"
+
+    def test_self_referencing_canonical_ignored(self):
+        """A page with canonical=itself is not considered a duplicate."""
+        from agent.dedup import DedupManager
+
+        dedup = DedupManager()
+        dedup.mark_scraped("https://example.com/page")
+
+        # Self-referencing canonical should return None (not a duplicate)
+        html = '<html><head><link rel="canonical" href="https://example.com/page"></head><body></body></html>'
+        result = dedup.check_canonical(html, "https://example.com/page")
+        assert result is None
+
+    def test_self_referencing_canonical_with_trailing_slash(self):
+        """Self-referencing canonical with trailing slash difference is ignored."""
+        from agent.dedup import DedupManager
+
+        dedup = DedupManager()
+        dedup.mark_scraped("https://example.com/page")
+
+        # Self-referencing with trailing slash on canonical
+        html = '<html><head><link rel="canonical" href="https://example.com/page/"></head><body></body></html>'
+        result = dedup.check_canonical(html, "https://example.com/page")
+        assert result is None
+
+    def test_canonical_external_domain_ignored(self):
+        """Canonical pointing to external domain is ignored."""
+        from agent.dedup import DedupManager
+
+        dedup = DedupManager()
+        dedup.mark_scraped("https://other.com/page")
+
+        # Page A has canonical pointing to an external domain
+        html = '<html><head><link rel="canonical" href="https://other.com/page"></head><body></body></html>'
+        result = dedup.check_canonical(html, "https://example.com/page-a")
+        assert result is None  # External domain, ignored
+
+    def test_canonical_not_scraped_yet(self):
+        """Canonical URL that hasn't been scraped yet is not a duplicate."""
+        from agent.dedup import DedupManager
+
+        dedup = DedupManager()
+        dedup.mark_scraped("https://example.com/page-a")
+
+        # Page B has canonical pointing to page-c which hasn't been scraped
+        html = '<html><head><link rel="canonical" href="https://example.com/page-c"></head><body></body></html>'
+        result = dedup.check_canonical(html, "https://example.com/page-b")
+        assert result is None  # Canonical target hasn't been scraped
+
+    def test_canonical_relative_url_resolved(self):
+        """Relative canonical URLs are resolved against the current URL."""
+        from agent.dedup import DedupManager
+
+        dedup = DedupManager()
+        dedup.mark_scraped("https://example.com/page-b")
+
+        # Relative canonical URL
+        html = '<html><head><link rel="canonical" href="/page-b"></head><body></body></html>'
+        result = dedup.check_canonical(html, "https://example.com/page-a")
+        assert result == "https://example.com/page-b"
+
+    def test_canonical_href_first_attribute_order(self):
+        """href attribute before rel attribute is also parsed correctly."""
+        from agent.dedup import DedupManager
+
+        dedup = DedupManager()
+        dedup.mark_scraped("https://example.com/page-b")
+
+        # href before rel
+        html = '<html><head><link href="https://example.com/page-b" rel="canonical"></head><body></body></html>'
+        result = dedup.check_canonical(html, "https://example.com/page-a")
+        assert result == "https://example.com/page-b"
+
+    def test_canonical_no_tag_returns_none(self):
+        """Page without canonical tag returns None."""
+        from agent.dedup import DedupManager
+
+        dedup = DedupManager()
+        dedup.mark_scraped("https://example.com/page-b")
+
+        html = "<html><head></head><body><p>No canonical tag</p></body></html>"
+        result = dedup.check_canonical(html, "https://example.com/page-a")
+        assert result is None
+
+    # ── Content hash dedup ──────────────────────────────────────
+
+    def test_content_hash_identical_markdown_detected(self):
+        """Two pages with identical markdown → second is duplicate."""
+        from agent.dedup import DedupManager
+
+        dedup = DedupManager()
+        md = "# Same Content\n\nThis is identical markdown."
+
+        # First page: compute and register hash
+        h = dedup.compute_content_hash(md)
+        assert h is not None
+        assert not dedup.is_duplicate_content(h)
+
+        dedup.mark_scraped("https://example.com/page-a", content_hash=h)
+
+        # Second page with same content
+        h2 = dedup.compute_content_hash(md)
+        assert h2 == h
+        assert dedup.is_duplicate_content(h2)
+
+    def test_content_hash_different_markdown_not_duplicate(self):
+        """Two pages with different markdown content are NOT duplicates."""
+        from agent.dedup import DedupManager
+
+        dedup = DedupManager()
+
+        h1 = dedup.compute_content_hash("# Page A Content")
+        assert h1 is not None
+        dedup.mark_scraped("https://example.com/page-a", content_hash=h1)
+
+        h2 = dedup.compute_content_hash("# Page B Content")
+        assert h2 is not None
+        assert h2 != h1
+        assert not dedup.is_duplicate_content(h2)
+
+    def test_content_hash_near_identical_matches_exact_only(self):
+        """Pages differing only by a timestamp are NOT deduped by hash."""
+        from agent.dedup import DedupManager
+
+        dedup = DedupManager()
+
+        content_a = "<p>Hello World</p>\n<!-- generated at 2024-01-01T00:00:01Z -->"
+        content_b = "<p>Hello World</p>\n<!-- generated at 2024-01-01T00:00:02Z -->"
+
+        h1 = dedup.compute_content_hash(content_a)
+        assert h1 is not None
+        dedup.mark_scraped("https://example.com/page-a", content_hash=h1)
+
+        h2 = dedup.compute_content_hash(content_b)
+        assert h2 is not None
+        assert h2 != h1  # Different hash due to timestamp difference
+        assert not dedup.is_duplicate_content(h2)
+
+    def test_empty_markdown_not_duplicate(self):
+        """Empty markdown never counts as a duplicate."""
+        from agent.dedup import DedupManager
+
+        dedup = DedupManager()
+
+        # Empty markdown should return None hash
+        assert dedup.compute_content_hash("") is None
+        assert dedup.compute_content_hash("   ") is None
+        assert dedup.compute_content_hash("\n\n  \n") is None
+
+    def test_empty_markdown_not_deduped_via_is_duplicate(self):
+        """Explicit check that empty markdown is included (not treated as duplicate)."""
+        from agent.dedup import DedupManager
+
+        dedup = DedupManager()
+
+        # First page with some content
+        h1 = dedup.compute_content_hash("Some content")
+        assert h1 is not None
+        dedup.mark_scraped("https://example.com/page-a", content_hash=h1)
+
+        # Second page with empty markdown — hash is None, is_duplicate_content should not trigger
+        # Since compute_content_hash returns None for empty markdown, we should never call
+        # is_duplicate_content with None. The caller handles this.
+        assert dedup.compute_content_hash("") is None
+
+    # ── Canonical runs before content hash ──────────────────────
+
+    def test_canonical_check_before_content_hash(self):
+        """Canonical check runs first; content hash not checked if canonical matches."""
+        from agent.dedup import DedupManager
+
+        dedup = DedupManager()
+
+        # Set up page B as scraped
+        dedup.mark_scraped("https://example.com/page-b")
+
+        # Page A has canonical=page-B AND identical content
+        html = '<html><head><link rel="canonical" href="https://example.com/page-b"></head><body>Same content</body></html>'
+        result = dedup.check_canonical(html, "https://example.com/page-a")
+        assert result == "https://example.com/page-b"
+
+        # The content hash check would only apply if canonical check returned None
+        # (not a duplicate). Since canonical IS a duplicate, we never check content hash.
+
+    # ── mark_scraped and scraped URL tracking ───────────────────
+
+    def test_is_scraped_url_after_mark(self):
+        """URL is reported as scraped after mark_scraped()."""
+        from agent.dedup import DedupManager
+
+        dedup = DedupManager()
+        assert not dedup.is_scraped_url("https://example.com/page")
+
+        dedup.mark_scraped("https://example.com/page")
+        assert dedup.is_scraped_url("https://example.com/page")
+
+    def test_is_scraped_url_trailing_slash_normalized(self):
+        """URLs with and without trailing slash normalized correctly."""
+        from agent.dedup import DedupManager
+
+        dedup = DedupManager()
+        dedup.mark_scraped("https://example.com/page")
+
+        assert dedup.is_scraped_url("https://example.com/page")
+        assert dedup.is_scraped_url("https://example.com/page/")
+
+    def test_canonical_url_tracking(self):
+        """get_canonical_for returns the canonical URL for a scraped page."""
+        from agent.dedup import DedupManager
+
+        dedup = DedupManager()
+        dedup.mark_scraped(
+            "https://example.com/page-a",
+            canonical_url="https://example.com/canonical-page",
+        )
+        assert (
+            dedup.get_canonical_for("https://example.com/page-a")
+            == "https://example.com/canonical-page"
+        )
+
+    def test_canonical_tracking_no_canonical(self):
+        """get_canonical_for returns None when no canonical was recorded."""
+        from agent.dedup import DedupManager
+
+        dedup = DedupManager()
+        dedup.mark_scraped("https://example.com/page")
+        assert dedup.get_canonical_for("https://example.com/page") is None
+
+
+# ── CrawlEngine dedup integration tests ───────────────────────────
+
+
+class TestCrawlEngineDedup:
+    """Tests for CrawlEngine integration with DedupManager."""
+
+    @pytest.mark.asyncio
+    async def test_canonical_dedup_skips_duplicate_page(self, mock_scraper):
+        """Page with canonical=already-scraped URL is skipped."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(max_pages=5, max_depth=1),
+        )
+
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        # Start page links to page-a (no canonical) and page-b (canonical → page-a)
+        with patch.object(engine, "_get_html") as mock_html:
+
+            def html_side_effect(url: str) -> str | None:
+                if "page-b" in url:
+                    return (
+                        '<html><head><link rel="canonical" '
+                        'href="http://example.com/page-a"></head>'
+                        "<body>Page B with canonical to A</body></html>"
+                    )
+                return (
+                    "<html><body>"
+                    "<a href='http://example.com/page-a'>Page A</a>"
+                    "<a href='http://example.com/page-b'>Page B</a>"
+                    "</body></html>"
+                )
+
+            mock_html.side_effect = html_side_effect
+
+            result = await engine.run("http://example.com/")
+
+        # Should have start URL + page-a = 2 pages (page-b skipped by canonical dedup)
+        assert result.completed == 2
+        urls = [p["url"] for p in result.pages]
+        assert "http://example.com/page-b" not in urls
+        # Should have a dedup error for page-b
+        dedup_errors = [
+            e for e in result.errors if e.get("error_type") == "duplicate_canonical"
+        ]
+        assert len(dedup_errors) == 1
+        assert dedup_errors[0]["url"] == "http://example.com/page-b"
+
+    @pytest.mark.asyncio
+    async def test_content_hash_dedup_skips_duplicate_page(self, mock_scraper):
+        """Two pages with identical markdown → second is skipped."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(max_pages=5, max_depth=1),
+        )
+
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
+            # Start URL returns unique content; page-a and page-b share identical content
+            if url == "http://example.com/":
+                return MockPage.success(url, markdown="# Start page content")
+            return MockPage.success(url, markdown="# Identical Content\n\nSame text.")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = (
+                "<html><body>"
+                "<a href='http://example.com/page-a'>Page A</a>"
+                "<a href='http://example.com/page-b'>Page B</a>"
+                "</body></html>"
+            )
+
+            result = await engine.run("http://example.com/")
+
+        # Should have start URL + page-a = 2 pages (page-b skipped by content dedup)
+        assert result.completed == 2
+        urls = [p["url"] for p in result.pages]
+        # page-b should be dedup'd (identical content to page-a)
+        assert "http://example.com/page-b" not in urls
+        # Should have a dedup error for page-b
+        dedup_errors = [
+            e for e in result.errors if e.get("error_type") == "duplicate_content"
+        ]
+        assert len(dedup_errors) == 1
+        assert dedup_errors[0]["url"] == "http://example.com/page-b"
+
+    @pytest.mark.asyncio
+    async def test_canonical_check_before_content_hash_in_engine(self, mock_scraper):
+        """Canonical check runs before content hash check in crawl engine.
+
+        A page that is both canonical-dup AND content-dup should report
+        canonical as the dedup reason.
+        """
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(max_pages=5, max_depth=1),
+        )
+
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
+            # Start URL has unique content; page-a and page-b share content
+            if url == "http://example.com/":
+                return MockPage.success(url, markdown="# Start page unique content")
+            return MockPage.success(url, markdown="# Same Content")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+
+            def html_side_effect(url: str) -> str | None:
+                if "page-b" in url:
+                    # Page B has canonical=page-a AND identical content
+                    return (
+                        '<html><head><link rel="canonical" '
+                        'href="http://example.com/page-a"></head>'
+                        "<body>Same</body></html>"
+                    )
+                return (
+                    "<html><body>"
+                    "<a href='http://example.com/page-a'>Page A</a>"
+                    "<a href='http://example.com/page-b'>Page B</a>"
+                    "</body></html>"
+                )
+
+            mock_html.side_effect = html_side_effect
+
+            result = await engine.run("http://example.com/")
+
+        # The dedup error for page-b should be canonical, NOT content
+        canonical_errors = [
+            e for e in result.errors if e.get("error_type") == "duplicate_canonical"
+        ]
+        content_errors = [
+            e for e in result.errors if e.get("error_type") == "duplicate_content"
+        ]
+        assert len(canonical_errors) == 1, (
+            f"Expected 1 canonical error, got {len(canonical_errors)}: {result.errors}"
+        )
+        assert len(content_errors) == 0, (
+            f"Expected 0 content errors, got {len(content_errors)}: {result.errors}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_self_referencing_canonical_in_crawl(self, mock_scraper):
+        """Page with self-referencing canonical is scraped normally."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(max_pages=3, max_depth=1),
+        )
+
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
+            return MockPage.success(url, f"# Content of {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            # All pages have self-referencing canonical tags
+            def html_side_effect(url: str) -> str | None:
+                return (
+                    f'<html><head><link rel="canonical" href="{url}"></head>'
+                    "<body>"
+                    "<a href='http://example.com/page-a'>Page A</a>"
+                    "</body></html>"
+                )
+
+            mock_html.side_effect = html_side_effect
+
+            result = await engine.run("http://example.com/")
+
+        # Both pages should be scraped (self-canonical is ignored)
+        assert result.completed == 2
+        assert len(result.pages) == 2
+        # No dedup errors
+        dedup_errors = [e for e in result.errors if e.get("error_type") is not None]
+        assert len(dedup_errors) == 0
+
+    @pytest.mark.asyncio
+    async def test_empty_markdown_includes_page(self, mock_scraper):
+        """Pages with empty markdown are still included (not dedup'd)."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(max_pages=3, max_depth=1),
+        )
+
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
+            return MockPage.success(url, markdown="")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = (
+                "<html><body>"
+                "<a href='http://example.com/page-a'>Page A</a>"
+                "<a href='http://example.com/page-b'>Page B</a>"
+                "</body></html>"
+            )
+
+            result = await engine.run("http://example.com/")
+
+        # All 3 pages should be included (empty markdown is not treated as duplicate)
+        assert result.completed == 3
+        assert len(result.pages) == 3
+
+    @pytest.mark.asyncio
+    async def test_total_includes_dedup_pages(self, mock_scraper):
+        """Crawl total includes dedup'd pages (VAL-SCRAPE-052)."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(max_pages=5, max_depth=1),
+        )
+
+        async def scrape_side_effect(
+            url: str, force_browser: bool = False, **kwargs
+        ) -> dict:
+            # Start URL has unique content; page-a and page-b have identical content
+            if url == "http://example.com/":
+                return MockPage.success(url, markdown="# Start page unique content")
+            return MockPage.success(url, markdown="# Identical Content")
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = (
+                "<html><body>"
+                "<a href='http://example.com/page-a'>Page A</a>"
+                "<a href='http://example.com/page-b'>Page B</a>"
+                "<a href='http://example.com/page-c'>Page C</a>"
+                "</body></html>"
+            )
+
+            result = await engine.run("http://example.com/")
+
+        # Start URL + page-a = 2 completed (page-b and page-c dedup'd)
+        assert result.completed == 2, (
+            f"Expected completed=2, got completed={result.completed}"
+        )
+        # Total should be 4 = 2 completed + 2 dedup'd
+        assert result.total == 4, f"Expected total=4, got total={result.total}"
+        # Verify dedup errors exist
+        dedup_errors = [
+            e for e in result.errors if e.get("error_type") == "duplicate_content"
+        ]
+        assert len(dedup_errors) == 2
+        # Verify the errors endpoint can serve these entries (they have proper fields)

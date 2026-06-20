@@ -145,3 +145,70 @@ class TestDeliverWebhook:
                 "job-1",
             )
             assert mock_client.post.call_count > 1
+
+
+# ── Webhook idempotency (VAL-CONC-050) ──────────────────────────
+
+
+class TestWebhookId:
+    def test_unique_ids_for_same_job_different_events(self):
+        from agent.webhook import _next_webhook_id, _webhook_id_counter
+
+        _webhook_id_counter.clear()
+
+        id1 = _next_webhook_id("job-1", "crawl.started")
+        id2 = _next_webhook_id("job-1", "crawl.page-https://a.com")
+        assert id1 != id2
+        assert id1 == "job-1-crawl.started-1"
+        assert id2 == "job-1-crawl.page-https://a.com-1"
+
+    def test_incrementing_ids_for_same_event(self):
+        from agent.webhook import _next_webhook_id, _webhook_id_counter
+
+        _webhook_id_counter.clear()
+
+        id1 = _next_webhook_id("job-1", "crawl.page-https://a.com")
+        id2 = _next_webhook_id("job-1", "crawl.page-https://a.com")
+        assert id1 != id2
+        assert id1.endswith("-1")
+        assert id2.endswith("-2")
+
+    def test_ids_unique_across_different_jobs(self):
+        from agent.webhook import _next_webhook_id, _webhook_id_counter
+
+        _webhook_id_counter.clear()
+
+        id1 = _next_webhook_id("job-1", "crawl.page-https://a.com")
+        _webhook_id_counter.clear()
+        id2 = _next_webhook_id("job-2", "crawl.page-https://a.com")
+        assert id1 != id2
+
+    @pytest.mark.asyncio
+    async def test_webhook_delivery_includes_webhook_id(self):
+        from agent.webhook import deliver_webhook
+
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+
+            mock_client = MagicMock()
+            mock_client.__aenter__.return_value = mock_client
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+
+            async def _post(*a, **kw):
+                return mock_resp
+
+            mock_client.post = MagicMock(side_effect=_post)
+
+            await deliver_webhook(
+                {"url": "https://hook.example.com"},
+                "crawl.page",
+                "job-123",
+                {"url": "https://example.com/page"},
+                webhook_id_key="crawl.page-https://example.com/page",
+            )
+
+            _args, kwargs = mock_client.post.call_args
+            body = kwargs["content"].decode()
+            assert '"webhookId"' in body
+            assert '"job-123-crawl.page-https://example.com/page-1"' in body

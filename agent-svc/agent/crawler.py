@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import collections.abc
 import contextlib
-import json
 import logging
 import posixpath
 import re
@@ -26,6 +25,7 @@ import httpx
 
 from common.url import is_private_host
 
+from .dedup import DedupManager
 from .link_extractor import classify_links, extract_links, filter_links
 from .scraper_client import ScraperClient
 from .sitemap_parser import SitemapParser
@@ -66,6 +66,10 @@ class CrawlOptions:
         robots_user_agent: Custom User-Agent string for robots.txt
             evaluation. When set, robots.txt rules are evaluated against
             this User-Agent instead of the default bot UA.
+        scrape_options: Optional dict of per-page scrape options (formats,
+            only_main_content, include_tags, exclude_tags, wait_for, mobile,
+            timeout, headers, remove_base64_images). Forwarded to scraper-svc
+            on every page fetch.
     """
 
     max_pages: int = 10
@@ -85,6 +89,7 @@ class CrawlOptions:
     delay: float | None = None
     ignore_robots_txt: bool = False
     robots_user_agent: str | None = None
+    scrape_options: dict | None = None
 
 
 @dataclass
@@ -375,6 +380,9 @@ class CrawlEngine:
         self._scraped_count: int = 0
         # Track in-flight tasks for cancellation
         self._pending_tasks: set[asyncio.Task] = set()
+        # Content-level dedup (canonical + content hash)
+        self.dedup_manager = DedupManager()
+        self._dedup_skipped: int = 0  # Pages skipped by content-level dedup
 
     def _resolve_concurrency(self) -> int:
         """Determine the effective concurrency value.
@@ -592,7 +600,7 @@ class CrawlEngine:
 
         return CrawlResult(
             pages=self._pages,
-            total=len(self._pages) + len(self._queue),
+            total=len(self._pages) + len(self._queue) + self._dedup_skipped,
             completed=len(self._pages),
             errors=self._errors,
             robots_blocked=self._robots_blocked,
@@ -681,6 +689,10 @@ class CrawlEngine:
         This is the core unit of concurrent work. The semaphore ensures
         that at most ``self._effective_concurrency`` scrapes run
         simultaneously.
+
+        A per-scrape timeout (VAL-CONC-043) prevents a hanging scrape
+        from permanently occupying a semaphore slot. On timeout, the
+        URL is recorded in ``errors`` and the slot is released.
         """
         async with self._semaphore:
             if self._cancel_flag:
@@ -702,16 +714,46 @@ class CrawlEngine:
 
             self._last_scrape_start = time.monotonic()
 
-            # Scrape the page
+            # Scrape the page with a per-scrape timeout to prevent semaphore
+            # slot starvation (VAL-CONC-043 / VAL-CONC-051).
             scrape_start = time.monotonic()
+            # Default timeout: 60 seconds per individual scrape
+            per_scrape_timeout = 60.0
             try:
-                result = await self.scraper.scrape(
-                    url,
-                    ignore_robots_txt=self.options.ignore_robots_txt,
-                    robots_user_agent=self.options.robots_user_agent,
+                result = await asyncio.wait_for(
+                    self.scraper.scrape(
+                        url,
+                        ignore_robots_txt=self.options.ignore_robots_txt,
+                        robots_user_agent=self.options.robots_user_agent,
+                        scrape_options=self.options.scrape_options,
+                    ),
+                    timeout=per_scrape_timeout,
                 )
+            except TimeoutError:
+                elapsed = time.monotonic() - scrape_start
+                timeout_entry = {
+                    "url": url,
+                    "error": f"Scrape timed out after {elapsed:.1f}s",
+                    "error_code": "TIMEOUT",
+                }
+                self._errors.append(timeout_entry)
+                logger.warning(
+                    "Scrape timed out for %s after %.1fs (job %s)",
+                    url,
+                    elapsed,
+                    job_id,
+                )
+                return
+            except asyncio.CancelledError:
+                logger.debug("Scrape cancelled for %s (job %s)", url, job_id)
+                return
             except Exception as exc:
-                self._errors.append({"url": url, "error": str(exc)})
+                error_entry = {
+                    "url": url,
+                    "error": str(exc),
+                    "error_code": "SCRAPE_ERROR",
+                }
+                self._errors.append(error_entry)
                 logger.warning("Scrape exception for %s: %s", url, exc)
                 if depth == 0:
                     raise  # let the caller handle start URL failure
@@ -722,8 +764,11 @@ class CrawlEngine:
             if not result.get("success"):
                 error_msg = result.get("error", "Unknown scrape error")
 
-                # Detect politeness-blocked results
-                if "Blocked by politeness" in error_msg:
+                # Detect politeness-blocked results (VAL-CONC-025)
+                if (
+                    "Blocked by politeness" in error_msg
+                    or "ROBOTS_BLOCKED" in error_msg
+                ):
                     robots_entry = {
                         "url": url,
                         "error": error_msg,
@@ -737,7 +782,12 @@ class CrawlEngine:
                     # Blocked start URL is not a fatal error — it's expected
                     return
                 else:
-                    self._errors.append({"url": url, "error": error_msg})
+                    error_entry = {
+                        "url": url,
+                        "error": error_msg,
+                        "error_code": "SCRAPE_ERROR",
+                    }
+                    self._errors.append(error_entry)
                     logger.warning("Scrape failed for %s: %s", url, error_msg)
 
                 # Start URL failure — raise to signal immediate stop
@@ -786,8 +836,75 @@ class CrawlEngine:
                 "scraped_at": scraped_at,
                 "duration_ms": scrape_duration_ms,
             }
+
+            # ── Content-level dedup checks ──────────────────────────
+            # Layer 2: Canonical tag check (runs first).
+            # Layer 3: Content hash check (runs second, only if canonical
+            #          check did not skip the page).
+            markdown = data.get("markdown", "")
+            canonical_dup_url: str | None = None
+            content_is_dup: bool = False
+
+            # Fetch HTML for canonical checking (also reused for link
+            # extraction below if needed).
+            html = await self._get_html(url)
+
+            if html:
+                canonical_dup_url = self.dedup_manager.check_canonical(html, url)
+
+            if canonical_dup_url:
+                # Canonical duplicate — skip this page (VAL-SCRAPE-021,
+                # VAL-SCRAPE-026).
+                error_entry = {
+                    "url": url,
+                    "error": f"Duplicate canonical URL: {canonical_dup_url}",
+                    "error_type": "duplicate_canonical",
+                    "canonical_url": canonical_dup_url,
+                }
+                self._errors.append(error_entry)
+                self._dedup_skipped += 1
+                logger.info(
+                    "Canonical dedup skipped %s → canonical %s already scraped (job %s)",
+                    url,
+                    canonical_dup_url,
+                    job_id,
+                )
+                # Skip link extraction and page storage for dedup'd pages
+                return
+            else:
+                # Layer 3: Content hash dedup (VAL-SCRAPE-024, VAL-SCRAPE-026).
+                content_hash = self.dedup_manager.compute_content_hash(markdown)
+                if content_hash is not None and self.dedup_manager.is_duplicate_content(
+                    content_hash
+                ):
+                    content_is_dup = True
+
+                if content_is_dup:
+                    error_entry = {
+                        "url": url,
+                        "error": "Duplicate content (identical markdown hash)",
+                        "error_type": "duplicate_content",
+                    }
+                    self._errors.append(error_entry)
+                    self._dedup_skipped += 1
+                    logger.info(
+                        "Content dedup skipped %s — identical content already scraped (job %s)",
+                        url,
+                        job_id,
+                    )
+                    return
+
+                # Page passed all dedup checks — register it.
+                self.dedup_manager.mark_scraped(
+                    url, canonical_url=canonical_dup_url, content_hash=content_hash
+                )
+
             self._pages.append(page)
             self._scraped_count += 1
+
+            # Atomically increment the completed count (VAL-CONC-042)
+            if self.store is not None and job_id is not None:
+                self.store.increment_completed(job_id)
 
             # Fire per-page webhook callback
             if page_callback is not None and job_id is not None:
@@ -804,7 +921,10 @@ class CrawlEngine:
             # Discover child links if within max_depth
             # In "only" mode, sitemap URLs are the exclusive source
             if depth < self.options.max_depth and self.options.sitemap_mode != "only":
-                html = await self._get_html(url)
+                # Reuse the HTML fetched for canonical check if available;
+                # otherwise fetch it now for link extraction only.
+                if html is None and depth < self.options.max_depth:
+                    html = await self._get_html(url)
                 if html:
                     child_links = extract_links(html, url)
                     child_links = filter_links(
@@ -1002,28 +1122,26 @@ class CrawlEngine:
         return None
 
     def _update_store(self, job_id: str) -> None:
-        """Write current progress to the job data key (not meta).
+        """Write current progress to the job data key using atomic updates.
 
-        Updates only the ``data`` key in Valkey so the job's ``meta``
-        status (``processing``) remains unchanged during the crawl.
+        Uses ``JobStore.update_job_progress()`` which sources the
+        ``completed`` count from a Valkey INCR counter (immune to
+        read-modify-write races, per VAL-CONC-042). The job ``meta``
+        status remains ``processing`` during the crawl.
         The caller's final ``store.complete_job()`` call sets both the
         final data and the ``completed`` status.
         """
         if self.store is None:
             return
         try:
-            payload = {
-                "completed": len(self._pages),
-                "total": len(self._pages) + len(self._queue),
-                "pages": self._pages,
-                "errors": self._errors,
-                "robots_blocked": self._robots_blocked,
-            }
-            # Write data key directly without changing meta status
-            self.store.redis.set(
-                f"job:{job_id}:data",
-                json.dumps(payload),
-                ex=86400,
+            total = len(self._pages) + len(self._queue) + self._dedup_skipped
+            self.store.update_job_progress(
+                job_id=job_id,
+                pages=self._pages,
+                total=total,
+                errors=self._errors,
+                robots_blocked=self._robots_blocked,
+                filtered_out=self._filtered_out if self.options.verbose else None,
             )
         except Exception:
             logger.warning("Failed to update job store", exc_info=True)

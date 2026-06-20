@@ -12,11 +12,24 @@ logger = logging.getLogger(__name__)
 
 
 class ScraperClient:
-    """Client for the scraper-svc HTTP API."""
+    """Client for the scraper-svc HTTP API.
+
+    Connection pool limits are configured to support high concurrency
+    (up to ``max_connections=100``, per VAL-CONC-048). This prevents
+    ``PoolTimeout`` or "connection pool exhausted" errors when many
+    concurrent scrape tasks are in flight.
+    """
 
     def __init__(self, base_url: str = "http://scraper-svc:8001"):
         self.base_url = base_url.rstrip("/")
-        self._client = httpx.AsyncClient(timeout=60)
+        self._client = httpx.AsyncClient(
+            timeout=60,
+            limits=httpx.Limits(
+                max_connections=100,
+                max_keepalive_connections=50,
+                keepalive_expiry=30.0,
+            ),
+        )
 
     async def scrape(
         self,
@@ -24,6 +37,7 @@ class ScraperClient:
         force_browser: bool = False,
         ignore_robots_txt: bool = False,
         robots_user_agent: str | None = None,
+        scrape_options: dict | None = None,
     ) -> dict:
         """Scrape a URL via the scraper service.
 
@@ -38,6 +52,10 @@ class ScraperClient:
 
         When ``robots_user_agent`` is set, it is used as the User-Agent for
         robots.txt evaluation instead of the default bot UA.
+
+        When ``scrape_options`` is set, it is forwarded as-is to the
+        scraper-svc ``/scrape`` endpoint so that per-page extraction
+        options (formats, content filtering, viewport, etc.) are applied.
         """
         start = time.monotonic()
         try:
@@ -48,6 +66,8 @@ class ScraperClient:
                 body["ignore_robots_txt"] = True
             if robots_user_agent is not None:
                 body["robots_user_agent"] = robots_user_agent
+            if scrape_options:
+                body["scrape_options"] = scrape_options
             resp = await self._client.post(
                 f"{self.base_url}/scrape",
                 json=body,

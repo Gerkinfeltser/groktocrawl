@@ -290,7 +290,28 @@ async def cancel_agent(request: Request, job_id: str) -> AgentCancelResponse:
 
 
 @router.post("/v2/crawl", response_model=CrawlCreateResponse)
-async def create_crawl(request: Request, body: CrawlRequest) -> CrawlCreateResponse:
+async def create_crawl(
+    request: Request, body: CrawlRequest, response: Response
+) -> CrawlCreateResponse:
+    # ── Per-client rate limit check (VAL-CONC-047) ────────────
+    client_ip = _get_client_ip(request)
+    rate_limiter = request.app.state.rate_limiter
+    allowed, rate_remaining = await rate_limiter.check(f"{client_ip}:crawl")
+    if not allowed:
+        from .exceptions import RateLimitedError
+        from .metrics import METRICS
+
+        METRICS.counter("search_calls_total", "Total search calls", ["status"]).inc(
+            {"status": "rate_limited"}
+        )
+        raise RateLimitedError(
+            detail=f"Per-client rate limit exceeded ({rate_limiter.limit}/{rate_limiter.window}s)"
+        )
+
+    response.headers["X-Crawl-Rate-Remaining"] = (
+        f"{rate_remaining}/{rate_limiter.limit}"
+    )
+
     store: JobStore = request.app.state.job_store
     job_id = store.create_job(kind="crawl", payload=body.model_dump())
 
@@ -323,6 +344,9 @@ async def create_crawl(request: Request, body: CrawlRequest) -> CrawlCreateRespo
             delay=body.delay,
             ignore_robots_txt=body.ignore_robots_txt,
             robots_user_agent=body.robots_user_agent,
+            scrape_options=body.scrape_options.model_dump(mode="json", by_alias=True)
+            if body.scrape_options
+            else None,
         )
     )
     return CrawlCreateResponse(id=job_id)
