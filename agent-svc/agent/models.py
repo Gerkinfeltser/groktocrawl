@@ -425,7 +425,7 @@ class CrawlRequest(BaseModel):
 
     url: str
     max_pages: int = Field(
-        default=10, ge=1, description="Maximum pages to scrape, must be >= 1"
+        default=0, ge=0, description="Maximum pages to scrape, 0 = unlimited"
     )
     max_depth: int = Field(
         default=2, ge=0, description="Maximum link-follow depth, must be >= 0"

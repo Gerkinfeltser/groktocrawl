@@ -536,7 +536,7 @@ class Client:
     def crawl(
         self,
         url: str,
-        limit: int = 50,
+        limit: int = 0,
         max_depth: int = 2,
         include_paths: list[str] | None = None,
         exclude_paths: list[str] | None = None,
@@ -1765,7 +1765,11 @@ def make_parser() -> argparse.ArgumentParser:
     p_crawl = subparsers.add_parser("crawl", help="Crawl a website")
     p_crawl.add_argument("url", help="Site URL to crawl")
     p_crawl.add_argument(
-        "--limit", "-l", type=int, default=50, help="Max pages to crawl (default: 50)"
+        "--limit",
+        "-l",
+        type=int,
+        default=0,
+        help="Max pages to crawl (default: unlimited)",
     )
     p_crawl.add_argument(
         "--max-pages",
