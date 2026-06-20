@@ -245,6 +245,34 @@ async def crawl_event_stream(
         result = await crawl_task
         elapsed_ms = int((time.monotonic() - start_time) * 1000)
 
+        # Mark job as completed in store and fire crawl.completed webhook
+        # (matching sync path behavior in _process_crawl_async)
+        payload: dict[str, object] = {
+            "completed": result.completed,
+            "total": result.total,
+            "pages": result.pages,
+            "errors": result.errors,
+            "robots_blocked": result.robots_blocked,
+        }
+        store.complete_job(job_id, payload)
+        if task_tracker is not None:
+            task_tracker.create_background_task(
+                deliver_webhook(
+                    webhook_config,
+                    "crawl.completed",
+                    job_id,
+                    data=[],
+                    task_tracker=task_tracker,
+                )
+            )
+        else:
+            await deliver_webhook(
+                webhook_config,
+                "crawl.completed",
+                job_id,
+                data=[],
+            )
+
         done_payload = {
             "type": "done",
             "id": job_id,
@@ -259,12 +287,58 @@ async def crawl_event_stream(
 
     except asyncio.CancelledError:
         logger.info("Crawl SSE stream cancelled for job %s", job_id)
+        # Mark job as cancelled in store and fire webhook (matching sync path)
+        store.cancel_job(job_id)
+        if task_tracker is not None:
+            task_tracker.create_background_task(
+                deliver_webhook(
+                    webhook_config,
+                    "crawl.completed",
+                    job_id,
+                    data=[],
+                    task_tracker=task_tracker,
+                )
+            )
+        else:
+            await deliver_webhook(
+                webhook_config,
+                "crawl.completed",
+                job_id,
+                data=[],
+            )
         if crawl_task and not crawl_task.done():
             crawl_task.cancel()
+            import contextlib as _ctxlib
+
+            with _ctxlib.suppress(Exception):
+                await crawl_task
         raise
 
     except Exception as exc:
         logger.exception("Crawl SSE stream failed for job %s", job_id)
+        # Mark job as failed and fire webhook (matching sync path)
+        store.fail_job(job_id, str(exc))
+        if task_tracker is not None:
+            task_tracker.create_background_task(
+                deliver_webhook(
+                    webhook_config,
+                    "crawl.failed",
+                    job_id,
+                    data=[],
+                    success=False,
+                    error=str(exc),
+                    task_tracker=task_tracker,
+                )
+            )
+        else:
+            await deliver_webhook(
+                webhook_config,
+                "crawl.failed",
+                job_id,
+                data=[],
+                success=False,
+                error=str(exc),
+            )
         error_payload = {
             "type": "error",
             "url": url,
