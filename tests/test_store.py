@@ -263,3 +263,97 @@ class TestJobStore:
         store.increment_completed(jid)
         store.delete_completed_counter(jid)
         assert store.get_completed(jid) == 0
+
+    # ── Cancel-race-condition guards ──────────────────────────────
+
+    def test_complete_job_on_cancelled_job_preserves_cancelled(self, store, fake_redis):
+        """complete_job must NOT overwrite 'cancelled' status.
+
+        This prevents the race: DELETE /v2/crawl/{id} (cancel_job)
+        arriving between a was_cancelled check and complete_job().
+        """
+        jid = store.create_job(kind="crawl")
+        # Simulate: DELETE arrived first → status = cancelled
+        store.cancel_job(jid)
+        assert store.get_job(jid)["status"] == "cancelled"
+
+        # Now simulate: worker's complete_job() tries to run
+        store.complete_job(jid, {"pages": []})
+
+        # Status must remain 'cancelled', not 'completed'
+        meta = store.get_job(jid)
+        assert meta["status"] == "cancelled", (
+            f"Expected 'cancelled', got '{meta['status']}' — "
+            "complete_job() overwrote cancelled status!"
+        )
+
+    def test_complete_job_on_failed_job_preserves_failed(self, store, fake_redis):
+        """complete_job must NOT overwrite 'failed' status."""
+        jid = store.create_job(kind="crawl")
+        store.fail_job(jid, "Something went wrong")
+        assert store.get_job(jid)["status"] == "failed"
+
+        store.complete_job(jid, {"pages": []})
+
+        meta = store.get_job(jid)
+        assert meta["status"] == "failed"
+
+    def test_complete_job_on_completed_job_preserves_completed(self, store, fake_redis):
+        """complete_job is idempotent — calling it twice is a no-op."""
+        jid = store.create_job(kind="crawl")
+        store.complete_job(jid, {"pages": [{"url": "a"}]})
+        completed_at = store.get_job(jid)["completed_at"]
+
+        # Call complete_job again with different data
+        store.complete_job(jid, {"pages": [{"url": "b"}]})
+
+        meta = store.get_job(jid)
+        assert meta["status"] == "completed"
+        # completed_at should still be the same first timestamp
+        assert meta["completed_at"] == completed_at
+
+    def test_fail_job_on_cancelled_job_preserves_cancelled(self, store, fake_redis):
+        """fail_job must NOT overwrite 'cancelled' status.
+
+        Prevents the race: an exception thrown after cancellation
+        would otherwise overwrite the intended cancelled status.
+        """
+        jid = store.create_job(kind="crawl")
+        store.cancel_job(jid)
+        assert store.get_job(jid)["status"] == "cancelled"
+
+        store.fail_job(jid, "Some error after cancel")
+
+        meta = store.get_job(jid)
+        assert meta["status"] == "cancelled", (
+            f"Expected 'cancelled', got '{meta['status']}'"
+        )
+        # error field should NOT be set
+        assert "error" not in meta
+
+    def test_fail_job_on_completed_job_preserves_completed(self, store, fake_redis):
+        """fail_job must NOT overwrite 'completed' status."""
+        jid = store.create_job(kind="crawl")
+        store.complete_job(jid, {"pages": []})
+
+        store.fail_job(jid, "Error after completion")
+
+        meta = store.get_job(jid)
+        assert meta["status"] == "completed"
+        assert "error" not in meta
+
+    def test_complete_job_still_works_on_processing(self, store, fake_redis):
+        """complete_job on a processing job still transitions to completed."""
+        jid = store.create_job(kind="crawl")
+        store.complete_job(jid, {"pages": [{"url": "a"}]})
+        meta = store.get_job(jid)
+        assert meta["status"] == "completed"
+        assert meta["data"]["pages"] == [{"url": "a"}]
+
+    def test_fail_job_still_works_on_processing(self, store, fake_redis):
+        """fail_job on a processing job still transitions to failed."""
+        jid = store.create_job(kind="crawl")
+        store.fail_job(jid, "Error")
+        meta = store.get_job(jid)
+        assert meta["status"] == "failed"
+        assert meta["error"] == "Error"
