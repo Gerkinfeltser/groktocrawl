@@ -229,9 +229,25 @@ class CrawlCache:
         cached_data = entry.get("data")
         age_ms = self.get_age_ms(url)
 
-        # ── minAge mode — serve cached regardless of age ─────────
+        # ── minAge mode — serve cached (with freshness check against maxAge) ─
         if min_age_ms is not None and min_age_ms > 0:
             if cached_data is not None:
+                # When both minAge and maxAge are set, check age against maxAge.
+                # If cache is older than maxAge, treat as stale and trigger
+                # a fresh scrape instead of returning stale data.
+                if (
+                    max_age_ms is not None
+                    and max_age_ms > 0
+                    and age_ms is not None
+                    and age_ms >= max_age_ms
+                ):
+                    logger.debug(
+                        "Cache STALE (minAge+maxAge) for %s (age=%dms, maxAge=%dms)",
+                        url,
+                        age_ms,
+                        max_age_ms,
+                    )
+                    return False, cached_data, None
                 logger.debug(
                     "Cache HIT (minAge) for %s (age=%dms, minAge=%dms)",
                     url,
