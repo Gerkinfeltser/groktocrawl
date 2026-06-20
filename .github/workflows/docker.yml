@@ -228,16 +228,23 @@ jobs:
           # Copy full tests/ directory
           docker compose exec -T agent-svc mkdir -p /app/tests
           docker cp tests/. "$svc":/app/tests/
-          # Copy service source packages so tests can import them
-          # Each package_dir (e.g. scraper-svc/scraper) becomes /app/<package_dir>/
-          for pkg in scraper-svc/scraper parse-svc/parse_svc portal-svc/portal browser-svc/browser_svc search-svc/search_svc llm-svc/llm_svc; do
-            docker compose exec -T agent-svc mkdir -p "/app/$pkg"
-            docker cp "$pkg/." "$svc:/app/$pkg/"
+          # Copy service source packages and pyproject.toml so tests can import them
+          # Each service dir (e.g. scraper-svc) is copied wholesale to /app/<svc>/
+          for svc_dir in scraper-svc parse-svc portal-svc browser-svc search-svc llm-svc; do
+            docker compose exec -T agent-svc mkdir -p "/app/$svc_dir"
+            docker cp "$svc_dir/." "$svc:/app/$svc_dir/"
           done
+          # Copy common/ for shared imports
+          docker compose exec -T agent-svc mkdir -p /app/common
+          docker cp common/. "$svc":/app/common/
 
       - name: Run integration tests
         run: |
-          docker compose exec -T agent-svc pip install pytest pytest-timeout playwright -q
+          # Install test deps and all service packages so imports resolve
+          docker compose exec -T agent-svc pip install pytest pytest-timeout -q
+          for svc_dir in scraper-svc parse-svc portal-svc browser-svc search-svc llm-svc; do
+            docker compose exec -T agent-svc pip install -e "/app/$svc_dir" -q 2>/dev/null || true
+          done
           docker compose exec -T \
             -e PYTHONPATH=/app/agent-svc:/app/scraper-svc:/app/search-svc:/app/llm-svc:/app/parse-svc:/app/portal-svc:/app/browser-svc:/app \
             -e SCRAPER_BASE_URL=http://scraper-svc:8001 \
