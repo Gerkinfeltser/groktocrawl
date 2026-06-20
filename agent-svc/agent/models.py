@@ -270,6 +270,11 @@ class CrawlRequest(BaseModel):
         default=None,
         description="Per-page scrape options controlling output format, content filtering, viewport, and timeout behavior. Applied to every page in the crawl, including the start URL.",
     )
+    prompt: str | None = Field(
+        default=None,
+        max_length=10000,
+        description="Natural language description of what to crawl. Used to derive crawl parameters (includePaths, excludePaths, maxDepth) via LLM. Explicitly-set parameters override LLM-derived ones.",
+    )
 
     @field_validator("url")
     @classmethod
@@ -361,6 +366,61 @@ class CrawlStatusResponse(BaseModel):
     completed_at: str | None = None
     expires_at: str | None = None
     duration: int | None = None
+
+
+class ParamsPreviewRequest(BaseModel):
+    """Request model for POST /v2/crawl/params-preview.
+
+    Attributes:
+        url: The target URL to crawl (used for context).
+        prompt: Natural language description of what to crawl.
+            Required — the endpoint derives crawl parameters from this.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, alias_generator=to_camel)
+
+    url: str
+    prompt: str = Field(
+        ...,
+        max_length=10000,
+        description="Natural language description of what to crawl",
+    )
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        """Validate that url is a well-formed HTTP/HTTPS URL."""
+        from urllib.parse import urlparse
+
+        parsed = urlparse(value)
+        if not parsed.scheme:
+            raise ValueError("URL must have a scheme (http:// or https://)")
+        if parsed.scheme.lower() not in ("http", "https"):
+            raise ValueError(f"URL scheme must be http or https, got '{parsed.scheme}'")
+        if not parsed.netloc:
+            raise ValueError("URL must have a network location (host)")
+        return value
+
+
+class ParamsPreviewResponse(BaseModel):
+    """Response model for POST /v2/crawl/params-preview.
+
+    Returns the derived crawl parameters WITHOUT starting a crawl job.
+    Explicitly-set fields (when provided alongside ``prompt``) override
+    LLM-derived equivalents — this preview shows the final merged result.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, alias_generator=to_camel)
+
+    success: bool = True
+    include_paths: list[str] | None = None
+    exclude_paths: list[str] | None = None
+    max_depth: int | None = None
+    limit: int | None = None
+    ignore_robots_txt: bool | None = None
+    robots_user_agent: str | None = None
+    deduplicate_similar_urls: bool | None = None
+    error: str | None = None
 
 
 class BatchScrapeRequest(BaseModel):

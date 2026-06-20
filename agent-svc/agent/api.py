@@ -54,6 +54,8 @@ from .models import (
     MonitorListResponse,
     MonitorResponse,
     MonitorUpdateRequest,
+    ParamsPreviewRequest,
+    ParamsPreviewResponse,
     ParseResponse,
     ScrapeData,
     ScrapeRequest,
@@ -316,6 +318,49 @@ async def create_crawl(
         f"{rate_remaining}/{rate_limiter.limit}"
     )
 
+    # ── NL→params: derive from prompt, merge with explicit params ──
+    include_paths = body.include_paths
+    exclude_paths = body.exclude_paths
+    max_depth = body.max_depth
+
+    if body.prompt:
+        from .nl_params import derive_crawl_params, merge_params
+
+        # Detect which fields were explicitly set by the user
+        # (exclude_unset=True only includes fields present in the request body)
+        explicitly_set = body.model_dump(exclude_unset=True)
+
+        # Explicit params that the user set (non-None values that were in the request)
+        explicit: dict[str, object] = {}
+        if "include_paths" in explicitly_set and body.include_paths is not None:
+            explicit["include_paths"] = body.include_paths
+        if "exclude_paths" in explicitly_set and body.exclude_paths is not None:
+            explicit["exclude_paths"] = body.exclude_paths
+        if "max_depth" in explicitly_set:
+            explicit["max_depth"] = body.max_depth
+
+        llm_result = await derive_crawl_params(
+            prompt=body.prompt,
+            llm_base_url=request.app.state.llm_base_url,
+            llm_api_key=request.app.state.llm_api_key,
+            llm_model=request.app.state.llm_model,
+        )
+
+        llm_error = llm_result.get("error")
+        if llm_error:
+            logger.warning("NL→params for crawl %s: %s", "pending", llm_error)
+
+        # Merge: explicit beats LLM
+        merged = merge_params(llm_result, explicit)  # type: ignore[arg-type]
+
+        # Apply merged values (only if not overridden by explicit user params)
+        if "include_paths" in merged and "include_paths" not in explicitly_set:
+            include_paths = merged["include_paths"]
+        if "exclude_paths" in merged and "exclude_paths" not in explicitly_set:
+            exclude_paths = merged["exclude_paths"]
+        if "max_depth" in merged and "max_depth" not in explicitly_set:
+            max_depth = merged["max_depth"]
+
     store: JobStore = request.app.state.job_store
     job_id = store.create_job(kind="crawl", payload=body.model_dump())
 
@@ -331,13 +376,13 @@ async def create_crawl(
             job_id=job_id,
             url=body.url,
             max_pages=effective_max_pages,
-            max_depth=body.max_depth,
+            max_depth=max_depth,
             scraper_url=request.app.state.scraper_url,
             webhook_config=body.webhook,
             task_tracker=request.app.state.task_tracker,
             ignore_query_parameters=body.ignore_query_parameters,
-            include_paths=body.include_paths,
-            exclude_paths=body.exclude_paths,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
             regex_on_full_url=body.regex_on_full_url,
             verbose=body.verbose,
             sitemap_mode=body.sitemap,
@@ -444,6 +489,50 @@ async def cancel_crawl(request: Request, job_id: str) -> AgentCancelResponse:
             detail="Job not found or already completed", details={"job_id": job_id}
         )
     return AgentCancelResponse(success=True)
+
+
+@router.post("/v2/crawl/params-preview", response_model=ParamsPreviewResponse)
+async def params_preview(
+    request: Request, body: ParamsPreviewRequest
+) -> ParamsPreviewResponse:
+    """Preview crawl parameters derived from a natural-language prompt.
+
+    Accepts a ``url`` and ``prompt``, translates the prompt into crawl
+    parameters using the LLM, and returns the derived parameters WITHOUT
+    starting a crawl job.
+
+    The endpoint is synchronous — no job ID is created.
+
+    Returns:
+        - ``include_paths``, ``exclude_paths``, ``max_depth``,
+          ``limit``, and other derived params
+        - ``error`` if the LLM is unavailable or returns invalid JSON
+          (the caller can still proceed with default crawl params)
+    """
+    from .nl_params import derive_crawl_params
+
+    llm_base_url = request.app.state.llm_base_url
+    llm_api_key = request.app.state.llm_api_key
+    llm_model = request.app.state.llm_model
+
+    result = await derive_crawl_params(
+        prompt=body.prompt,
+        llm_base_url=llm_base_url,
+        llm_api_key=llm_api_key,
+        llm_model=llm_model,
+    )
+
+    return ParamsPreviewResponse(
+        success=("error" not in result),
+        include_paths=result.get("include_paths"),
+        exclude_paths=result.get("exclude_paths"),
+        max_depth=result.get("max_depth"),
+        limit=result.get("max_pages"),
+        ignore_robots_txt=result.get("ignore_robots_txt"),
+        robots_user_agent=result.get("robots_user_agent"),
+        deduplicate_similar_urls=result.get("deduplicate_similar_urls"),
+        error=result.get("error"),
+    )
 
 
 @router.get("/v2/crawl/{job_id}/errors", response_model=CrawlErrorsResponse)
