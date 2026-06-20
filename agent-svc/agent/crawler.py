@@ -633,9 +633,16 @@ class CrawlEngine:
             self.options.delay,
         )
 
-        while (self._queue or self._pending_tasks) and len(
-            self._pages
-        ) < self.options.max_pages:
+        while self._queue or self._pending_tasks:
+            if (
+                self.options.max_pages > 0
+                and len(self._pages) >= self.options.max_pages
+            ):
+                logger.info(
+                    "Reached max_pages=%d — stopping crawl",
+                    self.options.max_pages,
+                )
+                break
             if self._cancel_flag:
                 logger.info("Crawl cancelled via cancel flag")
                 break
