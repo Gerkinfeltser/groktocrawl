@@ -90,8 +90,12 @@ class AgentCancelResponse(BaseModel):
 
 class CrawlRequest(BaseModel):
     url: str
-    max_pages: int = 10
-    max_depth: int = 2
+    max_pages: int = Field(
+        default=10, ge=1, description="Maximum pages to scrape, must be >= 1"
+    )
+    max_depth: int = Field(
+        default=2, ge=0, description="Maximum link-follow depth, must be >= 0"
+    )
     limit: int | None = None
     ignore_sitemap: bool = False
     ignore_query_parameters: bool = False
@@ -149,6 +153,10 @@ class CrawlStatusResponse(BaseModel):
     credits_used: int | None = None
     data: list[dict[str, Any]] | None = None
     error: str | None = None
+    created_at: str | None = None
+    completed_at: str | None = None
+    expires_at: str | None = None
+    duration: int | None = None
 
 
 class BatchScrapeRequest(BaseModel):

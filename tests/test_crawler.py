@@ -1443,3 +1443,266 @@ class TestPathFiltering:
         assert "http://example.com/other-page" not in urls
         # /pages should NOT match /page$ (because $ anchors to end)
         assert "http://example.com/pages" not in urls
+
+
+# ── CrawlStatusResponse enhancement tests ────────────────────────
+
+
+class TestCrawlStatusResponseModel:
+    """Tests for CrawlStatusResponse model with new timestamp fields."""
+
+    def test_crawl_status_response_has_timestamp_fields(self):
+        """CrawlStatusResponse model includes created_at, completed_at, expires_at, duration."""
+        from agent.models import CrawlStatusResponse
+
+        # While processing (no completed_at, no duration)
+        resp = CrawlStatusResponse(
+            status="processing",
+            completed=0,
+            total=5,
+            created_at="2026-01-15T10:00:00+00:00",
+            expires_at="2026-01-16T10:00:00+00:00",
+        )
+        assert resp.created_at == "2026-01-15T10:00:00+00:00"
+        assert resp.expires_at == "2026-01-16T10:00:00+00:00"
+        assert resp.completed_at is None
+        assert resp.duration is None
+
+        # On completion (all four fields present)
+        resp2 = CrawlStatusResponse(
+            status="completed",
+            completed=5,
+            total=5,
+            created_at="2026-01-15T10:00:00+00:00",
+            completed_at="2026-01-15T10:00:05+00:00",
+            expires_at="2026-01-16T10:00:00+00:00",
+            duration=5000,
+        )
+        assert resp2.created_at is not None
+        assert resp2.completed_at is not None
+        assert resp2.expires_at is not None
+        assert resp2.duration == 5000
+        # Verify created_at < completed_at <= expires_at
+        assert resp2.created_at < resp2.completed_at <= resp2.expires_at
+
+    def test_crawl_status_response_defaults(self):
+        """CrawlStatusResponse defaults to processing state with no timestamp fields."""
+        from agent.models import CrawlStatusResponse
+
+        resp = CrawlStatusResponse()
+        assert resp.status == "processing"
+        assert resp.completed == 0
+        assert resp.total == 0
+        assert resp.created_at is None
+        assert resp.completed_at is None
+        assert resp.expires_at is None
+        assert resp.duration is None
+
+
+# ── CrawlRequest validation tests ────────────────────────────────
+
+
+class TestCrawlRequestValidation:
+    """Tests for CrawlRequest field validation."""
+
+    def test_max_pages_positive_accepts_valid(self):
+        """max_pages >= 1 is accepted."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com", max_pages=1)
+        assert req.max_pages == 1
+
+        req2 = CrawlRequest(url="http://example.com", max_pages=100)
+        assert req2.max_pages == 100
+
+    def test_max_pages_zero_rejected(self):
+        """max_pages=0 raises validation error."""
+        from agent.models import CrawlRequest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="max_pages"):
+            CrawlRequest(url="http://example.com", max_pages=0)
+
+    def test_max_depth_non_negative_accepts_valid(self):
+        """max_depth >= 0 is accepted."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com", max_depth=0)
+        assert req.max_depth == 0
+
+        req2 = CrawlRequest(url="http://example.com", max_depth=5)
+        assert req2.max_depth == 5
+
+    def test_max_depth_negative_rejected(self):
+        """max_depth=-1 raises validation error."""
+        from agent.models import CrawlRequest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="max_depth"):
+            CrawlRequest(url="http://example.com", max_depth=-1)
+
+    def test_max_depth_default_is_two(self):
+        """Default max_depth is 2."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com")
+        assert req.max_depth == 2
+
+    def test_max_pages_default_is_ten(self):
+        """Default max_pages is 10."""
+        from agent.models import CrawlRequest
+
+        req = CrawlRequest(url="http://example.com")
+        assert req.max_pages == 10
+
+
+# ── Store tests ──────────────────────────────────────────────────
+
+
+class TestJobStoreExpiresAt:
+    """Tests for JobStore expires_at field."""
+
+    @pytest.mark.skip(reason="Requires running valkey/redis server")
+    def test_create_job_includes_expires_at(self):
+        """JobStore.create_job sets expires_at in job metadata."""
+        from agent.store import JobStore
+
+        store = JobStore()
+        job_id = store.create_job(kind="crawl", payload={"url": "http://example.com"})
+        try:
+            meta_raw = store.redis.get(f"job:{job_id}:meta")
+            assert meta_raw is not None
+
+            import json
+
+            meta = json.loads(meta_raw)
+            assert "expires_at" in meta
+            assert meta["expires_at"] is not None
+            # expires_at should be a valid ISO 8601 string
+            from datetime import datetime
+
+            parsed = datetime.fromisoformat(meta["expires_at"])
+            assert parsed is not None
+
+            # expires_at should be ~24h after created_at
+            created = datetime.fromisoformat(meta["created_at"])
+            diff = parsed - created
+            assert 23 * 3600 <= diff.total_seconds() <= 25 * 3600  # ~24h window
+        finally:
+            store.redis.delete(f"job:{job_id}:meta")
+
+    @pytest.mark.skip(reason="Requires running valkey/redis server")
+    def test_complete_job_sets_completed_at(self):
+        """JobStore.complete_job sets completed_at in metadata."""
+        from agent.store import JobStore
+
+        store = JobStore()
+        job_id = store.create_job(kind="crawl", payload={"url": "http://example.com"})
+        try:
+            store.complete_job(job_id, {"completed": 1, "total": 1})
+
+            meta_raw = store.redis.get(f"job:{job_id}:meta")
+            assert meta_raw is not None
+
+            import json
+
+            meta = json.loads(meta_raw)
+            assert "completed_at" in meta
+            assert meta["completed_at"] is not None
+            # completed_at should be a valid ISO 8601 string
+            from datetime import datetime
+
+            parsed = datetime.fromisoformat(meta["completed_at"])
+            assert parsed is not None
+            assert meta["status"] == "completed"
+        finally:
+            store.redis.delete(f"job:{job_id}:meta")
+            store.redis.delete(f"job:{job_id}:data")
+
+
+# ── Per-page metadata enrichment tests ──────────────────────────
+
+
+class TestPerPageMetadata:
+    """Tests for per-page metadata enrichment in CrawlEngine."""
+
+    @pytest.mark.asyncio
+    async def test_page_includes_title_and_metadata(self, mock_scraper):
+        """Each page in crawl results includes title, metadata dict with title/description/source,
+        status_code, content_type, scraped_at, and duration_ms."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        # Mock scraper to return enriched data with metadata
+        async def scrape_side_effect(url: str, force_browser: bool = False) -> dict:
+            return {
+                "success": True,
+                "data": {
+                    "markdown": f"# Content of {url}",
+                    "source": "playwright",
+                    "metadata": {
+                        "title": "Test Page",
+                        "description": "A test page description",
+                        "sourceURL": url,
+                        "statusCode": 200,
+                        "content-type": "text/html",
+                    },
+                },
+            }
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(max_pages=1, max_depth=0),
+        )
+
+        result = await engine.run("http://example.com/")
+
+        assert len(result.pages) == 1
+        page = result.pages[0]
+
+        # Verify metadata fields
+        assert page["url"] == "http://example.com/"
+        assert page["markdown"] == "# Content of http://example.com/"
+        assert page["title"] == "Test Page"
+        assert page["metadata"]["title"] == "Test Page"
+        assert page["metadata"]["description"] == "A test page description"
+        assert page["metadata"]["source"] == "playwright"
+        assert page["status_code"] == 200
+        assert page["content_type"] == "text/html"
+        assert page["scraped_at"] is not None
+        assert isinstance(page["duration_ms"], int)
+        assert page["duration_ms"] >= 0
+
+    @pytest.mark.asyncio
+    async def test_page_metadata_falls_back_gracefully(self, mock_scraper):
+        """When scraper returns minimal data, metadata fields fall back to defaults."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        # Minimal scraper response
+        mock_scraper.scrape = AsyncMock(
+            return_value={"success": True, "data": {"markdown": "Just text"}}
+        )
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(max_pages=1, max_depth=0),
+        )
+
+        result = await engine.run("http://example.com/")
+
+        assert len(result.pages) == 1
+        page = result.pages[0]
+
+        assert page["url"] == "http://example.com/"
+        assert page["markdown"] == "Just text"
+        assert page["title"] == ""  # falls back to empty string
+        assert page["metadata"]["title"] == ""
+        assert page["metadata"]["description"] == ""
+        assert page["metadata"]["source"] == "unknown"
+        assert page["status_code"] == 200  # default
+        assert page["content_type"] == "text/html"  # default
+        assert page["scraped_at"] is not None
+        assert isinstance(page["duration_ms"], int)
