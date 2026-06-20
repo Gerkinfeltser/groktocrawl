@@ -991,7 +991,13 @@ class CrawlEngine:
                 or metadata.get("description")
                 or ""
             )
-            source = data.get("source", "unknown")
+            language = (
+                metadata.get("language")
+                or metadata.get("lang")
+                or meta.get("language")
+                or ""
+            )
+            source_url = url  # The source URL is the page URL itself
             status_code = metadata.get("statusCode") or data.get("status_code") or 200
             content_type = (
                 metadata.get("content-type")
@@ -1006,7 +1012,9 @@ class CrawlEngine:
                 "metadata": {
                     "title": title,
                     "description": description,
-                    "source": source,
+                    "language": language,
+                    "sourceURL": source_url,
+                    "statusCode": status_code,
                 },
                 "title": title,
                 "status_code": status_code,

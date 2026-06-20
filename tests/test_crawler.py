@@ -1793,7 +1793,9 @@ class TestPerPageMetadata:
         assert page["title"] == "Test Page"
         assert page["metadata"]["title"] == "Test Page"
         assert page["metadata"]["description"] == "A test page description"
-        assert page["metadata"]["source"] == "playwright"
+        assert page["metadata"]["sourceURL"] == "http://example.com/"
+        assert page["metadata"]["statusCode"] == 200
+        assert page["metadata"]["language"] == ""
         assert page["status_code"] == 200
         assert page["content_type"] == "text/html"
         assert page["scraped_at"] is not None
@@ -1826,7 +1828,9 @@ class TestPerPageMetadata:
         assert page["title"] == ""  # falls back to empty string
         assert page["metadata"]["title"] == ""
         assert page["metadata"]["description"] == ""
-        assert page["metadata"]["source"] == "unknown"
+        assert page["metadata"]["sourceURL"] == "http://example.com/"
+        assert page["metadata"]["statusCode"] == 200
+        assert page["metadata"]["language"] == ""
         assert page["status_code"] == 200  # default
         assert page["content_type"] == "text/html"  # default
         assert page["scraped_at"] is not None
