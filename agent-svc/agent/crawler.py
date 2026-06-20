@@ -35,6 +35,100 @@ from .store import JobStore
 logger = logging.getLogger(__name__)
 
 
+def _now_timestamp() -> str:
+    """Return the current UTC time as an ISO 8601 timestamp string."""
+    return datetime.now(UTC).isoformat()
+
+
+def _classify_scrape_error(error_msg: str, error_code: str = "") -> str:
+    """Classify a scrape error message into a machine-readable error type.
+
+    Maps error strings from the scraper-svc and httpx to standardised
+    error types used by the ``/v2/crawl/{id}/errors`` endpoint:
+
+    - ``dns_error``: DNS resolution failures
+    - ``connection_error``: Connection refused / reset / closed
+    - ``http_error``: HTTP 4xx/5xx status codes
+    - ``timeout``: Request-level timeouts (not per-page scrape timeouts,
+      which are caught separately as ``asyncio.TimeoutError``)
+    - ``scrape_error``: Generic/fallback scrape failures
+
+    Args:
+        error_msg: The error message string from the scraper response.
+        error_code: Optional machine-readable error code from the scraper.
+
+    Returns:
+        A standardised error type string.
+    """
+    # If the scraper-svc provided a structured error_code, use it.
+    code_map = {
+        "TIMEOUT": "timeout",
+        "UPSTREAM_ERROR": "http_error",
+        "INVALID_REQUEST": "scrape_error",
+        "AUTH_ERROR": "http_error",
+    }
+    if error_code in code_map:
+        return code_map[error_code]
+
+    msg_lower = error_msg.lower()
+
+    # DNS resolution failures
+    if any(
+        pattern in msg_lower
+        for pattern in [
+            "name resolution",
+            "getaddrinfo",
+            "dns",
+            "no address found",
+            "nodename nor servname provided",
+            "temporary name error",
+            "name or service not known",
+        ]
+    ):
+        return "dns_error"
+
+    # Connection-level errors
+    if any(
+        pattern in msg_lower
+        for pattern in [
+            "connection refused",
+            "connection reset",
+            "connection closed",
+            "connection aborted",
+            "connect call failed",
+            "no route to host",
+            "network is unreachable",
+            "connection timed out",
+        ]
+    ):
+        return "connection_error"
+
+    # HTTP errors
+    if any(
+        pattern in msg_lower
+        for pattern in [
+            "http 4",
+            "http 5",
+            "status code 4",
+            "status code 5",
+            "400 bad request",
+            "401 unauthorized",
+            "403 forbidden",
+            "404 not found",
+            "500 internal",
+            "502 bad gateway",
+            "503 service unavailable",
+        ]
+    ):
+        return "http_error"
+
+    # Scraper-level timeouts (caught in fetch tiers)
+    if "timed out" in msg_lower or "timeout" in msg_lower:
+        return "timeout"
+
+    return "scrape_error"
+
+
 # ── Data types ───────────────────────────────────────────────────
 
 
@@ -739,7 +833,9 @@ class CrawlEngine:
                         {
                             "url": url,
                             "error": cache_err,
+                            "error_type": "cache_miss",
                             "error_code": "CACHE_MISS",
+                            "timestamp": _now_timestamp(),
                         }
                     )
                     logger.info(
@@ -765,6 +861,10 @@ class CrawlEngine:
                 # ── Fresh scrape — full scraper call ─────────────
                 scrape_start = time.monotonic()
                 per_scrape_timeout = 60.0
+                # Derive user-configured timeout from scrape_options (in ms → s)
+                user_timeout_ms: int | None = None
+                if self.options.scrape_options:
+                    user_timeout_ms = self.options.scrape_options.get("timeout")
                 try:
                     result = await asyncio.wait_for(
                         self.scraper.scrape(
@@ -777,10 +877,14 @@ class CrawlEngine:
                     )
                 except TimeoutError:
                     elapsed = time.monotonic() - scrape_start
-                    timeout_entry = {
+                    timeout_entry: dict = {
                         "url": url,
                         "error": f"Scrape timed out after {elapsed:.1f}s",
+                        "error_type": "timeout",
                         "error_code": "TIMEOUT",
+                        "timestamp": _now_timestamp(),
+                        "timeout_ms": user_timeout_ms or int(per_scrape_timeout * 1000),
+                        "elapsed_ms": int(elapsed * 1000),
                     }
                     self._errors.append(timeout_entry)
                     logger.warning(
@@ -797,7 +901,9 @@ class CrawlEngine:
                     error_entry = {
                         "url": url,
                         "error": str(exc),
+                        "error_type": "scrape_error",
                         "error_code": "SCRAPE_ERROR",
+                        "timestamp": _now_timestamp(),
                     }
                     self._errors.append(error_entry)
                     logger.warning("Scrape exception for %s: %s", url, exc)
@@ -818,16 +924,21 @@ class CrawlEngine:
 
             if not result.get("success"):
                 error_msg = result.get("error", "Unknown scrape error")
+                error_code = result.get("error_code", "")
 
                 # Detect politeness-blocked results (VAL-CONC-025)
                 if (
-                    "Blocked by politeness" in error_msg
+                    error_code == "ROBOTS_BLOCKED"
+                    or "Blocked by politeness" in error_msg
                     or "ROBOTS_BLOCKED" in error_msg
                 ):
+                    now_ts = _now_timestamp()
                     robots_entry = {
                         "url": url,
                         "error": error_msg,
+                        "error_type": "robots_blocked",
                         "error_code": "ROBOTS_BLOCKED",
+                        "timestamp": now_ts,
                     }
                     self._robots_blocked.append(robots_entry)
                     self._errors.append(robots_entry)
@@ -837,12 +948,24 @@ class CrawlEngine:
                     # Blocked start URL is not a fatal error — it's expected
                     return
                 else:
-                    error_entry = {
+                    # Classify error type based on error message content
+                    cls_error_type = _classify_scrape_error(error_msg, error_code)
+                    scrape_error_entry: dict = {
                         "url": url,
                         "error": error_msg,
-                        "error_code": "SCRAPE_ERROR",
+                        "error_type": cls_error_type,
+                        "error_code": error_code or "SCRAPE_ERROR",
+                        "timestamp": _now_timestamp(),
                     }
-                    self._errors.append(error_entry)
+                    # Include http_status for HTTP errors if available
+                    http_status = result.get("http_status")
+                    if http_status is not None:
+                        scrape_error_entry["http_status"] = http_status
+                    # Include error_detail from scraper-svc if available
+                    error_detail = result.get("data", {}).get("error_detail")
+                    if error_detail:
+                        scrape_error_entry["error_detail"] = error_detail
+                    self._errors.append(scrape_error_entry)
                     logger.warning("Scrape failed for %s: %s", url, error_msg)
 
                 # Start URL failure — raise to signal immediate stop
@@ -914,6 +1037,8 @@ class CrawlEngine:
                     "url": url,
                     "error": f"Duplicate canonical URL: {canonical_dup_url}",
                     "error_type": "duplicate_canonical",
+                    "error_code": "DUPLICATE_CANONICAL",
+                    "timestamp": _now_timestamp(),
                     "canonical_url": canonical_dup_url,
                 }
                 self._errors.append(error_entry)
@@ -939,6 +1064,8 @@ class CrawlEngine:
                         "url": url,
                         "error": "Duplicate content (identical markdown hash)",
                         "error_type": "duplicate_content",
+                        "error_code": "DUPLICATE_CONTENT",
+                        "timestamp": _now_timestamp(),
                     }
                     self._errors.append(error_entry)
                     self._dedup_skipped += 1

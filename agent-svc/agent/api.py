@@ -34,7 +34,11 @@ from .models import (
     BrowserExecuteResponse,
     BrowserListResponse,
     Citation,
+    CrawlActiveItem,
+    CrawlActiveResponse,
     CrawlCreateResponse,
+    CrawlErrorItem,
+    CrawlErrorsResponse,
     CrawlRequest,
     CrawlStatusResponse,
     ExtractCreateResponse,
@@ -352,6 +356,51 @@ async def create_crawl(
     return CrawlCreateResponse(id=job_id)
 
 
+@router.get("/v2/crawl/active", response_model=CrawlActiveResponse)
+async def list_active_crawls(
+    request: Request,
+    status: str = "processing",
+) -> CrawlActiveResponse:
+    """List all active crawl jobs.
+
+    Returns only jobs with ``kind: "crawl"``. By default returns jobs
+    with ``status: "processing"`` (excluding completed, failed, and
+    cancelled crawls). Filterable via the ``status`` query parameter.
+
+    Each item includes crawl-specific fields: ``url``, ``max_pages``,
+    ``max_depth``, ``completed``, ``total``, ``status``, and ``created_at``.
+
+    Returns an empty ``data`` array (HTTP 200) when no active crawls exist.
+    """
+    store: JobStore = request.app.state.job_store
+    jobs = store.list_active_jobs(kind="crawl", status=status, limit=50)
+    items: list[CrawlActiveItem] = []
+    for job in jobs:
+        payload = job.get("payload") or {}
+        url = payload.get("url") if isinstance(payload, dict) else None
+        max_pages = payload.get("max_pages") if isinstance(payload, dict) else None
+        max_depth = payload.get("max_depth") if isinstance(payload, dict) else None
+
+        # Get completed/total from data payload (set during crawl progress)
+        data = job.get("data") or {}
+        completed = data.get("completed", 0) if isinstance(data, dict) else 0
+        total = data.get("total", 0) if isinstance(data, dict) else 0
+
+        items.append(
+            CrawlActiveItem(
+                id=job["id"],
+                url=url,
+                status=job.get("status", "processing"),
+                created_at=job.get("created_at", ""),
+                completed=completed,
+                total=total,
+                max_pages=max_pages,
+                max_depth=max_depth,
+            )
+        )
+    return CrawlActiveResponse(data=items)
+
+
 @router.get("/v2/crawl/{job_id}", response_model=CrawlStatusResponse)
 async def get_crawl_status(request: Request, job_id: str) -> CrawlStatusResponse:
     store: JobStore = request.app.state.job_store
@@ -397,27 +446,38 @@ async def cancel_crawl(request: Request, job_id: str) -> AgentCancelResponse:
     return AgentCancelResponse(success=True)
 
 
-@router.get("/v2/crawl/{job_id}/errors")
-async def get_crawl_errors(request: Request, job_id: str) -> dict:
+@router.get("/v2/crawl/{job_id}/errors", response_model=CrawlErrorsResponse)
+async def get_crawl_errors(request: Request, job_id: str) -> CrawlErrorsResponse:
     """Return per-URL errors and robots-blocked URLs for a crawl job.
 
-    Returns a dict with:
-        - ``errors``: list of failed URLs with error messages
-        - ``robots_blocked``: list of URLs blocked by robots.txt/politeness
-          (also present in ``errors`` with ``error_code: "ROBOTS_BLOCKED"``)
+    Returns a ``CrawlErrorsResponse`` with:
 
-    Each entry has ``url``, ``error``, and optionally ``error_code`` fields.
+    - ``errors``: list of error objects. Each has ``url``, ``error``
+      (human-readable message), ``error_type`` (machine-readable
+      category), ``error_code``, and ``timestamp``.
+    - ``robots_blocked``: subset of ``errors`` containing only URLs that
+      were blocked by robots.txt or politeness rate limiting. Each entry
+      has ``error_type: "robots_blocked"``.
+
+    Scraper failures appear in ``errors`` but NOT in ``robots_blocked``.
+    Politeness/robots.txt blocks appear in BOTH arrays.
+
+    Returns 404 for unknown job IDs. Returns empty arrays for successful
+    crawls with no errors. Errors persist until the job TTL expires (24h
+    after creation).
     """
     store: JobStore = request.app.state.job_store
     job = store.get_job(job_id)
     if job is None:
         raise NotFoundError(detail="Job not found", details={"job_id": job_id})
     data = job.get("data") or {}
-    return {
-        "success": True,
-        "errors": data.get("errors", []),
-        "robots_blocked": data.get("robots_blocked", []),
-    }
+    raw_errors: list[dict] = data.get("errors", [])
+    raw_robots_blocked: list[dict] = data.get("robots_blocked", [])
+    return CrawlErrorsResponse(
+        success=True,
+        errors=[CrawlErrorItem(**e) for e in raw_errors],
+        robots_blocked=[CrawlErrorItem(**e) for e in raw_robots_blocked],
+    )
 
 
 @router.post("/v2/batch/scrape", response_model=CrawlCreateResponse)
