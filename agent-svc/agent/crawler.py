@@ -521,6 +521,10 @@ class CrawlEngine:
             [str, dict], collections.abc.Awaitable[None]
         ]
         | None = None,
+        error_callback: collections.abc.Callable[
+            [str, dict], collections.abc.Awaitable[None]
+        ]
+        | None = None,
     ) -> CrawlResult:
         """Execute a BFS crawl starting from ``start_url``.
 
@@ -634,7 +638,9 @@ class CrawlEngine:
                 and len(self._pending_tasks) < self._effective_concurrency
                 and len(self._pages) + len(self._pending_tasks) < self.options.max_pages
             ):
-                task = self._create_scrape_task(page_callback, job_id, base_domain)
+                task = self._create_scrape_task(
+                    page_callback, error_callback, job_id, base_domain
+                )
                 if task is None:
                     # Queue exhausted or all items filtered
                     break
@@ -710,6 +716,10 @@ class CrawlEngine:
             [str, dict], collections.abc.Awaitable[None]
         ]
         | None,
+        error_callback: collections.abc.Callable[
+            [str, dict], collections.abc.Awaitable[None]
+        ]
+        | None,
         job_id: str | None,
         base_domain: str,
     ) -> asyncio.Task | None:
@@ -764,6 +774,7 @@ class CrawlEngine:
                 depth=depth,
                 base_domain=base_domain,
                 page_callback=page_callback,
+                error_callback=error_callback,
                 job_id=job_id,
             )
         )
@@ -776,6 +787,10 @@ class CrawlEngine:
         depth: int,
         base_domain: str,
         page_callback: collections.abc.Callable[
+            [str, dict], collections.abc.Awaitable[None]
+        ]
+        | None,
+        error_callback: collections.abc.Callable[
             [str, dict], collections.abc.Awaitable[None]
         ]
         | None,
@@ -844,6 +859,15 @@ class CrawlEngine:
                         job_id,
                         cache_err,
                     )
+                    if error_callback is not None:
+                        await error_callback(
+                            job_id or "",
+                            {
+                                "url": url,
+                                "error": cache_err,
+                                "error_type": "cache_miss",
+                            },
+                        )
                     return
                 if use_cached and cached_data is not None:
                     _result_from_cache = cached_data
@@ -893,6 +917,14 @@ class CrawlEngine:
                         elapsed,
                         job_id,
                     )
+                    if error_callback is not None:
+                        await error_callback(
+                            job_id or "",
+                            {
+                                "url": url,
+                                "error": f"Scrape timed out after {elapsed:.1f}s",
+                            },
+                        )
                     return
                 except asyncio.CancelledError:
                     logger.debug("Scrape cancelled for %s (job %s)", url, job_id)
@@ -909,6 +941,11 @@ class CrawlEngine:
                     logger.warning("Scrape exception for %s: %s", url, exc)
                     if depth == 0:
                         raise  # let the caller handle start URL failure
+                    if error_callback is not None:
+                        await error_callback(
+                            job_id or "",
+                            {"url": url, "error": str(exc)},
+                        )
                     return
 
                 scrape_duration_ms = int((time.monotonic() - scrape_start) * 1000)
@@ -945,6 +982,15 @@ class CrawlEngine:
                     logger.info(
                         "Politeness blocked %s (job %s): %s", url, job_id, error_msg
                     )
+                    if error_callback is not None:
+                        await error_callback(
+                            job_id or "",
+                            {
+                                "url": url,
+                                "error": error_msg,
+                                "error_type": "robots_blocked",
+                            },
+                        )
                     # Blocked start URL is not a fatal error — it's expected
                     return
                 else:
@@ -967,6 +1013,12 @@ class CrawlEngine:
                         scrape_error_entry["error_detail"] = error_detail
                     self._errors.append(scrape_error_entry)
                     logger.warning("Scrape failed for %s: %s", url, error_msg)
+
+                if error_callback is not None:
+                    await error_callback(
+                        job_id or "",
+                        {"url": url, "error": error_msg, "error_type": cls_error_type},
+                    )
 
                 # Start URL failure — raise to signal immediate stop
                 if depth == 0:
@@ -1057,6 +1109,15 @@ class CrawlEngine:
                     canonical_dup_url,
                     job_id,
                 )
+                if error_callback is not None:
+                    await error_callback(
+                        job_id or "",
+                        {
+                            "url": url,
+                            "error": f"Duplicate canonical URL: {canonical_dup_url}",
+                            "error_type": "duplicate_canonical",
+                        },
+                    )
                 # Skip link extraction and page storage for dedup'd pages
                 return
             else:
@@ -1082,6 +1143,15 @@ class CrawlEngine:
                         url,
                         job_id,
                     )
+                    if error_callback is not None:
+                        await error_callback(
+                            job_id or "",
+                            {
+                                "url": url,
+                                "error": "Duplicate content (identical markdown hash)",
+                                "error_type": "duplicate_content",
+                            },
+                        )
                     return
 
                 # Page passed all dedup checks — register it.

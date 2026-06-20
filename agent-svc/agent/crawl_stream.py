@@ -144,6 +144,16 @@ async def crawl_event_stream(
     async def _page_callback(_job_id: str, page: dict[str, Any]) -> None:
         await page_queue.put(page)
 
+    # ── Error callback: push error into queue with sentinel ───
+    async def _error_callback(_job_id: str, error: dict[str, Any]) -> None:
+        """Push a scrape error into the page queue with a sentinel key.
+
+        The main event loop distinguishes error events from page events
+        by checking for the ``_error`` sentinel key.
+        """
+        error["_error"] = True
+        await page_queue.put(error)
+
     engine = CrawlEngine(scraper, store=store, options=options)
 
     crawl_task: asyncio.Task[CrawlResult] | None = None
@@ -153,7 +163,12 @@ async def crawl_event_stream(
     try:
         # Start the crawl as a background task
         crawl_task = asyncio.create_task(
-            engine.run(url, job_id=job_id, page_callback=_page_callback)
+            engine.run(
+                url,
+                job_id=job_id,
+                page_callback=_page_callback,
+                error_callback=_error_callback,
+            )
         )
 
         # Main event loop: read from page_queue with heartbeat timeout
@@ -188,6 +203,17 @@ async def crawl_event_stream(
 
             if page_data is None:
                 # Sentinel value (not currently used, but available for future)
+                continue
+
+            if page_data.get("_error"):
+                # ── Yield error event ──────────────────────────
+                error_payload = {
+                    "type": "error",
+                    "url": page_data.get("url", ""),
+                    "error": page_data.get("error", "Unknown scrape error"),
+                }
+                event_id += 1
+                yield f"id: {event_id}\ndata: {json.dumps(error_payload)}\n\n"
                 continue
 
             # ── Yield page event ────────────────────────────────
@@ -241,7 +267,8 @@ async def crawl_event_stream(
         logger.exception("Crawl SSE stream failed for job %s", job_id)
         error_payload = {
             "type": "error",
-            "content": str(exc),
+            "url": url,
+            "error": str(exc),
         }
         event_id += 1
         yield f"id: {event_id}\ndata: {json.dumps(error_payload)}\n\n"

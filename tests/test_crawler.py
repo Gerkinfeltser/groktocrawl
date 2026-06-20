@@ -3324,7 +3324,340 @@ class TestCrawlTimeoutAndErrors:
                 assert e.get("error_code") == "ROBOTS_BLOCKED"
 
 
-# ── Atomic store progress (VAL-CONC-042) ─────────────────────────
+# ── Error callback tests ─────────────────────────────────────────
+
+
+class TestCrawlErrorCallback:
+    """Tests for the ``error_callback`` parameter on CrawlEngine.run()."""
+
+    @pytest.mark.asyncio
+    async def test_error_callback_called_on_child_page_timeout(self, mock_scraper):
+        """error_callback is called when a child page times out."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=5,
+                max_depth=1,
+                max_concurrency=3,
+            ),
+        )
+
+        async def timeout_scrape(url: str, **kwargs) -> dict:
+            if "/child" in url:
+                raise TimeoutError("timed out")
+            return MockPage.success(url)
+
+        mock_scraper.scrape = AsyncMock(side_effect=timeout_scrape)
+        call_errors: list[dict] = []
+
+        async def _error_cb(_job_id: str, error: dict) -> None:
+            call_errors.append(error)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/child">Child</a>
+                </body></html>
+            """
+            await engine.run(
+                "http://example.com/",
+                job_id="test-job",
+                error_callback=_error_cb,
+            )
+
+        # error_callback should have been called for the child page timeout
+        assert len(call_errors) >= 1
+        error = call_errors[0]
+        assert error.get("url") == "http://example.com/child"
+        assert "timed out" in error.get("error", "")
+
+    @pytest.mark.asyncio
+    async def test_error_callback_called_on_child_page_scrape_failure(
+        self, mock_scraper
+    ):
+        """error_callback is called when a child page scrape returns failure."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=5,
+                max_depth=1,
+                max_concurrency=3,
+            ),
+        )
+
+        async def fail_scrape(url: str, **kwargs) -> dict:
+            if "/fail" in url:
+                return MockPage.failure(url, "HTTP 500")
+            return MockPage.success(url)
+
+        mock_scraper.scrape = AsyncMock(side_effect=fail_scrape)
+        call_errors: list[dict] = []
+
+        async def _error_cb(_job_id: str, error: dict) -> None:
+            call_errors.append(error)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/fail">Fail</a>
+                </body></html>
+            """
+            await engine.run(
+                "http://example.com/",
+                job_id="test-job",
+                error_callback=_error_cb,
+            )
+
+        assert len(call_errors) >= 1
+        error = call_errors[0]
+        assert error.get("url") == "http://example.com/fail"
+        assert "HTTP 500" in error.get("error", "")
+
+    @pytest.mark.asyncio
+    async def test_error_callback_called_on_politeness_blocked(self, mock_scraper):
+        """error_callback is called when a page is blocked by politeness."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=5,
+                max_depth=1,
+                max_concurrency=3,
+            ),
+        )
+
+        async def blocked_scrape(url: str, **kwargs) -> dict:
+            if "/blocked" in url:
+                return {
+                    "success": False,
+                    "error": "Blocked by politeness: robots.txt disallows",
+                }
+            return MockPage.success(url)
+
+        mock_scraper.scrape = AsyncMock(side_effect=blocked_scrape)
+        call_errors: list[dict] = []
+
+        async def _error_cb(_job_id: str, error: dict) -> None:
+            call_errors.append(error)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/blocked">Blocked</a>
+                </body></html>
+            """
+            await engine.run(
+                "http://example.com/",
+                job_id="test-job",
+                error_callback=_error_cb,
+            )
+
+        assert len(call_errors) >= 1
+        error = call_errors[0]
+        assert error.get("url") == "http://example.com/blocked"
+        assert "Blocked by politeness" in error.get("error", "")
+
+    @pytest.mark.asyncio
+    async def test_error_callback_contains_url_and_error(self, mock_scraper):
+        """error_callback receives a dict with url and error keys."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=5,
+                max_depth=1,
+                max_concurrency=3,
+            ),
+        )
+
+        async def fail_scrape(url: str, **kwargs) -> dict:
+            if "/child" in url:
+                return MockPage.failure(url, "Connection refused")
+            return MockPage.success(url)
+
+        mock_scraper.scrape = AsyncMock(side_effect=fail_scrape)
+        call_errors: list[dict] = []
+
+        async def _error_cb(_job_id: str, error: dict) -> None:
+            call_errors.append(error)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/child">Child</a>
+                </body></html>
+            """
+            await engine.run(
+                "http://example.com/",
+                job_id="test-job",
+                error_callback=_error_cb,
+            )
+
+        assert len(call_errors) >= 1
+        error = call_errors[0]
+        assert "url" in error
+        assert "error" in error
+        assert error["url"] == "http://example.com/child"
+        assert isinstance(error["error"], str)
+
+    @pytest.mark.asyncio
+    async def test_error_callback_not_called_on_successful_pages(self, mock_scraper):
+        """error_callback is NOT called for pages that scrape successfully."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=5,
+                max_depth=1,
+                max_concurrency=3,
+            ),
+        )
+
+        call_errors: list[dict] = []
+        scrape_count = 0
+
+        async def success_scrape(url: str, **kwargs) -> dict:
+            nonlocal scrape_count
+            scrape_count += 1
+            return MockPage.success(url, markdown=f"# Unique Content {scrape_count}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=success_scrape)
+
+        async def _error_cb(_job_id: str, error: dict) -> None:
+            call_errors.append(error)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/child">Child</a>
+                </body></html>
+            """
+            await engine.run(
+                "http://example.com/",
+                job_id="test-job",
+                error_callback=_error_cb,
+            )
+
+        # No errors should have been reported since all pages succeed
+        assert len(call_errors) == 0
+
+    @pytest.mark.asyncio
+    async def test_error_callback_exception_does_not_crash_crawl(self, mock_scraper):
+        """An exception in error_callback itself does not crash the crawl."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=5,
+                max_depth=1,
+                max_concurrency=3,
+            ),
+        )
+
+        async def fail_scrape(url: str, **kwargs) -> dict:
+            if "/child" in url:
+                return MockPage.failure(url, "HTTP 500")
+            return MockPage.success(url)
+
+        mock_scraper.scrape = AsyncMock(side_effect=fail_scrape)
+
+        async def _exploding_cb(_job_id: str, error: dict) -> None:
+            raise RuntimeError("error_callback exploded")
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/child">Child</a>
+                </body></html>
+            """
+            # Should not raise; the callback exception is caught and logged
+            result = await engine.run(
+                "http://example.com/",
+                job_id="test-job",
+                error_callback=_exploding_cb,
+            )
+
+        # The crawl should still complete with at least the start URL
+        assert result.completed >= 1
+        assert result.errors is not None
+
+    @pytest.mark.asyncio
+    async def test_error_callback_called_on_mixed_results(self, mock_scraper):
+        """error_callback is called for each failing page in a mixed crawl."""
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=10,
+                max_depth=1,
+                max_concurrency=3,
+            ),
+        )
+
+        call_errors: list[dict] = []
+
+        async def mixed_scrape(url: str, **kwargs) -> dict:
+            if "/fail" in url:
+                return MockPage.failure(url, "Connection error")
+            if "/blocked" in url:
+                return {
+                    "success": False,
+                    "error": "Blocked by politeness: robots.txt disallows",
+                }
+            # Use unique markdown per URL to avoid content dedup
+            return MockPage.success(url, markdown=f"# Unique {url}")
+
+        mock_scraper.scrape = AsyncMock(side_effect=mixed_scrape)
+        call_errors: list[dict] = []
+
+        async def _error_cb(_job_id: str, error: dict) -> None:
+            call_errors.append(error)
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = """
+                <html><body>
+                <a href="http://example.com/ok">OK</a>
+                <a href="http://example.com/fail1">Fail 1</a>
+                <a href="http://example.com/blocked1">Blocked 1</a>
+                <a href="http://example.com/fail2">Fail 2</a>
+                <a href="http://example.com/ok2">OK 2</a>
+                </body></html>
+            """
+            result = await engine.run(
+                "http://example.com/",
+                job_id="test-job",
+                error_callback=_error_cb,
+            )
+
+        # Should have errors for /fail1, /blocked1, /fail2
+        assert len(call_errors) >= 2  # at least fail1 + fail2
+        error_urls = [e.get("url") for e in call_errors]
+        assert "http://example.com/fail1" in error_urls
+        assert "http://example.com/blocked1" in error_urls or any(
+            "blocked" in e.get("error", "") for e in call_errors
+        )
+        assert "http://example.com/fail2" in error_urls
+        # Success pages should NOT trigger error_callback
+        ok_urls = [e.get("url") for e in call_errors if "/ok" in e.get("url", "")]
+        assert len(ok_urls) == 0
+        # Crawl should still complete with successful pages
+        assert result.completed >= 2  # start URL + /ok + /ok2
 
 
 class TestCrawlStoreAtomicity:
