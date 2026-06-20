@@ -9,7 +9,9 @@ job store for status polling.
 
 from __future__ import annotations
 
+import asyncio
 import collections.abc
+import contextlib
 import json
 import logging
 import posixpath
@@ -54,6 +56,16 @@ class CrawlOptions:
         verbose: If True, track filtered-out URLs with reasons.
         allow_subdomains: If True, follow links to subdomains.
         allow_external_links: If True, follow links to external domains.
+        max_concurrency: Maximum concurrent page scrapes (1-50, capped).
+            When delay is set, this is forced to 1.
+        delay: Seconds to wait between successive scrapes. When set,
+            forces max_concurrency to 1.
+        ignore_robots_txt: If True, bypass robots.txt enforcement. All
+            discovered URLs are scraped regardless of robots.txt Disallow
+            rules. Politeness rate limiting (crawl-delay) still applies.
+        robots_user_agent: Custom User-Agent string for robots.txt
+            evaluation. When set, robots.txt rules are evaluated against
+            this User-Agent instead of the default bot UA.
     """
 
     max_pages: int = 10
@@ -69,6 +81,10 @@ class CrawlOptions:
     crawl_entire_domain: bool = False
     max_duration_seconds: int = 1800
     idle_timeout_seconds: int = 300
+    max_concurrency: int = 3
+    delay: float | None = None
+    ignore_robots_txt: bool = False
+    robots_user_agent: str | None = None
 
 
 @dataclass
@@ -79,7 +95,20 @@ class CrawlResult:
     total: int = 0
     completed: int = 0
     errors: list[dict] = field(default_factory=list)
+    robots_blocked: list[dict] = field(default_factory=list)
     filtered_out: list[dict] = field(default_factory=list)
+
+
+# ── Exceptions ──────────────────────────────────────────────────
+
+
+class StartUrlScrapeError(Exception):
+    """Raised when the start URL cannot be scraped."""
+
+    def __init__(self, url: str, error: str):
+        self.url = url
+        self.error = error
+        super().__init__(f"Start URL scrape failed for {url}: {error}")
 
 
 # ── Public functions ─────────────────────────────────────────────
@@ -304,13 +333,20 @@ def _glob_to_regex(pattern: str) -> str:
 
 
 class CrawlEngine:
-    """BFS crawl orchestrator.
+    """BFS crawl orchestrator with configurable concurrency.
 
     Usage::
 
         engine = CrawlEngine(scraper_client, options=CrawlOptions(max_pages=5))
         result = await engine.run("https://example.com", job_id="...")
+
+    Concurrency is managed with an ``asyncio.Semaphore``. When ``delay``
+    is set, ``max_concurrency`` is forced to 1 and an
+    ``asyncio.sleep(delay)`` is inserted between scrapes.
     """
+
+    # Maximum value to cap max_concurrency at (prevents resource exhaustion).
+    MAX_CONCURRENCY_CAP: int = 50
 
     def __init__(
         self,
@@ -321,14 +357,37 @@ class CrawlEngine:
         self.scraper = scraper_client
         self.store = store
         self.options = options or CrawlOptions()
+
+        # Resolve effective concurrency: delay forces sequential
+        self._effective_concurrency = self._resolve_concurrency()
+
+        self._semaphore = asyncio.Semaphore(self._effective_concurrency)
         self._seen: set[str] = set()
         self._queue: deque[tuple[str, int]] = deque()
         self._pages: list[dict] = []
         self._errors: list[dict] = []
+        self._robots_blocked: list[dict] = []
         self._filtered_out: list[dict] = []
         self._cancel_flag: bool = False
         self._update_interval: float = 1.0
         self._html_client: httpx.AsyncClient | None = None
+        self._last_scrape_start: float | None = None
+        self._scraped_count: int = 0
+        # Track in-flight tasks for cancellation
+        self._pending_tasks: set[asyncio.Task] = set()
+
+    def _resolve_concurrency(self) -> int:
+        """Determine the effective concurrency value.
+
+        When ``delay`` is set (non-zero), concurrency is forced to 1
+        so that pages are scraped sequentially with pacing.
+        Otherwise, ``max_concurrency`` is used, capped at
+        ``MAX_CONCURRENCY_CAP``.
+        """
+        delay = self.options.delay
+        if delay is not None and delay > 0:
+            return 1
+        return min(self.options.max_concurrency, self.MAX_CONCURRENCY_CAP)
 
     async def _get_html(self, url: str) -> str | None:
         """Get HTML for a URL, using an internal persistent client."""
@@ -343,7 +402,8 @@ class CrawlEngine:
             return None
 
     async def close(self) -> None:
-        """Close the internal HTTP client."""
+        """Close the internal HTTP client and cancel pending tasks."""
+        self._cancel_all_tasks()
         if self._html_client is not None:
             await self._html_client.aclose()
             self._html_client = None
@@ -359,6 +419,11 @@ class CrawlEngine:
     ) -> CrawlResult:
         """Execute a BFS crawl starting from ``start_url``.
 
+        When ``max_concurrency > 1``, multiple pages are scraped
+        concurrently using an ``asyncio.Semaphore``. When ``delay`` is
+        set, concurrency is forced to 1 and ``asyncio.sleep(delay)`` is
+        inserted between scrapes.
+
         Args:
             start_url: The URL to begin crawling from.
             job_id: Optional job ID for periodic store updates and
@@ -372,9 +437,9 @@ class CrawlEngine:
         parsed_start = urlparse(start_url)
         base_domain = parsed_start.hostname.lower() if parsed_start.hostname else ""
 
-        # Seed the BFS queue with start URL (DO NOT add to _seen — the main
-        # loop adds to _seen when it pops each URL. Adding here would cause
-        # the main loop's dedup check to skip the start URL.)
+        # Seed the BFS queue with start URL (DO NOT add to _seen — the task
+        # adds to _seen when it acquires the URL. Adding here would cause
+        # the task's dedup check to skip the start URL.)
         self._queue.append((start_url, 0))
         start_normalized = self.normalize_url(start_url)
 
@@ -398,12 +463,6 @@ class CrawlEngine:
                 sitemap_dedup: set[str] = set()
                 for sm_url in sitemap_urls:
                     sm_normalized = self.normalize_url(sm_url)
-                    # Skip if duplicate within sitemap, or if it matches
-                    # the start URL (already in queue — will be deduped
-                    # by the main loop's seen-set).  The sitemap URL is
-                    # NOT added to self._seen here because the main loop
-                    # reads _seen to decide whether to scrape. If we added
-                    # it here, the main loop would skip it.
                     if (
                         sm_normalized in sitemap_dedup
                         or sm_normalized == start_normalized
@@ -420,15 +479,25 @@ class CrawlEngine:
 
         last_store_update = time.monotonic()
         crawl_start_time = time.monotonic()
-        last_completion_time = crawl_start_time
 
-        while self._queue and len(self._pages) < self.options.max_pages:
+        logger.info(
+            "Starting crawl of %s (max_pages=%d, max_depth=%d, "
+            "concurrency=%d, delay=%s)",
+            start_url,
+            self.options.max_pages,
+            self.options.max_depth,
+            self._effective_concurrency,
+            self.options.delay,
+        )
+
+        while (self._queue or self._pending_tasks) and len(
+            self._pages
+        ) < self.options.max_pages:
             if self._cancel_flag:
                 logger.info("Crawl cancelled via cancel flag")
                 break
 
             # Cooperative cancellation: check Redis for cancelled status
-            # between pages (checked before each page scrape).
             if self.store is not None and job_id is not None:
                 job_meta = self.store.get_job(job_id)
                 if job_meta and job_meta.get("status") == "cancelled":
@@ -446,85 +515,235 @@ class CrawlEngine:
                     self.options.max_duration_seconds,
                     elapsed,
                 )
+                self._cancel_all_tasks()
+                await self.close()
                 raise TimeoutError(
                     f"Crawl exceeded max duration of {self.options.max_duration_seconds}s"
                 )
 
-            # Idle timeout (stuck-crawl) check
-            idle_elapsed = now - last_completion_time
-            if idle_elapsed > self.options.idle_timeout_seconds:
-                logger.warning(
-                    "Crawl %s idle for %ds (timeout=%ds) — killing zombie crawl",
-                    job_id,
-                    idle_elapsed,
-                    self.options.idle_timeout_seconds,
-                )
-                raise TimeoutError(
-                    f"Crawl idle for {idle_elapsed:.0f}s — "
-                    f"exceeded idle timeout of {self.options.idle_timeout_seconds}s"
-                )
-
-            url, depth = self._queue.popleft()
-            normalized = self.normalize_url(url)
-
-            # Dedup check
-            if normalized in self._seen:
-                logger.debug("Skipping already-seen URL: %s", url)
-                continue
-
-            # Max depth check: pages at max_depth are scraped but not
-            # followed; pages beyond max_depth are skipped entirely.
-            if depth > self.options.max_depth:
-                logger.debug("Skipping URL beyond max_depth: %s (depth=%d)", url, depth)
-                continue
-
-            # Mark as seen immediately to prevent re-enqueue
-            self._seen.add(normalized)
-
-            # Determine the URL for path filtering.
-            # When ignore_query_parameters is True, strip query params
-            # before matching so that patterns match against the path
-            # only (VAL-SCOPE-073).
-            filter_url = (
-                urlparse(url)._replace(query="").geturl()
-                if self.options.ignore_query_parameters
-                else url
-            )
-            if not _match_path(
-                filter_url,
-                self.options.include_paths,
-                self.options.exclude_paths,
-                self.options.regex_on_full_url,
+            # Dispatch tasks from the queue.
+            # We limit by both concurrency AND remaining capacity so that
+            # in-flight + completed pages don't exceed max_pages.
+            while (
+                self._queue
+                and len(self._pending_tasks) < self._effective_concurrency
+                and len(self._pages) + len(self._pending_tasks) < self.options.max_pages
             ):
-                if self.options.verbose:
-                    filter_reason = self._get_filter_reason(filter_url)
-                    if filter_reason:
-                        self._filtered_out.append(filter_reason)
-                logger.debug("Skipping URL excluded by path filter: %s", url)
-                continue
+                task = self._create_scrape_task(page_callback, job_id, base_domain)
+                if task is None:
+                    # Queue exhausted or all items filtered
+                    break
 
-            # Scrape the page with timing
+            # Wait for at least one task to complete (or queue to be non-empty)
+            if self._pending_tasks:
+                _completed, _remaining = await asyncio.wait(
+                    self._pending_tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                self._pending_tasks = _remaining
+                # Process completed tasks (any exceptions were handled within)
+                for task in _completed:
+                    try:
+                        task.result()
+                    except asyncio.CancelledError:
+                        logger.debug("Scrape task was cancelled")
+                    except StartUrlScrapeError:
+                        logger.error("Start URL scrape failed — aborting crawl")
+                        self._cancel_all_tasks()
+                        result_obj = CrawlResult(
+                            pages=self._pages,
+                            total=0,
+                            completed=len(self._pages),
+                            errors=self._errors,
+                            robots_blocked=self._robots_blocked,
+                        )
+                        await self.close()
+                        return result_obj
+                    except Exception as exc:
+                        logger.warning(
+                            "Scrape task raised unexpected exception: %s", exc
+                        )
+            elif not self._queue:
+                # Nothing pending and nothing left in queue — crawl is done
+                break
+
+            # Periodic job store update
+            if self.store is not None and job_id is not None:
+                now = time.monotonic()
+                if now - last_store_update >= self._update_interval:
+                    self._update_store(job_id)
+                    last_store_update = now
+
+        # Wait for any remaining pending tasks to finish
+        if self._pending_tasks:
+            _done, _still_pending = await asyncio.wait(
+                self._pending_tasks, return_when=asyncio.ALL_COMPLETED
+            )
+            self._pending_tasks = _still_pending
+            for task in _done:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    task.result()
+
+        # Final store update
+        if self.store is not None and job_id is not None:
+            self._update_store(job_id)
+
+        await self.close()
+
+        return CrawlResult(
+            pages=self._pages,
+            total=len(self._pages) + len(self._queue),
+            completed=len(self._pages),
+            errors=self._errors,
+            robots_blocked=self._robots_blocked,
+            filtered_out=self._filtered_out,
+        )
+
+    def _create_scrape_task(
+        self,
+        page_callback: collections.abc.Callable[
+            [str, dict], collections.abc.Awaitable[None]
+        ]
+        | None,
+        job_id: str | None,
+        base_domain: str,
+    ) -> asyncio.Task | None:
+        """Pop one URL from the queue and create a scrape task for it.
+
+        Performs dedup and path filtering checks. Returns ``None`` if the
+        queue is empty or the URL is skipped.
+        """
+        if not self._queue:
+            return None
+
+        url, depth = self._queue.popleft()
+        normalized = self.normalize_url(url)
+
+        # Dedup check
+        if normalized in self._seen:
+            logger.debug("Skipping already-seen URL: %s", url)
+            return None
+
+        # Max depth check: pages at max_depth are scraped but not
+        # followed; pages beyond max_depth are skipped entirely.
+        if depth > self.options.max_depth:
+            logger.debug("Skipping URL beyond max_depth: %s (depth=%d)", url, depth)
+            return None
+
+        # Mark as seen immediately to prevent re-enqueue
+        self._seen.add(normalized)
+
+        # Path filtering
+        filter_url = (
+            urlparse(url)._replace(query="").geturl()
+            if self.options.ignore_query_parameters
+            else url
+        )
+        if not _match_path(
+            filter_url,
+            self.options.include_paths,
+            self.options.exclude_paths,
+            self.options.regex_on_full_url,
+        ):
+            if self.options.verbose:
+                filter_reason = self._get_filter_reason(filter_url)
+                if filter_reason:
+                    self._filtered_out.append(filter_reason)
+            logger.debug("Skipping URL excluded by path filter: %s", url)
+            return None
+
+        # Create the async task for this URL
+        task = asyncio.create_task(
+            self._scrape_url(
+                url=url,
+                depth=depth,
+                base_domain=base_domain,
+                page_callback=page_callback,
+                job_id=job_id,
+            )
+        )
+        self._pending_tasks.add(task)
+        return task
+
+    async def _scrape_url(
+        self,
+        url: str,
+        depth: int,
+        base_domain: str,
+        page_callback: collections.abc.Callable[
+            [str, dict], collections.abc.Awaitable[None]
+        ]
+        | None,
+        job_id: str | None,
+    ) -> None:
+        """Scrape a single URL with semaphore protection and delay pacing.
+
+        This is the core unit of concurrent work. The semaphore ensures
+        that at most ``self._effective_concurrency`` scrapes run
+        simultaneously.
+        """
+        async with self._semaphore:
+            if self._cancel_flag:
+                return
+
+            # Apply delay between scrapes (only when delay > 0)
+            delay = self.options.delay
+            if delay is not None and delay > 0 and self._last_scrape_start is not None:
+                elapsed_since_last = time.monotonic() - self._last_scrape_start
+                wait = max(0.0, delay - elapsed_since_last)
+                if wait > 0:
+                    try:
+                        await asyncio.sleep(wait)
+                    except asyncio.CancelledError:
+                        logger.debug(
+                            "Delay sleep cancelled for %s (job %s)", url, job_id
+                        )
+                        return
+
+            self._last_scrape_start = time.monotonic()
+
+            # Scrape the page
             scrape_start = time.monotonic()
-            result = await self.scraper.scrape(url)
+            try:
+                result = await self.scraper.scrape(
+                    url,
+                    ignore_robots_txt=self.options.ignore_robots_txt,
+                    robots_user_agent=self.options.robots_user_agent,
+                )
+            except Exception as exc:
+                self._errors.append({"url": url, "error": str(exc)})
+                logger.warning("Scrape exception for %s: %s", url, exc)
+                if depth == 0:
+                    raise  # let the caller handle start URL failure
+                return
+
             scrape_duration_ms = int((time.monotonic() - scrape_start) * 1000)
 
             if not result.get("success"):
                 error_msg = result.get("error", "Unknown scrape error")
-                self._errors.append({"url": url, "error": error_msg})
-                logger.warning("Scrape failed for %s: %s", url, error_msg)
 
-                # Start URL failure — return error immediately
-                if depth == 0:
-                    logger.error("Start URL scrape failed: %s", error_msg)
-                    result_obj = CrawlResult(
-                        pages=[],
-                        total=0,
-                        completed=0,
-                        errors=self._errors,
+                # Detect politeness-blocked results
+                if "Blocked by politeness" in error_msg:
+                    robots_entry = {
+                        "url": url,
+                        "error": error_msg,
+                        "error_code": "ROBOTS_BLOCKED",
+                    }
+                    self._robots_blocked.append(robots_entry)
+                    self._errors.append(robots_entry)
+                    logger.info(
+                        "Politeness blocked %s (job %s): %s", url, job_id, error_msg
                     )
-                    await self.close()
-                    return result_obj
-                continue
+                    # Blocked start URL is not a fatal error — it's expected
+                    return
+                else:
+                    self._errors.append({"url": url, "error": error_msg})
+                    logger.warning("Scrape failed for %s: %s", url, error_msg)
+
+                # Start URL failure — raise to signal immediate stop
+                if depth == 0:
+                    raise StartUrlScrapeError(url, error_msg)
+                return
 
             # Record successful page with enriched metadata
             data = result.get("data", {})
@@ -568,7 +787,7 @@ class CrawlEngine:
                 "duration_ms": scrape_duration_ms,
             }
             self._pages.append(page)
-            last_completion_time = time.monotonic()
+            self._scraped_count += 1
 
             # Fire per-page webhook callback
             if page_callback is not None and job_id is not None:
@@ -583,7 +802,7 @@ class CrawlEngine:
                     )
 
             # Discover child links if within max_depth
-            # In "only" mode, sitemap URLs are the exclusive source — skip HTML link discovery
+            # In "only" mode, sitemap URLs are the exclusive source
             if depth < self.options.max_depth and self.options.sitemap_mode != "only":
                 html = await self._get_html(url)
                 if html:
@@ -596,23 +815,16 @@ class CrawlEngine:
                     )
                     # SSRF guard: always block private/internal hosts on
                     # EXTERNAL URLs regardless of allow_external_links setting.
-                    # Internal and subdomain URLs are already vetted and are
-                    # part of the organization's own infrastructure — they
-                    # bypass the SSRF check. (VAL-SCOPE-017)
                     classified = classify_links(child_links, url)
                     if classified.get("external"):
                         classified["external"] = self._filter_ssrf_blocked(
                             classified["external"]
                         )
-                    # Rebuild the full link list from classified buckets
                     child_links = (
                         classified.get("internal", [])
                         + classified.get("subdomain", [])
                         + classified.get("external", [])
                     )
-                    # When crawl_entire_domain is False, only follow child paths
-                    # (deeper in the path hierarchy). When True, follow all
-                    # same-domain links including siblings and parents.
                     if not self.options.crawl_entire_domain:
                         child_links = self._filter_child_paths(child_links, url)
                     for child_url in child_links:
@@ -620,26 +832,15 @@ class CrawlEngine:
                         if child_normalized not in self._seen:
                             self._queue.append((child_url, depth + 1))
 
-            # Periodic job store update
-            if self.store is not None and job_id is not None:
-                now = time.monotonic()
-                if now - last_store_update >= self._update_interval:
-                    self._update_store(job_id)
-                    last_store_update = now
+    def _cancel_all_tasks(self) -> None:
+        """Cancel all in-flight scrape tasks and clear tracking.
 
-        # Final store update
-        if self.store is not None and job_id is not None:
-            self._update_store(job_id)
-
-        await self.close()
-
-        return CrawlResult(
-            pages=self._pages,
-            total=len(self._pages) + len(self._queue),
-            completed=len(self._pages),
-            errors=self._errors,
-            filtered_out=self._filtered_out,
-        )
+        This ensures semaphore slots are released and pending tasks
+        don't hold references after cancellation.
+        """
+        for task in self._pending_tasks:
+            task.cancel()
+        self._pending_tasks.clear()
 
     def normalize_url(self, url: str) -> str:
         """Normalize a URL using this engine's options."""
@@ -681,8 +882,14 @@ class CrawlEngine:
             return []
 
     def cancel(self) -> None:
-        """Signal the crawl to stop at the next opportunity."""
+        """Signal the crawl to stop and cancel all pending tasks.
+
+        This sets the cancel flag and cancels any in-flight scrape
+        tasks. Pending tasks that are blocked on the semaphore will
+        also be woken up and exit cleanly.
+        """
         self._cancel_flag = True
+        self._cancel_all_tasks()
 
     @staticmethod
     def _filter_child_paths(links: list[str], current_url: str) -> list[str]:
@@ -810,6 +1017,7 @@ class CrawlEngine:
                 "total": len(self._pages) + len(self._queue),
                 "pages": self._pages,
                 "errors": self._errors,
+                "robots_blocked": self._robots_blocked,
             }
             # Write data key directly without changing meta status
             self.store.redis.set(

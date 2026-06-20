@@ -319,6 +319,10 @@ async def create_crawl(request: Request, body: CrawlRequest) -> CrawlCreateRespo
             crawl_entire_domain=body.crawl_entire_domain,
             allow_subdomains=body.allow_subdomains,
             allow_external_links=body.allow_external_links,
+            max_concurrency=body.max_concurrency,
+            delay=body.delay,
+            ignore_robots_txt=body.ignore_robots_txt,
+            robots_user_agent=body.robots_user_agent,
         )
     )
     return CrawlCreateResponse(id=job_id)
@@ -367,6 +371,29 @@ async def cancel_crawl(request: Request, job_id: str) -> AgentCancelResponse:
             detail="Job not found or already completed", details={"job_id": job_id}
         )
     return AgentCancelResponse(success=True)
+
+
+@router.get("/v2/crawl/{job_id}/errors")
+async def get_crawl_errors(request: Request, job_id: str) -> dict:
+    """Return per-URL errors and robots-blocked URLs for a crawl job.
+
+    Returns a dict with:
+        - ``errors``: list of failed URLs with error messages
+        - ``robots_blocked``: list of URLs blocked by robots.txt/politeness
+          (also present in ``errors`` with ``error_code: "ROBOTS_BLOCKED"``)
+
+    Each entry has ``url``, ``error``, and optionally ``error_code`` fields.
+    """
+    store: JobStore = request.app.state.job_store
+    job = store.get_job(job_id)
+    if job is None:
+        raise NotFoundError(detail="Job not found", details={"job_id": job_id})
+    data = job.get("data") or {}
+    return {
+        "success": True,
+        "errors": data.get("errors", []),
+        "robots_blocked": data.get("robots_blocked", []),
+    }
 
 
 @router.post("/v2/batch/scrape", response_model=CrawlCreateResponse)
