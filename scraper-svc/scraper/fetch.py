@@ -469,7 +469,7 @@ async def smart_scrape(
         content_good = not barrier.detected or barrier.confidence <= 0.7
         content_embedded = _has_embedded_content(raw_html)
 
-        if content_good:
+        if content_good or barrier.barrier_type == "empty":
             accepted = await _maybe_degrade(result, "tier3-playwright", best_effort)
             if accepted:
                 accepted = await _enrich_with_politeness(accepted, url)

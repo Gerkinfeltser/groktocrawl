@@ -465,7 +465,7 @@ class CrawlEngine:
 
         self._semaphore = asyncio.Semaphore(self._effective_concurrency)
         self._seen: set[str] = set()
-        self._queue: deque[tuple[str, int]] = deque()
+        self._queue: deque[tuple[str, int, bool]] = deque()
         self._pages: list[dict] = []
         self._errors: list[dict] = []
         self._robots_blocked: list[dict] = []
@@ -480,6 +480,7 @@ class CrawlEngine:
         # Content-level dedup (canonical + content hash)
         self.dedup_manager = DedupManager()
         self._dedup_skipped: int = 0  # Pages skipped by content-level dedup
+        self._retry_count: dict[str, int] = {}  # Track retry attempts per URL
 
     def _resolve_concurrency(self) -> int:
         """Determine the effective concurrency value.
@@ -549,7 +550,7 @@ class CrawlEngine:
         # Seed the BFS queue with start URL (DO NOT add to _seen — the task
         # adds to _seen when it acquires the URL. Adding here would cause
         # the task's dedup check to skip the start URL.)
-        self._queue.append((start_url, 0))
+        self._queue.append((start_url, 0, False))
         start_normalized = self.normalize_url(start_url)
 
         # Seed with sitemap URLs if sitemap_mode is not "skip"
@@ -578,7 +579,7 @@ class CrawlEngine:
                     ):
                         continue
                     sitemap_dedup.add(sm_normalized)
-                    self._queue.appendleft((sm_url, 0))
+                    self._queue.appendleft((sm_url, 0, True))
                     sitemap_seeded_count += 1
                 logger.info(
                     "Seeded %d sitemap URLs into crawl queue for %s",
@@ -731,7 +732,7 @@ class CrawlEngine:
         if not self._queue:
             return None
 
-        url, depth = self._queue.popleft()
+        url, depth, from_sitemap = self._queue.popleft()
         normalized = self.normalize_url(url)
 
         # Dedup check
@@ -772,6 +773,7 @@ class CrawlEngine:
             self._scrape_url(
                 url=url,
                 depth=depth,
+                from_sitemap=from_sitemap,
                 base_domain=base_domain,
                 page_callback=page_callback,
                 error_callback=error_callback,
@@ -785,6 +787,7 @@ class CrawlEngine:
         self,
         url: str,
         depth: int,
+        from_sitemap: bool,
         base_domain: str,
         page_callback: collections.abc.Callable[
             [str, dict], collections.abc.Awaitable[None]
@@ -1020,10 +1023,36 @@ class CrawlEngine:
                         {"url": url, "error": error_msg, "error_type": cls_error_type},
                     )
 
-                # Start URL failure — raise to signal immediate stop
-                if depth == 0:
-                    raise StartUrlScrapeError(url, error_msg)
-                return
+                # Retry with backoff for non-critical failures.
+                # Depth > 0: always retry (child pages).
+                # Depth == 0 and from_sitemap: retry (sitemap-discovered page).
+                # Depth == 0 and not from_sitemap: abort (user-provided start URL).
+                if depth > 0 or from_sitemap:
+                    normalized = self.normalize_url(url)
+                    retries = self._retry_count.get(normalized, 0)
+                    if retries < 2:
+                        self._retry_count[normalized] = retries + 1
+                        backoff_delay = 2.0 if retries == 0 else 5.0
+                        logger.info(
+                            "Retrying %s (attempt %d/3, %.0fs backoff) — %s",
+                            url,
+                            retries + 1,
+                            backoff_delay,
+                            error_msg,
+                        )
+                        # Remove the error entry we just added — retry will handle it
+                        if self._errors and self._errors[-1].get("url") == url:
+                            self._errors.pop()
+                        # Remove from _seen so the retry can pass dedup
+                        self._seen.discard(normalized)
+                        await asyncio.sleep(backoff_delay)
+                        self._queue.appendleft((url, depth, from_sitemap))
+                    else:
+                        logger.info("Failed after 2 retries — skipping %s", url)
+                    return
+
+                # Critical failure: user-provided start URL cannot be scraped
+                raise StartUrlScrapeError(url, error_msg)
 
             # Record successful page with enriched metadata
             data = result.get("data", {})
@@ -1210,7 +1239,7 @@ class CrawlEngine:
                     for child_url in child_links:
                         child_normalized = self.normalize_url(child_url)
                         if child_normalized not in self._seen:
-                            self._queue.append((child_url, depth + 1))
+                            self._queue.append((child_url, depth + 1, False))
 
     def _cancel_all_tasks(self) -> None:
         """Cancel all in-flight scrape tasks and clear tracking.
