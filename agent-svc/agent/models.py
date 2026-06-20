@@ -1,8 +1,9 @@
 """Pydantic models matching the Firecrawl v2 agent API contract."""
 
 from typing import Any
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ErrorDetail(BaseModel):
@@ -91,10 +92,25 @@ class CrawlRequest(BaseModel):
     url: str
     max_pages: int = 10
     max_depth: int = 2
+    limit: int | None = None
     ignore_sitemap: bool = False
+    ignore_query_parameters: bool = False
     include_paths: list[str] | None = None
     exclude_paths: list[str] | None = None
     webhook: dict[str, Any] | None = None
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        """Validate that url is a well-formed HTTP/HTTPS URL."""
+        parsed = urlparse(value)
+        if not parsed.scheme:
+            raise ValueError("URL must have a scheme (http:// or https://)")
+        if parsed.scheme.lower() not in ("http", "https"):
+            raise ValueError(f"URL scheme must be http or https, got '{parsed.scheme}'")
+        if not parsed.netloc:
+            raise ValueError("URL must have a network location (host)")
+        return value
 
 
 class CrawlCreateResponse(BaseModel):
@@ -147,6 +163,8 @@ class MapRequest(BaseModel):
     url: str
     limit: int = 100
     search: str | None = None
+    allow_subdomains: bool = False
+    allow_external_links: bool = False
 
 
 class MapResponse(BaseModel):
