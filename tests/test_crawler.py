@@ -4439,3 +4439,255 @@ class TestCrawlEngineDedup:
         ]
         assert len(dedup_errors) == 2
         # Verify the errors endpoint can serve these entries (they have proper fields)
+
+
+# ── CrawlEngine cache integration ────────────────────────────────
+
+
+class TestCrawlEngineCache:
+    """Tests for CrawlEngine integration with CrawlCache."""
+
+    @pytest.mark.asyncio
+    async def test_cache_check_before_scrape_with_max_age(self, mock_scraper):
+        """With maxAge set, cache is checked before each scrape."""
+        from agent.crawl_cache import CrawlCache
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        url = "http://example.com/"
+
+        # Create a real CrawlCache backed by a mock Redis
+        cache = CrawlCache("redis://localhost:6379/0")
+        cache.redis = mock_scraper._mock_cache_redis = MagicMock()
+        # Start with empty cache
+        cache.redis.get.return_value = None
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=1,
+                max_depth=0,
+                scrape_options={"max_age": 60000},  # 60s maxAge
+            ),
+            crawl_cache=cache,
+        )
+
+        mock_scraper.scrape.return_value = MockPage.success(url, "# Content")
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = "<html><body></body></html>"
+
+        result = await engine.run(url)
+
+        # Verify cache was checked (get was called)
+        cache.redis.get.assert_called()
+        # And scraper was called (cache miss)
+        mock_scraper.scrape.assert_called_once()
+        assert result.completed == 1
+
+    @pytest.mark.asyncio
+    async def test_cache_hit_skips_scraper_call(self, mock_scraper):
+        """When cache has fresh content, scraper is NOT called."""
+        import hashlib
+        import json
+        from datetime import UTC, datetime
+
+        from agent.crawl_cache import CrawlCache
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        url = "http://example.com/"
+
+        cache = CrawlCache("redis://localhost:6379/0")
+        store: dict[str, str] = {}
+        mock_redis = MagicMock()
+
+        def mock_get(key: str) -> str | None:
+            return store.get(key)
+
+        def mock_set(key: str, value: str, ex: int | None = None) -> None:
+            store[key] = value
+
+        mock_redis.get.side_effect = mock_get
+        mock_redis.set.side_effect = mock_set
+        mock_redis.delete.side_effect = lambda key: store.pop(key, None)
+        cache.redis = mock_redis
+
+        # Pre-populate cache with fresh content (very recent timestamp)
+        _now_iso = datetime.now(UTC).isoformat()
+        cached_entry = {
+            "url": url,
+            "data": MockPage.success(url, "# Cached Content"),
+            "cached_at": _now_iso,
+            "ttl_ms": 60000,
+        }
+        cache_key = f"crawl:cache:{hashlib.sha256(url.encode()).hexdigest()}"
+        store[cache_key] = json.dumps(cached_entry)
+
+        # Set up a counter to track scraper calls
+        call_count = 0
+
+        async def scrape_side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return MockPage.success(url, "# Fresh Content")  # Different from cached
+
+        mock_scraper.scrape = AsyncMock(side_effect=scrape_side_effect)
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=1,
+                max_depth=0,
+                scrape_options={"max_age": 60000},
+            ),
+            crawl_cache=cache,
+        )
+
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = "<html><body></body></html>"
+
+        result = await engine.run(url)
+
+        # Verify scraper was NOT called (cache hit)
+        assert call_count == 0, f"Expected 0 scraper calls, got {call_count}"
+        # Verify page came from cache (markdown matches cached content)
+        assert result.completed == 1
+        assert len(result.pages) == 1
+        assert "# Cached Content" in result.pages[0].get("markdown", ""), (
+            "Page should contain cached content, not fresh content"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cache_miss_with_min_age_returns_error(self, mock_scraper):
+        """With minAge set and no cache entry, error is returned for the URL."""
+        from agent.crawl_cache import CrawlCache
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        url = "http://example.com/"
+
+        cache = CrawlCache("redis://localhost:6379/0")
+        mock_redis = MagicMock()
+        mock_redis.get.return_value = None  # No cache entry
+        cache.redis = mock_redis
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=1,
+                max_depth=0,
+                scrape_options={"min_age": 60000},  # cache-only mode
+            ),
+            crawl_cache=cache,
+        )
+
+        mock_scraper.scrape.return_value = MockPage.success(url, "# Content")
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = "<html><body></body></html>"
+
+        result = await engine.run(url)
+
+        # Verify scraper was NOT called (minAge prevents fresh scrape)
+        mock_scraper.scrape.assert_not_called()
+        # But page was NOT scraped — it should be an error
+        assert result.completed == 0
+        assert len(result.pages) == 0
+        # Error should mention cache miss
+        assert len(result.errors) == 1
+        assert "CACHE_MISS" in result.errors[0].get("error_code", "")
+        assert "cache miss" in result.errors[0].get("error", "").lower()
+
+    @pytest.mark.asyncio
+    async def test_cache_stores_result_after_fresh_scrape(self, mock_scraper):
+        """After a fresh scrape with maxAge set, the result is stored in cache."""
+        import hashlib
+        import json
+
+        from agent.crawl_cache import CrawlCache
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        url = "http://example.com/"
+
+        store_dict: dict[str, str] = {}
+        cache = CrawlCache("redis://localhost:6379/0")
+        mock_redis = MagicMock()
+        mock_redis.get.side_effect = lambda k: store_dict.get(k)
+        mock_redis.set.side_effect = lambda k, v, ex=None: store_dict.update({k: v})
+        cache.redis = mock_redis
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=1,
+                max_depth=0,
+                scrape_options={"max_age": 60000},
+            ),
+            crawl_cache=cache,
+        )
+
+        mock_scraper.scrape.return_value = MockPage.success(url, "# Fresh Content")
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = "<html><body></body></html>"
+
+        result = await engine.run(url)
+
+        assert result.completed == 1
+        # Verify cache was populated
+        cache_key = f"crawl:cache:{hashlib.sha256(url.encode()).hexdigest()}"
+        assert cache_key in store_dict, "Cache should have been populated after scrape"
+        cached = json.loads(store_dict[cache_key])
+        assert cached["url"] == url
+        assert cached["ttl_ms"] == 60000
+
+    @pytest.mark.asyncio
+    async def test_max_age_zero_bypasses_cache(self, mock_scraper):
+        """maxAge=0 bypasses cache entirely — always fresh scrape."""
+        import hashlib
+        import json
+
+        from agent.crawl_cache import CrawlCache
+        from agent.crawler import CrawlEngine, CrawlOptions
+
+        url = "http://example.com/"
+
+        store_dict: dict[str, str] = {}
+        cache = CrawlCache("redis://localhost:6379/0")
+        mock_redis = MagicMock()
+        mock_redis.get.side_effect = lambda k: store_dict.get(k)
+        mock_redis.set.side_effect = lambda k, v, ex=None: store_dict.update({k: v})
+        cache.redis = mock_redis
+
+        # Pre-populate cache with stale content
+        cache_key = f"crawl:cache:{hashlib.sha256(url.encode()).hexdigest()}"
+        stale_entry = {
+            "url": url,
+            "data": MockPage.success(url, "# Stale Cached Content"),
+            "cached_at": "2026-06-19T12:00:00+00:00",
+            "ttl_ms": 60000,
+        }
+        store_dict[cache_key] = json.dumps(stale_entry)
+
+        engine = CrawlEngine(
+            mock_scraper,
+            store=None,
+            options=CrawlOptions(
+                max_pages=1,
+                max_depth=0,
+                scrape_options={"max_age": 0},  # bypass cache
+            ),
+            crawl_cache=cache,
+        )
+
+        mock_scraper.scrape.return_value = MockPage.success(
+            url, "# Freshly Scraped Content"
+        )
+        with patch.object(engine, "_get_html") as mock_html:
+            mock_html.return_value = "<html><body></body></html>"
+
+        result = await engine.run(url)
+
+        # Scraper was called (cache bypassed)
+        mock_scraper.scrape.assert_called_once()
+        assert result.completed == 1
+        assert "# Freshly Scraped Content" in result.pages[0].get("markdown", "")
