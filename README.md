@@ -146,6 +146,7 @@ python3 -m pip install requests
 | GET | `/v2/crawl/:jobId` | Get crawl status with pagination, timestamps, and per-page metadata |
 | DELETE | `/v2/crawl/:jobId` | Cancel a crawl |
 | GET | `/v2/crawl/:jobId/errors` | Get per-URL errors and robots-blocked URLs for a crawl |
+| GET | `/v2/crawl/:jobId/stream` | SSE stream of crawl progress (reconnect to in-progress or completed crawls) |
 | GET | `/v2/crawl/active` | List active/processing crawl jobs |
 | POST | `/v2/crawl/params-preview` | Preview crawl parameters derived from a natural-language prompt |
 | POST | `/v2/batch/scrape` | Scrape multiple URLs |

@@ -78,7 +78,7 @@ The crawl engine itself needed decisions across several dimensions:
 
 **Option C: URL + canonical + content hash.** Compute a SHA-256 hash of the extracted markdown text. If two pages produce the same content hash, skip the duplicate.
 
-**Chosen: Option A (URL-level) for core, with canonical and content hash as layered extensions planned for Milestone 4.** URL-level dedup is sufficient for the core crawl loop and avoids the complexity of parsing scraped HTML a second time (content hash) or making additional scraper calls (canonical). The seen-set is an in-memory Python set, O(1) lookup, no Valkey round-trips. Content hash dedup requires storing hashes per crawl run and adds latency for the hashing operation.
+**Chosen: Option C (URL + canonical + content hash).** All three layers are implemented in `dedup.py` (`DedupManager`). Layer 1: URL-level seen-set within a crawl run. Layer 2: canonical tag check (`<link rel="canonical">`) — if the canonical URL was already scraped, the current page is skipped. Layer 3: SHA-256 content hash — byte-for-byte identical markdown is treated as duplicate. Canonical check always runs before content hash check. This provides full content deduplication matching Firecrawl's capabilities.
 
 ### Concurrency Model
 
@@ -88,7 +88,7 @@ The crawl engine itself needed decisions across several dimensions:
 
 **Option C: Valkey-backed distributed semaphore.** Similar to Option B but using a Valkey (Redis) distributed semaphore for multi-instance coordination.
 
-**Chosen: Option A (sequential) for initial implementation, with Option B planned for Milestone 3.** The initial crawl engine processes pages synchronously within the BFS loop, matching the existing `_process_batch_scrape_async` pattern. Sequential processing is sufficient for the common case (small crawls, low concurrency requirements). The architecture supports adding `asyncio.Semaphore` later without changing the BFS queue or dedup structures. Valkey coordination (Option C) is deferred until multi-instance deployments are demonstrated.
+**Chosen: Option B (`asyncio.Semaphore` worker pool).** Configurable via `maxConcurrency` (1-50, default 3) with `asyncio.Semaphore`. When `delay` is set, concurrency is forced to 1 with `asyncio.sleep()` between scrapes for pacing. Valkey-backed distributed coordination (Option C) is optional for multi-instance deployments. This provides the performance benefit of parallel scraping while keeping coordination simple and in-process.
 
 ### Path Filtering — Glob vs Regex
 
@@ -111,11 +111,11 @@ The crawl engine itself needed decisions across several dimensions:
 - `skip`: no sitemap fetch, HTML-only discovery
 - `only`: exclusively sitemap URLs, no HTML link extraction
 
-**Chosen: Option C (three modes).** This matches Firecrawl's sitemap behavior and gives users explicit control. The sitemap parser (`SitemapParser`) is a separate module that handles XML sitemap parsing, nested sitemap index recursion, robots.txt sitemap directive processing, and fallback to common locations (`/sitemap.xml`, `/sitemap_index.xml`). The `ignoreSitemap` boolean field is preserved as a backward-compatible alias for `sitemap: "skip"`.
+**Chosen: Option C (three modes).** This matches Firecrawl's sitemap behavior and gives users explicit control. The sitemap parser (`SitemapParser`) is a separate module (`agent-svc/agent/sitemap_parser.py`) that handles XML sitemap parsing, nested sitemap index recursion (up to 3 levels), robots.txt sitemap directive processing, gzipped content, and fallback to common locations (`/sitemap.xml`, `/sitemap_index.xml`). The `ignoreSitemap` boolean field is preserved as a backward-compatible alias for `sitemap: "skip"`. Sitemap-discovered URLs count toward `max_pages` and are subject to the same path filters as BFS-discovered URLs.
 
 ## Decision
 
-**BFS traversal, shared `LinkExtractor`, URL-level dedup, sequential concurrency (with planned Semaphore), glob+regex path filtering, and three-mode sitemap integration.**
+**BFS traversal, shared `LinkExtractor`, three-layer dedup (URL + canonical + content hash), asyncio.Semaphore concurrency, glob+regex path filtering, three-mode sitemap integration, Valkey-backed cache, SSE streaming, and NL-to-params translation.**
 
 ## Consequences
 
@@ -123,16 +123,24 @@ The crawl engine itself needed decisions across several dimensions:
 
 - **Predictable BFS order.** The start URL is always first, depth-1 pages appear next, and polling users see progress in a natural top-down order.
 - **Single source of truth for link extraction.** All link discovery (crawl, map, llmstxt) routes through the same `extract_links()` function, ensuring consistent handling of `<base>` tags, fragments, relative URLs, non-HTTP schemes, and malformed HTML.
-- **Low per-crawl overhead.** The sequential loop with an in-memory seen set avoids Valkey round-trips for dedup and coordination. Small crawls (1-3 pages) complete in under a second.
+- **Configurable concurrency.** The asyncio.Semaphore worker pool (default 3, up to 50) accelerates large crawls significantly. Delay-based pacing forces sequential mode when needed for politeness.
+- **Full content deduplication.** Three-layer dedup (URL seen-set → canonical tag → SHA-256 content hash) prevents both URL-level and content-level duplicates, matching Firecrawl's capabilities.
+- **Sitemap support with three modes.** SitemapParser handles robots.txt discovery, nested index files, gzipped content, and falls back gracefully. Sitemap-discovered URLs respect path filters and max_pages limits.
+- **Valkey-backed response cache.** CrawlCache provides maxAge/minAge semantics, reducing redundant scrapes of recently-fetched pages.
+- **SSE streaming.** Real-time per-page progress events via Server-Sent Events, with reconnection support for in-progress crawls.
+- **NL-to-params translation.** The `prompt` field on CrawlRequest and the `/v2/crawl/params-preview` endpoint let users describe crawl intent in natural language.
 - **Path filtering is both powerful and familiar.** Glob patterns work the way users expect (`*` matches path segments, `**` matches across segments), while regex mode provides an escape hatch for complex patterns.
-- **Sitemap integration without behavioral surprises.** Sitemap-discovered URLs are deduplicated against BFS-discovered URLs, counted toward `max_pages`, and subject to the same path filters.
 
 ### Negative
 
-- **Sequential scraping is slow for large crawls.** Without concurrency, crawl wall-clock time is the sum of all individual page scrape times. Milestone 3 (asyncio.Semaphore) is a required follow-up for production use cases.
-- **No canonical-tag dedup in core.** Pages with different URLs but identical content (e.g., `/product` and `/product?ref=home`) are both scraped unless `ignoreQueryParameters` is set. Content hash dedup requires a separate pass.
 - **Distributed coordination is deferred.** Multi-instance deployments must coordinate via Valkey job status (cooperative cancellation) rather than a distributed semaphore. Concurrent instances of the same crawl are not supported.
 - **SitemapParser is a separate module dependency.** The crawl engine must import and coordinate with `SitemapParser`, adding module coupling. The parser's fallback logic (robots.txt → common locations) can mask misconfigured sites.
+
+### Neutral
+
+- **The `normalize_url()` function centralizes dedup logic.** Changes to normalization rules (e.g., adding trailing-slash policy) apply everywhere automatically.
+- **Path filter evaluation order is fixed:** exclude checks run first, then include checks. This is documented and tested. Changing the order in the future would be a breaking change.
+- **Module boundaries follow existing patterns** (ADR-0036, ADR-0037): `crawler.py` (orchestrator), `link_extractor.py` (shared extraction), `sitemap_parser.py` (XML parsing), `dedup.py` (multi-layer dedup), `crawl_cache.py` (response cache), `crawl_stream.py` (SSE streaming), `nl_params.py` (NL→params).
 
 ### Neutral
 
@@ -205,8 +213,8 @@ worker.py: _process_crawl_async()
 
 1. **URL-level checks are positional** — exclude_paths is checked before include_paths (short-circuit: if a URL matches any exclude pattern, it is immediately rejected)
 2. **Exclude always wins over include** — a URL matching both exclude and include patterns is excluded
-3. **Missing include_paths means "include all"** — when include_paths is `None`, all non-excluded URLs pass
-4. **Empty include_paths (`[]`) means "include nothing"** — an explicit empty list is treated as blocking all paths that aren't explicitly included (implementation detail: the list is treated as a constraint, not a no-op)
+3. **Missing include_paths means "include all"** — when include_paths is `None` or `[]`, all non-excluded URLs pass (empty list is treated as "no constraint", i.e., identity filter)
+4. **Empty include_paths (`[]`) means "include all"** — an explicit empty list is treated the same as `None`: no include constraint, all non-excluded URLs pass
 5. **Mode selector (`regexOnFullUrl`)** — `false` (default): patterns are globs matched against URL path only; `true`: patterns are regexes matched against full URL
 6. **Target selection depends on mode and flags** — in glob mode, matching is against the parsed path component; in regex mode, when `regexOnFullUrl` is true, matching is against the full URL including query parameters
 7. **Path filters apply to every URL including the start URL** — if the start URL does not pass filters, the crawl returns 0 pages
@@ -226,8 +234,10 @@ The `normalize_url()` function applies these transformations in order:
 
 ## Links
 
-- Milestone 1 implementation: `agent-svc/agent/crawler.py`, `agent-svc/agent/link_extractor.py`
-- Milestone 3 (concurrency): Planned `asyncio.Semaphore` worker pool in `crawler.py`
-- Milestone 4 (content dedup): Planned canonical tag and content hash dedup in `dedup.py`
-- Milestone 2 (sitemap): Planned `SitemapParser` in `agent-svc/agent/sitemap_parser.py`
+- Implementation: `agent-svc/agent/crawler.py` (BFS crawl engine with concurrency), `agent-svc/agent/link_extractor.py` (shared link extraction)
+- Dedup: `agent-svc/agent/dedup.py` (DedupManager with canonical tag + content hash)
+- Sitemap: `agent-svc/agent/sitemap_parser.py` (SitemapParser with robots.txt discovery and nested index support)
+- Cache: `agent-svc/agent/crawl_cache.py` (CrawlCache with Valkey-backed maxAge/minAge)
+- Streaming: `agent-svc/agent/crawl_stream.py` (SSE event streaming for crawl progress)
+- NL→params: `agent-svc/agent/nl_params.py` (NL-to-params translation for crawl parameter derivation)
 - Refines ADR-0012: Webhook delivery pattern reused for crawl lifecycle webhooks

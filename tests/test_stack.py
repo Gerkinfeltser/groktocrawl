@@ -11,7 +11,7 @@ AGENT = os.getenv("AGENT_BASE_URL", "http://localhost:8080")
 SCRAPER = os.getenv("SCRAPER_BASE_URL", "http://localhost:8001")
 SEARCH = os.getenv("SEARCH_BASE_URL", "http://localhost:8010")
 LLM = os.getenv("LLM_BASE_URL", "http://localhost:8011")
-TEST_SITE = os.getenv("TEST_SITE_BASE_URL", "http://localhost:8000")
+TEST_SITE = os.getenv("TEST_SITE_BASE_URL", "http://localhost:8005")
 TIER3_SITE = os.getenv("TIER3_FIXTURE_BASE_URL", "http://localhost:8006")
 SEMANTIC = os.getenv("SEMANTIC_BASE_URL", "http://localhost:8003")
 

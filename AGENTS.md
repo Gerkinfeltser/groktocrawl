@@ -123,6 +123,7 @@ The crawl engine (`agent-svc/agent/crawler.py`) replaces the original stub crawl
 | GET | `/v2/crawl/{job_id}` | Get crawl status with pagination (`next`), enhanced metadata (`created_at`, `completed_at`, `expires_at`, `duration`), and per-page enrichment (title, status_code, content_type, scraped_at, duration_ms) |
 | DELETE | `/v2/crawl/{job_id}` | Cancel an in-progress crawl |
 | GET | `/v2/crawl/{job_id}/errors` | Get per-URL errors and robots-blocked URLs with error types, HTTP status codes, and timestamps |
+| GET | `/v2/crawl/{job_id}/stream` | SSE stream of crawl progress — delivers per-page events (`page`, `progress`, `done`, `error`) as pages are scraped; supports reconnection to in-progress crawls and replay of completed results |
 | GET | `/v2/crawl/active` | List active/processing crawl jobs with crawl-specific fields (url, max_pages, max_depth, completed, total) |
 | POST | `/v2/crawl/params-preview` | Preview LLM-derived crawl parameters from a natural-language prompt without starting a crawl |
 
