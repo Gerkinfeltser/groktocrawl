@@ -11,6 +11,7 @@ lives in ``fetch_quality.py``. Cache functions live in ``cache.py``.
 import asyncio
 import logging
 import os
+from urllib.parse import urlparse
 
 import httpx
 
@@ -410,8 +411,9 @@ async def smart_scrape(
                 if _quality_acceptable(cached):
                     return cached
 
-        # Tier 1: /llms.txt
-        if not probe.get("shielded") and not probe.get("is_binary"):
+        # Tier 1: /llms.txt — only for site root URLs
+        is_root = urlparse(url).path in ("", "/")
+        if is_root and not probe.get("shielded") and not probe.get("is_binary"):
             _proceed, blocked = await _politeness_check_and_delay(
                 url,
                 ignore_robots_txt=ignore_robots_txt,
