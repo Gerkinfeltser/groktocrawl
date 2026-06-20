@@ -2,8 +2,18 @@
 
 Called from worker functions after store.complete_job() / store.fail_job().
 Retries with exponential backoff, optional HMAC signing.
-Each event includes a unique ``webhookId`` for receiver-side deduplication
-(VAL-CONC-050).
+Each event includes a unique UUID v4 ``webhookId`` for receiver-side
+deduplication (VAL-PARITY-011).
+
+Payload format (per validation contract):
+    - ``type`` — the event type (e.g. ``"crawl.started"``)
+    - ``id`` — the job ID
+    - ``webhookId`` — unique UUID v4 per delivery
+    - ``success`` — boolean, ``True`` for normal events
+    - ``error`` — ``None`` for success, error string for failures
+    - ``data`` — list for crawl events (``[]`` or ``[{...}]``),
+                 dict for other job types
+    - ``metadata`` — echo of ``webhook.metadata`` (VAL-PARITY-009)
 """
 
 import asyncio
@@ -11,6 +21,7 @@ import hashlib
 import hmac
 import json
 import logging
+import uuid
 
 import httpx
 
@@ -22,29 +33,17 @@ _webhook_settings = load_settings()
 MAX_RETRIES = 3
 TIMEOUT_SECONDS = 5
 
-# Counter for generating unique webhook IDs within a job/event scope
-_webhook_id_counter: dict[str, int] = {}
 
+def _next_webhook_id() -> str:
+    """Generate a unique UUID v4 for webhookId (VAL-PARITY-011).
 
-def _next_webhook_id(job_id: str, event: str) -> str:
-    """Generate a unique, deterministic webhook ID for deduplication.
-
-    Uses an in-memory counter per (job_id, event) pair. The resulting
-    ID has the format ``{job_id}-{event}-{seq}`` where ``seq`` is a
-    monotonically increasing integer unique within that job+event scope.
-
-    For page events, the caller should pass a page-specific event key
-    (e.g. ``crawl.page-{url}``) so that each page gets distinct IDs.
-    For lifecycle events (started, completed), the plain event name
-    ensures exactly one firing.
+    Each call returns a new UUID v4 string, ensuring uniqueness
+    across all deliveries regardless of job or event type.
 
     Returns:
-        A unique string like ``"abc-123-crawl.page-1"``.
+        A UUID v4 string like ``"f47ac10b-58cc-4372-a567-0e02b2c3d479"``.
     """
-    counter_key = f"{job_id}:{event}"
-    _webhook_id_counter[counter_key] = _webhook_id_counter.get(counter_key, 0) + 1
-    seq = _webhook_id_counter[counter_key]
-    return f"{job_id}-{event}-{seq}"
+    return str(uuid.uuid4())
 
 
 def _sign_body(body: bytes, secret: str) -> str:
@@ -56,30 +55,38 @@ async def deliver_webhook(
     webhook_config: dict | None,
     event: str,
     job_id: str,
-    data: dict | None = None,
-    webhook_id_key: str | None = None,
+    data: dict | list | None = None,
     task_tracker: object = None,
+    success: bool = True,
+    error: str | None = None,
 ) -> None:
     """POST a job event to the configured webhook URL with retry logic.
 
-    Each delivery includes a unique ``webhookId`` field for receiver-side
-    deduplication (VAL-CONC-050). The ID is generated deterministically
-    based on ``job_id`` and ``webhook_id_key`` (or ``event`` if not given).
+    Each delivery includes a unique UUID v4 ``webhookId`` field for
+    receiver-side deduplication (VAL-PARITY-011).
+
+    Payload format:
+        ``{"type": event, "id": job_id, "webhookId": "<uuid>",
+          "success": success, "error": error, "data": data,
+          "metadata": {metadata_echo}}``
 
     Args:
-        webhook_config: Dict with 'url' and optional 'events' list.
-                        Example: ``{"url": "https://example.com/hook", "events": ["completed", "failed"]}``
+        webhook_config: Dict with 'url', optional 'events' list, and
+                        optional 'metadata' dict (echoed in every event).
+                        Example: ``{"url": "https://example.com/hook",
+                                   "events": ["crawl.completed"],
+                                   "metadata": {"customer_id": "123"}}``
         event: The event type (e.g. ``"completed"``, ``"failed"``,
                ``"crawl.started"``, ``"crawl.page"``).
         job_id: The job identifier.
-        data: Optional payload to include in the body.
-        webhook_id_key: Key used to generate a unique webhookId. If not set,
-                        falls back to ``event``. Pass unique values per-page
-                        (e.g. ``f"crawl.page-{url}"``) to ensure each page
-                        gets a distinct idempotency key.
+        data: Payload to include in the body. For crawl lifecycle events
+              (started, completed, failed), pass ``[]``. For per-page
+              events, pass ``[{url, markdown, ...}]``.
         task_tracker: Optional ``TaskTracker`` instance. If provided, the
                       webhook delivery is spawned as a tracked background
                       task instead of executing inline.
+        success: Whether the event indicates success (default ``True``).
+        error: Error message for failure events (default ``None``).
     """
     if not webhook_config:
         return
@@ -93,14 +100,16 @@ async def deliver_webhook(
     if events_filter and event not in events_filter:
         return
 
-    id_key = webhook_id_key or event
-    webhook_id = _next_webhook_id(job_id, id_key)
+    webhook_id = _next_webhook_id()
 
     payload = {
-        "event": event,
+        "type": event,
         "id": job_id,
         "webhookId": webhook_id,
-        "data": data or {},
+        "success": success,
+        "error": error,
+        "data": data or ([] if data is None else data),
+        "metadata": webhook_config.get("metadata", {}) if webhook_config else {},
     }
     body = json.dumps(payload).encode()
 
