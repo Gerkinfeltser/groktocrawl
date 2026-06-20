@@ -1040,6 +1040,11 @@ class CrawlEngine:
                             backoff_delay,
                             error_msg,
                         )
+                        # Remove the error entry we just added — retry will handle it
+                        if self._errors and self._errors[-1].get("url") == url:
+                            self._errors.pop()
+                        # Remove from _seen so the retry can pass dedup
+                        self._seen.discard(normalized)
                         await asyncio.sleep(backoff_delay)
                         self._queue.appendleft((url, depth, from_sitemap))
                     else:
