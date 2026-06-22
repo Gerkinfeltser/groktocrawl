@@ -55,7 +55,7 @@ jobs:
       packages: write
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -105,7 +105,7 @@ jobs:
     needs: build-and-push
     runs-on: [self-hosted, groktocrawl, docker]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up .env
         run: |
