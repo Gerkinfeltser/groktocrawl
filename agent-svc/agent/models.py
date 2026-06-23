@@ -699,7 +699,7 @@ class BatchScrapeRequest(BaseModel):
 class SearchRequest(BaseModel):
     query: str
     limit: int = 5
-    search_type: str = "fast"  # "fast" | "rich"
+    search_type: str = "fast"  # "fast" | "rich" | "deep"
     retrieval_mode: str = (
         "keyword"  # "keyword" | "semantic" | "hybrid" | "vector" | "hybrid_vector"
     )
@@ -725,6 +725,7 @@ class SearchResponse(BaseModel):
     success: bool = True
     data: dict = Field(default_factory=lambda: {"web": [], "images": [], "news": []})
     output: dict[str, Any] | None = None  # Present only when output_schema provided
+    query_variations: list[str] | None = None  # Present for deep search type
 
 
 class FindSimilarRequest(BaseModel):
