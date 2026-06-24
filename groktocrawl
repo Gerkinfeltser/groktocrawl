@@ -632,6 +632,23 @@ class Client:
             return {"_stream": resp}
         return self._request("POST", "/answer", json_data=data)
 
+    def enrich(
+        self,
+        items: list[dict],
+        fields: dict[str, dict],
+        source_hint: str | None = None,
+        effort: str = "low",
+    ) -> dict[str, Any]:
+        """Enrich a list of entities with web-sourced structured data."""
+        data: dict[str, Any] = {
+            "items": items,
+            "fields": fields,
+            "effort": effort,
+        }
+        if source_hint:
+            data["source_hint"] = source_hint
+        return self._request("POST", "/enrich", json_data=data)
+
     def find_similar(
         self,
         url: str,
@@ -1201,6 +1218,84 @@ def cmd_answer(client: Client, args: argparse.Namespace) -> None:
                 print("  [{}] {}".format(c["index"], c["url"]))
 
 
+def cmd_enrich(client: Client, args: argparse.Namespace) -> None:
+    """Enrich a list of entities with web-sourced structured data."""
+    # Parse items from JSON string or file
+    items_str = args.items
+    if items_str.startswith("@"):
+        with open(items_str[1:]) as f:
+            items_str = f.read()
+    try:
+        items = json.loads(items_str)
+        if not isinstance(items, list):
+            die("--items must be a JSON array")
+    except (json.JSONDecodeError, FileNotFoundError) as e:
+        die(f"Invalid --items: {e}")
+
+    # Parse fields from JSON string or file
+    fields_str = args.fields
+    if fields_str.startswith("@"):
+        with open(fields_str[1:]) as f:
+            fields_str = f.read()
+    try:
+        fields_raw = json.loads(fields_str)
+        if not isinstance(fields_raw, dict):
+            die("--fields must be a JSON object")
+        # Convert to the format expected by the API: {name: {description: ...}}
+        fields = {
+            name: {
+                "description": desc
+                if isinstance(desc, str)
+                else desc.get("description", str(desc))
+            }
+            for name, desc in fields_raw.items()
+        }
+    except (json.JSONDecodeError, FileNotFoundError) as e:
+        die(f"Invalid --fields: {e}")
+
+    # Store parsed values on args for the handler
+    args._items = items
+    args._fields = fields
+
+    if client.dry_run:
+        emit(
+            f"[dry-run] Would enrich {len(args._items)} items with {len(args._fields)} fields",
+            {"dry_run": True, "command": "enrich"},
+        )
+        return
+
+    try:
+        result = client.enrich(
+            items=args._items,
+            fields=args._fields,
+            source_hint=args.source_hint,
+            effort=args.effort,
+        )
+    except ApiError as e:
+        die(str(e))
+
+    if JSON_OUTPUT:
+        emit("", result)
+        return
+
+    data = result.get("data", [])
+    if not data:
+        log("No enrichment results")
+        return
+
+    for i, enriched in enumerate(data):
+        item = enriched.get("item", {})
+        enrichments = enriched.get("enrichments", {})
+        print(f"\n--- Item {i + 1}: {item} ---")
+        for field_name, field_value in enrichments.items():
+            val = field_value.get("value", "")
+            src = field_value.get("source", "")
+            print(f"  {field_name}: {val or '(not found)'}")
+            if src:
+                print(f"    source: {src}")
+    print()
+
+
 def cmd_find_similar(client: Client, args: argparse.Namespace) -> None:
     """Find semantically similar pages for a given URL."""
     if client.dry_run:
@@ -1222,7 +1317,10 @@ def cmd_find_similar(client: Client, args: argparse.Namespace) -> None:
     data = result.get("data", [])
 
     if JSON_OUTPUT:
-        emit("", {"results": data, "query_url": args.url, "search_mode": args.search_mode})
+        emit(
+            "",
+            {"results": data, "query_url": args.url, "search_mode": args.search_mode},
+        )
         return
 
     if not data:
@@ -1801,7 +1899,7 @@ def make_parser() -> argparse.ArgumentParser:
     p_scrape.add_argument(
         "--contents",
         help="Content extraction options as JSON string or @file.json. "
-             'Example: \'{"extras":{"links":5}}\'',
+        'Example: \'{"extras":{"links":5}}\'',
     )
     p_scrape.add_argument(
         "-o", "--output", help="Write output to file instead of stdout"
@@ -1845,7 +1943,7 @@ def make_parser() -> argparse.ArgumentParser:
     p_search.add_argument(
         "--contents",
         help="Content extraction options as JSON string or @file.json. "
-             'Example: \'{"highlights":{"maxCharacters":300}}\'',
+        'Example: \'{"highlights":{"maxCharacters":300}}\'',
     )
 
     p_map = subparsers.add_parser("map", help="Discover URLs on a site")
@@ -2020,6 +2118,30 @@ def make_parser() -> argparse.ArgumentParser:
     p_answer.add_argument(
         "-o", "--output-dir", help="Output directory for pyramid (implies --pyramid)"
     )
+    p_enrich = subparsers.add_parser(
+        "enrich", help="Enrich a list of entities with web-sourced structured data"
+    )
+    p_enrich.add_argument(
+        "--items",
+        required=True,
+        help="JSON array of items or @file.json",
+    )
+    p_enrich.add_argument(
+        "--fields",
+        required=True,
+        help="JSON object of field descriptions or @file.json",
+    )
+    p_enrich.add_argument(
+        "--source-hint",
+        choices=["company", "person", "url", "product"],
+        help="Hint to guide search relevance",
+    )
+    p_enrich.add_argument(
+        "--effort",
+        choices=["low", "medium", "high"],
+        default="low",
+        help="Search depth (default: low)",
+    )
     p_find_similar = subparsers.add_parser(
         "find-similar", help="Find semantically similar pages by URL"
     )
@@ -2107,6 +2229,7 @@ def main() -> None:
         "parse": cmd_parse,
         "generate-llmstxt": cmd_generate_llmstxt,
         "answer": cmd_answer,
+        "enrich": cmd_enrich,
         "find-similar": cmd_find_similar,
     }
 

@@ -41,6 +41,8 @@ from .models import (
     CrawlErrorsResponse,
     CrawlRequest,
     CrawlStatusResponse,
+    EnrichRequest,
+    EnrichResponse,
     ExtractCreateResponse,
     ExtractRequest,
     ExtractStatusResponse,
@@ -421,7 +423,7 @@ async def create_crawl(
             "Location": f"/v2/crawl/{job_id}/stream",
             "X-Accel-Buffering": "no",
         }
-        return StreamingResponse(
+        return StreamingResponse(  # type: ignore[return-value]
             event_stream(),
             media_type="text/event-stream",
             headers=sse_headers,
@@ -1120,7 +1122,7 @@ async def find_similar(request: Request, body: FindSimilarRequest):
     latency = (time.monotonic() - start) * 1000
 
     return FindSimilarResponse(
-        data=results,
+        data=results,  # type: ignore[arg-type]
         query_url=body.url,
         search_mode=body.search_mode,
         latency_ms=round(latency, 1),
@@ -1236,6 +1238,38 @@ async def answer(request: Request, body: AnswerRequest, response: Response) -> A
         citations=[Citation(**c) for c in result["citations"]],
         search_type=result["search_type"],
         latency_ms=result["latency_ms"],
+    )
+
+
+@router.post("/v2/enrich", response_model=EnrichResponse)
+async def enrich(request: Request, body: EnrichRequest):
+    """Enrich a list of entities with web-sourced structured data.
+
+    Each item is processed independently: search → scrape → LLM extraction.
+    Returns ``{value, source}`` pairs for each requested field.
+    """
+    import time
+
+    from .research import run_enrich_pipeline
+
+    start = time.monotonic()
+    result = await run_enrich_pipeline(
+        items=body.items,
+        fields=body.fields,
+        source_hint=body.source_hint,
+        effort=body.effort,
+        searxng_url=request.app.state.searxng_url,
+        scraper_url=request.app.state.scraper_url,
+        llm_base_url=request.app.state.llm_base_url,
+        llm_api_key=request.app.state.llm_api_key,
+        llm_model=request.app.state.llm_model,
+    )
+    latency = (time.monotonic() - start) * 1000
+    return EnrichResponse(
+        data=result,
+        latency_ms=round(latency, 1),
+        items_enriched=len(body.items),
+        fields_per_item=len(body.fields),
     )
 
 
