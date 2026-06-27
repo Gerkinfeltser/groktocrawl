@@ -71,7 +71,13 @@ from .models import (
     SearchResult,
     Source,
 )
-from .monitor import delete_monitor, get_all_monitors, get_monitor, run_monitor, save_monitor
+from .monitor import (
+    delete_monitor,
+    get_all_monitors,
+    get_monitor,
+    run_monitor,
+    save_monitor,
+)
 from .store import JobStore
 
 logger = logging.getLogger(__name__)
