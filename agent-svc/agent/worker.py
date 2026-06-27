@@ -395,6 +395,7 @@ async def _process_batch_scrape_async(
                     total,
                 )
                 break
+
             try:
                 result = await scraper.scrape(url)
             except Exception as e:
