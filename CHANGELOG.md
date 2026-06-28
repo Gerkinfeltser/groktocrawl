@@ -4,29 +4,39 @@ All notable changes to GroktoCrawl are documented in this file.
 
 ## [Unreleased]
 
-### Added
-
-- **CLI: `batch-scrape` subcommand.** `groktocrawl batch-scrape <job_id>` shows job status with paginated results; `--cancel` cancels an in-progress batch; `--errors` lists per-URL failures. Closes the last CLI-vs-API gap for batch scrape operations.
-- **ADR-0039 + CI check: API-CLI surface parity.** New script (`scripts/check-cli-coverage.py`) and CI workflow validate that every `/v2/` endpoint has a CLI counterpart. PR template updated with a corresponding checkbox. Prevents API endpoints from landing without CLI access.
-- **curl_cffi fetch client.** Replaces `httpx.AsyncClient` with `curl_cffi.AsyncSession(impersonate="chrome131")` in the scraper fetch tiers. Bundles `libcurl-impersonate-chrome` (BoringSSL-based TLS fingerprint), allowing Tiers 1-2 to bypass CDN-level bot detection (Akamai, Cloudflare edge) that currently blocks at TLS handshake time. See PR #363.
-- **Tier 2 HTML-to-markdown fallback.** `fetch_via_content_negotiation` now converts HTML responses to markdown via `html_to_markdown()` instead of dropping them. This closes a blind spot exposed by the curl_cffi swap: before that change, Tier 2 couldn't reach Akamai-shielded pages at all. Now that `curl_cffi` can fetch them, the HTML fallback prevents unnecessary fall-through to Tier 3 (Playwright), which itself may be blocked by the same CDN protection. See PR #368.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
 ## [0.10.1](https://github.com/groktopus/groktocrawl/compare/v0.10.0...v0.10.1) (2026-06-28)
 
-> _The One That Fights Back_ — Cloudflare challenge polling, barrier detection expansion, and a smarter Playwright that doesn't wait forever for a challenge that never finishes.
+> _The One That Fights Back_ — curl_cffi bypasses Akamai, Playwright stops waiting for Cloudflare challenges that never finish, and the CLI finally speaks API.
 
 ### Highlights
+
+**Curl_cffi replaces httpx in the scraper stack.** The fetch tiers now use `curl_cffi.AsyncSession(impersonate="chrome131")` with BoringSSL-based TLS fingerprinting. Sites behind Akamai and Cloudflare edge that previously blocked at TLS handshake time are now reachable by Tiers 1-2. Bundles `libcurl-impersonate-chrome` in the Docker image.
+
+**Tier 2 learned to handle HTML responses.** When a site doesn't return markdown via content negotiation but serves HTML, the scraper now converts it to markdown via readability+markdownify instead of dropping it. This closes a blind spot exposed by the curl_cffi swap: now that Tier 2 can reach Akamai-shielded pages, it was fetching HTML that it couldn't use.
 
 **Cloudflare challenges no longer stall the pipeline.** The Playwright renderer was using `wait_until="networkidle"` which never completes on Cloudflare-protected pages — the JS challenge keeps the network busy indefinitely. The goto would time out at 45s, the scraper would raise, and the pipeline would skip straight to `SCRAPE_FAILED`. Now the scraper loads the challenge page in under a second (`domcontentloaded`), actively polls for the cooldown to clear (checking page title and `cf_clearance` cookie every 2s for up to 30s), and if the challenge persists, gracefully falls through to FlareSolverr instead of returning challenge-HTML garbage as if it were real content. Once through, it waits for the real page to settle before extracting.
 
 **Barrier detection learned to recognize Cloudflare's newer challenge variants.** Pages that hit the "Verification successful. Waiting for turbo.az to respond" or "Enable JavaScript and cookies to continue" screens were previously invisible to the classifier — they passed the quality gate and were returned as "valid" content. Those phrases are now in `CLOUDFLARE_INDICATORS`, so the post-extraction barrier check catches them and routes them correctly.
 
+**CLI now covers every `/v2/` endpoint.** Three new subcommands: `batch-scrape` (job status, cancel, paginated results), `monitor run` (manual trigger), and `parse-upload` (two-step large file upload). A new CI check (`check-cli-coverage.py`) enforces parity on every PR so future API endpoints won't land without CLI counterparts.
+
+### Features
+
+* CLI: `batch-scrape` subcommand with status, cancel, and errors ([#354](https://github.com/groktopus/groktocrawl/pull/354))
+* API-CLI surface parity: ADR-0039, CI check, and PR template ([#357](https://github.com/groktopus/groktocrawl/pull/357))
+* CLI: `monitor run` subcommand for manual trigger
+* CLI: `parse-upload` subcommand for two-step file upload
+* curl_cffi fetch client with Chrome 131 TLS fingerprint impersonation ([#363](https://github.com/groktopus/groktocrawl/pull/363))
+* Tier 2 HTML-to-markdown fallback via readability+markdownify ([#368](https://github.com/groktopus/groktocrawl/pull/368))
+
 ### Bug Fixes
 
+* fix: recover `_head_probe` crash from curl_cffi migration
 * fix: active Cloudflare challenge polling with domcontentloaded goto strategy ([#369](https://github.com/groktopus/groktocrawl/pull/369), closes [#365](https://github.com/groktopus/groktocrawl/issues/365))
+
+### CI & Infrastructure
+
+* add check-cli-coverage.py to enforce API-CLI parity in CI
 
 ## [0.10.0](https://github.com/groktopus/groktocrawl/compare/v0.9.0...v0.10.0) (2026-06-27)
 
