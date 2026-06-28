@@ -14,6 +14,20 @@ All notable changes to GroktoCrawl are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1](https://github.com/groktopus/groktocrawl/compare/v0.10.0...v0.10.1) (2026-06-28)
+
+> _The One That Fights Back_ — Cloudflare challenge polling, barrier detection expansion, and a smarter Playwright that doesn't wait forever for a challenge that never finishes.
+
+### Highlights
+
+**Cloudflare challenges no longer stall the pipeline.** The Playwright renderer was using `wait_until="networkidle"` which never completes on Cloudflare-protected pages — the JS challenge keeps the network busy indefinitely. The goto would time out at 45s, the scraper would raise, and the pipeline would skip straight to `SCRAPE_FAILED`. Now the scraper loads the challenge page in under a second (`domcontentloaded`), actively polls for the cooldown to clear (checking page title and `cf_clearance` cookie every 2s for up to 30s), and if the challenge persists, gracefully falls through to FlareSolverr instead of returning challenge-HTML garbage as if it were real content. Once through, it waits for the real page to settle before extracting.
+
+**Barrier detection learned to recognize Cloudflare's newer challenge variants.** Pages that hit the "Verification successful. Waiting for turbo.az to respond" or "Enable JavaScript and cookies to continue" screens were previously invisible to the classifier — they passed the quality gate and were returned as "valid" content. Those phrases are now in `CLOUDFLARE_INDICATORS`, so the post-extraction barrier check catches them and routes them correctly.
+
+### Bug Fixes
+
+* fix: active Cloudflare challenge polling with domcontentloaded goto strategy ([#369](https://github.com/groktopus/groktocrawl/pull/369), closes [#365](https://github.com/groktopus/groktocrawl/issues/365))
+
 ## [0.10.0](https://github.com/groktopus/groktocrawl/compare/v0.9.0...v0.10.0) (2026-06-27)
 
 > _The One Where the Robot Gets Organized_ — monitors, batch jobs, file uploads, and a CI that doesn't melt.
