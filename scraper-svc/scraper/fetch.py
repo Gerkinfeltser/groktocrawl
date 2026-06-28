@@ -14,6 +14,7 @@ import os
 from urllib.parse import urlparse
 
 import httpx
+from curl_cffi import requests as curl_requests
 
 from .adapters.base import AdapterContext, get_registry
 from .cache import _check_cache, _is_binary_content_type, _set_cache
@@ -178,7 +179,7 @@ async def _head_probe(url: str, client: httpx.AsyncClient) -> dict:
         content_type: Content-Type header value
     """
     try:
-        resp = await client.head(url, follow_redirects=True, timeout=10)
+        resp = await client.head(url, allow_redirects=True, timeout=10)  # type: ignore[call-arg]
         status_code = resp.status_code
         content_type = resp.headers.get("content-type", "")
         content_length = resp.headers.get("content-length")
@@ -356,8 +357,8 @@ async def smart_scrape(
     else:
         logger.info("No proxy configured")
 
-    async with httpx.AsyncClient(
-        follow_redirects=True,
+    async with curl_requests.AsyncSession(
+        impersonate="chrome131",
         timeout=30,
         headers={
             "User-Agent": (
