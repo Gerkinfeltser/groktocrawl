@@ -249,6 +249,31 @@ async def fetch_via_content_negotiation(
                 if lm:
                     result["last_modified"] = lm
                 return result
+
+            # HTML fallback: if the content type is HTML, convert it to markdown.
+            # This catches sites behind Akamai/Cloudflare that block Tier 3
+            # (Playwright) but return HTML on a curl_cffi GET — we already have
+            # the content, no need to fall through to a failing Tier 3.
+            is_html = "text/html" in ct
+            if is_html and resp.text and len(resp.text) > 100:
+                markdown = html_to_markdown(resp.text)
+                if markdown and len(markdown) > 50:
+                    logger.info(
+                        "Tier 2 hit: content negotiation (HTML→md) for %s", url
+                    )
+                    result = {
+                        "markdown": markdown,
+                        "source": "content-negotiation",
+                        "url": url,
+                    }
+                    # Pass through ETag/Last-Modified for intelligent caching
+                    etag = resp.headers.get("etag")
+                    lm = resp.headers.get("last-modified")
+                    if etag:
+                        result["etag"] = etag
+                    if lm:
+                        result["last_modified"] = lm
+                    return result
     except Exception as e:
         logger.debug("Tier 2 miss for %s: %s", url, e)
     return None
