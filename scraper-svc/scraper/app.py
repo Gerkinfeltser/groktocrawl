@@ -251,9 +251,15 @@ async def metrics():
 async def scrape(request: ScrapeRequest):
     """Scrape a URL and return its content as clean markdown."""
     try:
+        # When --format images is requested, force browser (Tier 3) so
+        # raw_html is available for image extraction (Tier 1/2 don't capture it).
+        scrape_opts = request.scrape_options or {}
+        formats = scrape_opts.get("formats", [])
+        needs_images = "images" in formats
+
         result = await smart_scrape(
             request.url,
-            force_browser=request.force_browser,
+            force_browser=request.force_browser or needs_images,
             ignore_robots_txt=request.ignore_robots_txt,
             robots_user_agent=request.robots_user_agent,
             scrape_options=request.scrape_options,
