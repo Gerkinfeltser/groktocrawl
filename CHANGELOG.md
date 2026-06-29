@@ -4,6 +4,39 @@ All notable changes to GroktoCrawl are documented in this file.
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/groktopus/groktocrawl/compare/v0.10.1...v0.11.0) (2026-06-29)
+
+> _The One That Sees_ — images across the entire stack: scrape, search, crawl, agent, and CLI.
+
+### Highlights
+
+**Scrape extracts structured image metadata.** When `formats` includes `"images"`, the scraper parses every `<img>` tag from the DOM before markdown conversion — capturing `src`, `alt`, `width`, `height`, and document-order position. Relative URLs are resolved, data URIs can be stripped, and the results land in `ScrapeData.images` alongside the markdown body. Default behavior is unchanged (no images extracted unless requested).
+
+**Image search populates `data.images[]`.** `POST /v2/search` with `sources=["images"]` routes queries to SearXNG image engines and populates the `data.images` slot (previously always empty). A single query can return `data.web` and `data.images` simultaneously when combined sources are requested. The CLI adds `--search-type images` as a convenience shorthand.
+
+**Crawl inherits image extraction.** `POST /v2/crawl` already forwards `scrape_options` (including `formats`) to every page scrape. The CLI now exposes `--format images` on the crawl subcommand so users can request image metadata on every crawled page.
+
+**CLI image display and download.** Search output renders image results as a separate section with title, dimensions, and source URL. Scrape output shows an "Images found on page: N" summary with filename and dimensions. The new `--download-images` flag (scrape and crawl) saves images to `_images/` with concurrent HTTP downloads, content-type validation, HTTP status checking, and filename deduplication.
+
+**Agent learns to gather images.** `--include-images` on the agent command plumbs through the entire research pipeline — from CLI flag → `AgentRequest.include_images` → worker → `run_research` → `_scrape_urls`, which passes `scrape_options={"formats":["markdown","images"]}` to the scraper. Agent-collected images arrive alongside the text synthesis.
+
+### Features
+
+* scrape: `formats=["images"]` extracts `<img>` metadata from DOM ([#370](https://github.com/groktopus/groktocrawl/issues/370))
+* search: `data.images[]` populated from SearXNG image engines ([#371](https://github.com/groktopus/groktocrawl/issues/371))
+* CLI: display image results in search and scrape output ([#372](https://github.com/groktopus/groktocrawl/issues/372))
+* crawl: inherit `formats: images` from scrape via `scrape_options` passthrough ([#373](https://github.com/groktopus/groktocrawl/issues/373))
+* CLI: `--download-images` flag for scrape and crawl ([#374](https://github.com/groktopus/groktocrawl/issues/374))
+* agent: `--include-images` CLI flag for image-aware research ([#375](https://github.com/groktopus/groktocrawl/issues/375))
+
+### Models & API
+
+* `ImageData` model: `url`, `alt`, `width`, `height`, `position`
+* `ImageSearchResult` model: `title`, `image_url`, `image_width`, `image_height`, `url`, `position`
+* `ScrapeData.images`: `list[ImageData] | None`
+* `AgentRequest.include_images`: `bool` (default `false`)
+* `"images"` added to `VALID_SCRAPE_FORMATS`
+
 ## [0.10.1](https://github.com/groktopus/groktocrawl/compare/v0.10.0...v0.10.1) (2026-06-28)
 
 > _The One That Fights Back_ — curl_cffi bypasses Akamai, Playwright stops waiting for Cloudflare challenges that never finish, and the CLI finally speaks API.
