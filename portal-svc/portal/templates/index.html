@@ -253,9 +253,8 @@
           <span class="spinner" id="spinner"></span>
           <span id="askBtnText">Ask</span>
         </button>
-        <span class="btn btn-deep" title="Deep research — coming in v0.2">Deep</span>
+        <button type="button" class="btn btn-secondary" id="deepBtn">Deep Research</button>
       </div>
-      <div class="btn-deep-hint">Deep research coming soon</div>
     </form>
   </div>
 
@@ -267,6 +266,7 @@
       <h3>Sources</h3>
       <div id="sourcesList"></div>
     </div>
+    <div id="phaseIndicator" style="display:none; font-size:0.8rem; color:#888; margin-top:8px;"></div>
   </div>
 
   <div class="recent-queries" id="recentQueries">
@@ -285,15 +285,18 @@
   const askBtn = document.getElementById('askBtn');
   const askBtnText = document.getElementById('askBtnText');
   const spinner = document.getElementById('spinner');
+  const deepBtn = document.getElementById('deepBtn');
   const hero = document.getElementById('hero');
   const results = document.getElementById('results');
   const sourcesList = document.getElementById('sourcesList');
   const answerArea = document.getElementById('answerArea');
   const recentQueries = document.getElementById('recentQueries');
   const recentList = document.getElementById('recentList');
+  const phaseIndicator = document.getElementById('phaseIndicator');
 
   let currentCitations = {};
   let fullAnswerText = '';
+  let mode = 'ask';  // 'ask' or 'deep'
 
   // ── Markdown renderer (uses marked library) ──
   function renderMarkdown(text) {
@@ -369,8 +372,33 @@
 
   function handleEvent(event) {
     switch (event.type) {
-      case 'sources':
+      case 'research_plan':
+        phaseIndicator.style.display = 'block';
+        phaseIndicator.textContent = event.strategy || event.reasoning || 'Planning research...';
+        break;
+      case 'status':
+        phaseIndicator.style.display = 'block';
+        if (event.state === 'planning') phaseIndicator.textContent = 'Planning...';
+        else if (event.state === 'searching') phaseIndicator.textContent = 'Searching...';
+        else if (event.state === 'synthesizing') phaseIndicator.textContent = 'Synthesizing...';
+        break;
+      case 'research_pass':
+        phaseIndicator.style.display = 'block';
+        phaseIndicator.textContent = `Pass ${event.pass}/${event.total_passes}`;
+        break;
+      case 'sources_pending':
         renderSources(event.sources);
+        break;
+      case 'source_scraped':
+        updateSourceStatus(event.url, 'done');
+        break;
+      case 'sources':
+        // Agent sends sources at end; only render if sources_pending wasn't already sent
+        if (sourcesList.children.length === 0) {
+          // Build source objects from URL list
+          const srcObjs = event.sources.map(url => ({ url, title: url, relevance: '' }));
+          renderSources(srcObjs);
+        }
         break;
       case 'token':
         appendToken(event.content);
@@ -390,12 +418,21 @@
       const el = document.createElement('div');
       el.className = 'source-item';
       el.id = `src-${i}`;
+      el.setAttribute('data-url', s.url);
       el.innerHTML = `
         <span class="status loading"></span>
         <a href="${s.url}" target="_blank" rel="noopener">${s.title || s.url}</a>
       `;
       sourcesList.appendChild(el);
     });
+  }
+
+  function updateSourceStatus(url, statusClass) {
+    const item = sourcesList.querySelector(`.source-item[data-url="${url}"]`);
+    if (item) {
+      const statusDot = item.querySelector('.status');
+      if (statusDot) statusDot.className = `status ${statusClass}`;
+    }
   }
 
   function appendToken(content) {
@@ -412,12 +449,19 @@
     // If we have the full answer in the done event, use that
     if (event.answer) {
       fullAnswerText = event.answer;
+    } else if (event.result) {
+      // Agent endpoint format: result instead of answer
+      fullAnswerText = event.result;
     }
 
     // Build citation lookup
     currentCitations = {};
     if (event.citations) {
+      // Answer endpoint format: citations is array of {index, url}
       event.citations.forEach(c => { currentCitations[c.index] = c.url; });
+    } else if (event.sources) {
+      // Agent endpoint format: sources is array of URL strings
+      event.sources.forEach((url, i) => { currentCitations[String(i + 1)] = url; });
     }
 
     // Render markdown to HTML
@@ -438,10 +482,12 @@
   function setLoading(loading) {
     if (loading) {
       askBtn.disabled = true;
+      deepBtn.disabled = true;
       spinner.classList.add('active');
-      askBtnText.textContent = 'Searching...';
+      askBtnText.textContent = mode === 'deep' ? 'Researching...' : 'Searching...';
     } else {
       askBtn.disabled = false;
+      deepBtn.disabled = false;
       spinner.classList.remove('active');
       askBtnText.textContent = 'Ask';
     }
@@ -458,6 +504,8 @@
     sourcesList.innerHTML = '';
     fullAnswerText = '';
     answerArea.innerHTML = '<span class="cursor">|</span>';
+    phaseIndicator.style.display = 'none';
+    phaseIndicator.textContent = '';
     setLoading(true);
 
     saveRecent(query);
@@ -465,10 +513,14 @@
 
     const formData = new FormData();
     formData.append('query', query);
-    formData.append('num_sources', '5');
+    if (mode === 'ask') {
+      formData.append('num_sources', '5');
+    }
+
+    const url = mode === 'deep' ? '/ask/deep' : '/ask';
 
     try {
-      const response = await fetch('/ask', { method: 'POST', body: formData });
+      const response = await fetch(url, { method: 'POST', body: formData });
       if (!response.ok) {
         showError(`Server returned ${response.status}`);
         return;
@@ -477,6 +529,14 @@
     } catch (err) {
       showError(err.message);
     }
+  });
+
+  // ── Button click handlers ──
+  // Ask button is type="submit", so clicking it or pressing Enter triggers form submit natively.
+  // Only Deep Research needs a manual click handler since it's type="button".
+  deepBtn.addEventListener('click', () => {
+    mode = 'deep';
+    form.dispatchEvent(new Event('submit'));
   });
 
   // ── Init ──
