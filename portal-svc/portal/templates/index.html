@@ -428,7 +428,7 @@
   }
 
   function updateSourceStatus(url, statusClass) {
-    const item = sourcesList.querySelector(`.source-item[data-url="${url}"]`);
+    const item = sourcesList.querySelector(`.source-item[data-url="${CSS.escape(url)}"]`);
     if (item) {
       const statusDot = item.querySelector('.status');
       if (statusDot) statusDot.className = `status ${statusClass}`;
@@ -470,6 +470,9 @@
     // Mark sources as done
     const items = sourcesList.querySelectorAll('.status');
     items.forEach(el => { el.className = 'status done'; });
+
+    // Hide phase indicator — research is done
+    phaseIndicator.style.display = 'none';
 
     setLoading(false);
   }
@@ -537,6 +540,7 @@
   deepBtn.addEventListener('click', () => {
     mode = 'deep';
     form.dispatchEvent(new Event('submit'));
+    mode = 'ask';
   });
 
   // ── Init ──
