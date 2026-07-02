@@ -118,3 +118,55 @@ async def ask(query: str = Form(...), num_sources: int = Form(5)):
             yield b"event: error\ndata: Service unavailable\n\n"
 
     return StreamingResponse(proxy_stream(), media_type="text/event-stream")
+
+
+@app.post("/ask/deep")
+async def ask_deep(query: str = Form(...)):
+    """Proxy a deep research query to agent-svc /v2/agent, streaming SSE results back.
+
+    Same SSE streaming pattern as /ask but targets the agent endpoint
+    which runs multi-query deep research with query intelligence.
+    """
+    _queries_counter.inc()
+
+    agent_url = f"{BASE}/v2/agent"
+
+    async def proxy_deep_stream():
+        # Circuit breaker: fast-fail check before making any HTTP call
+        try:
+            await _agent_circuit_breaker.check()
+        except CircuitOpenError as exc:
+            logger.warning(
+                "Circuit breaker open, fast-failing request to %s", agent_url
+            )
+            error_body = json.dumps(exc.detail)
+            yield f"event: error\ndata: {error_body}\n\n".encode()
+            return
+
+        try:
+            async with httpx.AsyncClient(timeout=None) as client:
+                async with client.stream(
+                    "POST",
+                    agent_url,
+                    json={
+                        "prompt": query,
+                        "stream": True,
+                    },
+                ) as response:
+                    if response.status_code >= 400:
+                        body = await response.aread()
+                        if response.status_code >= 500:
+                            await _agent_circuit_breaker.record_failure()
+                        yield (
+                            f"event: error\ndata: {body.decode(errors='replace')}\n\n"
+                        ).encode()
+                        return
+                    await _agent_circuit_breaker.record_success()
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+        except httpx.ConnectError:
+            await _agent_circuit_breaker.record_failure()
+            logger.warning("Agent unreachable at %s", agent_url)
+            yield b"event: error\ndata: Service unavailable\n\n"
+
+    return StreamingResponse(proxy_deep_stream(), media_type="text/event-stream")
