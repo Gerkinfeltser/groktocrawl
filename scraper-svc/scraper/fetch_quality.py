@@ -290,8 +290,55 @@ def _looks_like_markdown(text: str) -> bool:
     return md_indicators >= 3
 
 
+def _structural_text_extraction(html: str) -> str:
+    """Extract visible text from HTML using BeautifulSoup.
+
+    Extracts page title, meta description, and body text, stripping
+    non-content elements. Used as fallback when readability-lxml
+    produces little or no output (common for SPA-heavy sites where
+    the non-JS HTML shell lacks article-like structure).
+
+    Returns text capped at 10,000 chars.
+    """
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    parts: list[str] = []
+
+    # Page title
+    title_tag = soup.find("title")
+    if title_tag and title_tag.get_text(strip=True):
+        parts.append(f"# {title_tag.get_text(strip=True)}")
+
+    # Meta description
+    meta_desc = soup.find("meta", attrs={"name": "description"})
+    if meta_desc:
+        content: str = str(meta_desc.get("content", "")).strip()
+        if content:
+            parts.append(content)
+
+    # Body text — strip non-content elements
+    for tag in soup(["script", "style", "nav", "footer", "header"]):
+        tag.decompose()
+
+    body_text = soup.get_text(separator="\n", strip=True)
+    body_text = re.sub(r"\n{3,}", "\n\n", body_text)
+
+    if body_text:
+        parts.append(body_text)
+
+    result = "\n\n".join(parts)
+    return result[:10000]
+
+
 def html_to_markdown(html: str) -> str:
-    """Convert HTML to clean markdown using readability + markdownify."""
+    """Convert HTML to clean markdown using readability + markdownify.
+
+    Falls back to structural BeautifulSoup text extraction when
+    readability produces little or no output (common for SPA-heavy
+    sites where the non-JS HTML shell lacks article-like structure).
+    """
     try:
         from markdownify import markdownify as md
         from readability import Document
@@ -302,19 +349,25 @@ def html_to_markdown(html: str) -> str:
         markdown = md(summary, heading_style="ATX", strip=["script", "style"])
         # Collapse multiple blank lines
         markdown = re.sub(r"\n{3,}", "\n\n", markdown)
-        return markdown.strip()
+        result = markdown.strip()
+
+        # Structural fallback: when readability produces little or no output,
+        # extract visible text nodes from the full HTML. This handles sites
+        # where FlareSolverr returns real HTML but readability-lxml finds no
+        # article-like content (SPA shells, torrent indexes, etc.).
+        if not result or len(result) < 50:
+            logger.debug(
+                "Readability produced %d chars, falling back to structural extraction",
+                len(result),
+            )
+            return _structural_text_extraction(html)
+
+        return result
     except Exception as e:
         logger.error("HTML-to-markdown conversion failed: %s", e)
         # Fallback: try BeautifulSoup for text extraction
         try:
-            from bs4 import BeautifulSoup
-
-            soup = BeautifulSoup(html, "html.parser")
-            # Remove script/style
-            for tag in soup(["script", "style", "nav", "footer", "header"]):
-                tag.decompose()
-            text = soup.get_text(separator="\n", strip=True)
-            return text[:10000]  # Limit to 10K chars as fallback
+            return _structural_text_extraction(html)
         except Exception:
             return html[:5000]  # Last resort raw truncation
 

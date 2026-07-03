@@ -58,7 +58,7 @@ def test_boilerplate_nav_page():
     """Navigation/list pages with many links but some content warn or fail."""
     lines = "\n".join([f"[Link {i}](https://example.com/{i})" for i in range(15)])
     lines += "\n\nA single line of explanation that is not a link."
-    score, status = _check_boilerplate(lines)
+    _score, status = _check_boilerplate(lines)
     assert status in ("warn", "fail")
 
 
@@ -73,7 +73,7 @@ def test_completeness_empty():
 
 def test_completeness_short_content_no_title():
     """Very short content (<200 chars) with no paragraphs fails."""
-    score, status = _check_completeness("Hello world")
+    _score, status = _check_completeness("Hello world")
     assert status == "fail"
 
 
@@ -96,7 +96,7 @@ def test_completeness_good_content():
 def test_completeness_paragraph_threshold():
     """Content with adequate length but only one paragraph warns."""
     long_single_para = "Sentence one. " * 50  # Single paragraph, >500 chars
-    score, status = _check_completeness(long_single_para)
+    _score, status = _check_completeness(long_single_para)
     assert status == "warn"
 
 
@@ -131,7 +131,7 @@ def test_block_page_geo_restriction():
         "Sorry, this content is not available in your country.\n"
         "Due to licensing restrictions, access is geo-blocked."
     )
-    score, status = _check_block_page(content)
+    _score, status = _check_block_page(content)
     assert status == "fail"
 
 
@@ -140,7 +140,7 @@ def test_block_page_paywall():
     content = (
         "Subscribe to continue reading this article.\nThis content is for members only."
     )
-    score, status = _check_block_page(content)
+    _score, status = _check_block_page(content)
     assert status == "fail"
 
 
@@ -260,3 +260,99 @@ def test_quality_acceptable_at_threshold():
     # Exactly at threshold should pass
     result = {"quality": {"score": QA_MIN_QUALITY_THRESHOLD}}
     assert _quality_acceptable(result) is True
+
+
+# ── html_to_markdown structural fallback ────────────────────────
+
+
+def test_html_to_markdown_normal_article():
+    """Normal article HTML should use readability path with no fallback."""
+    from scraper.fetch_quality import html_to_markdown
+
+    html = """<html><head><title>My Article</title></head><body>
+    <article><h1>My Article</h1>
+    <p>This is a well-formed article with substantial content that should be easily
+    extracted by readability-lxml. It has multiple sentences and enough depth to
+    produce meaningful markdown output from the converter pipeline.</p>
+    <p>A second paragraph with additional context and information that builds on
+    the first paragraph and provides further detail about the topic.</p>
+    </article></body></html>"""
+    result = html_to_markdown(html)
+    assert len(result) > 50
+    assert "My Article" in result
+
+
+def test_html_to_markdown_spa_shell_falls_back_to_structural():
+    """SPA shell HTML (no article content) should use structural fallback."""
+    from scraper.fetch_quality import html_to_markdown
+
+    # Simulate SPA shell HTML like what FlareSolverr returns for 1337x.to
+    html = """<html><head>
+    <title>1337x | Torrent Search Engine</title>
+    <meta name="description" content="1337x is a search engine for torrents.">
+    </head><body>
+    <nav><a href="/">Home</a><a href="/top">Top 100</a></nav>
+    <div id="app"></div>
+    <footer>2024 1337x</footer>
+    </body></html>"""
+    result = html_to_markdown(html)
+    assert len(result) > 50
+    assert "1337x" in result
+    assert "Torrent Search Engine" in result
+
+
+def test_html_to_markdown_empty_html():
+    """Empty HTML should return empty string."""
+    from scraper.fetch_quality import html_to_markdown
+
+    result = html_to_markdown("")
+    assert result == ""
+
+
+def test_html_to_markdown_minimal_html():
+    """Minimal HTML with only a title and one word should still produce output."""
+    from scraper.fetch_quality import html_to_markdown
+
+    html = "<html><head><title>Page</title></head><body><p>Hello</p></body></html>"
+    result = html_to_markdown(html)
+    # Even minimal HTML should produce some text via structural fallback
+    assert len(result) > 0
+    assert "Page" in result or "Hello" in result
+
+
+def test_html_to_markdown_structural_extracts_meta_description():
+    """Structural fallback should extract meta description."""
+    from scraper.fetch_quality import html_to_markdown
+
+    html = """<html><head>
+    <title>Search Results</title>
+    <meta name="description" content="Browse and discover torrent files easily.">
+    </head><body>
+    <div id="root"></div>
+    </body></html>"""
+    result = html_to_markdown(html)
+    assert "Browse and discover torrent files easily" in result
+
+
+def test_html_to_markdown_structural_strips_non_content_tags():
+    """Structural fallback should strip script, style, nav, footer, header."""
+    from scraper.fetch_quality import html_to_markdown
+
+    html = """<html><head><title>Test</title>
+    <script>console.log('hidden')</script>
+    <style>.hidden { display: none; }</style>
+    </head><body>
+    <nav>Skip this nav text</nav>
+    <header>Skip this header text</header>
+    <p>Visible paragraph content here with enough text to pass the
+    threshold check and demonstrate that script and style content
+    is properly stripped from the extracted output.</p>
+    <footer>Skip this footer text</footer>
+    </body></html>"""
+    result = html_to_markdown(html)
+    assert "Visible paragraph" in result
+    assert "console.log" not in result
+    assert ".hidden" not in result
+    assert "Skip this nav text" not in result
+    assert "Skip this header text" not in result
+    assert "Skip this footer text" not in result
