@@ -205,6 +205,10 @@ async def _process_agent_async(
         result_text, _ = _apply_citation_style(result["result"], source_details, cs)
         result["result"] = result_text
 
+        # Save rich source_details for memory storage BEFORE compactifying
+        # the API response. Cache-hit paths expect sources as list[dict].
+        rich_source_details = source_details or result.get("source_details", [])
+
         # When citation_style is compact, replace full source_details with
         # a compact citations mapping (index → {url}) to reduce
         # response payload size.
@@ -218,7 +222,7 @@ async def _process_agent_async(
                     }
                 )
             result["sources_compact"] = compact_sources
-            # Drop the full source_details to save payload size
+            # Drop the full source_details from the API response to save payload size
             result["source_details"] = []
 
         # ── Store fresh result in research memory ──────────────────
@@ -230,8 +234,8 @@ async def _process_agent_async(
                 semantic_url=settings.semantic_url,
             )
             answer = result.get("result", "")
-            # Use source_details if available (richer), fall back to sources
-            store_sources = result.get("source_details", result.get("sources", []))
+            # Use rich_source_details (preserved before compactification) for memory
+            store_sources = rich_source_details or result.get("sources", [])
             if not store_sources:
                 store_sources = result.get("sources", [])
             metadata: dict[str, Any] = {

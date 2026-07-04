@@ -7,7 +7,8 @@ COPY pyproject.toml .
 RUN pip install --no-cache-dir \
     mcp==1.27.0 \
     httpx==0.28.1 \
-    pydantic==2.11.4
+    pydantic==2.11.4 \
+    "uvicorn[standard]==0.34.3"
 
 # Copy application code
 COPY groktocrawl_client.py .

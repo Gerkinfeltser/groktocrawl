@@ -97,11 +97,8 @@ class TestLLMClientGenerate:
             )
             assert result == '{"key": "value"}'
             body = mock_post.call_args[1]["json"]
-            # Strict json_schema mode (not legacy json_object)
-            assert body["response_format"]["type"] == "json_schema"
-            assert body["response_format"]["json_schema"]["name"] == "response"
-            assert body["response_format"]["json_schema"]["schema"] == schema
-            assert body["response_format"]["json_schema"]["strict"] is True
+            # json_object mode (not json_schema) for provider compatibility
+            assert body["response_format"]["type"] == "json_object"
             # Schema injected into system prompt as fallback
             assert (
                 "You MUST respond with valid JSON matching this schema"
