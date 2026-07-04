@@ -200,7 +200,7 @@ services:
     ports:
       - '${MCP_PORT:-8002}:8002'
     environment:
-      - GROKTOCRAWL_URL=${GROKTOCRAWL_URL:-http://agent-svc:8000}
+      - GROKTOCRAWL_URL=${GROKTOCRAWL_URL:-http://agent-svc:8080}
       - GROKTOCRAWL_API_KEY=${GROKTOCRAWL_API_KEY:-}
       - MCP_PORT=${MCP_PORT:-8002}
       - SESSION_TTL=${SESSION_TTL:-3600}
