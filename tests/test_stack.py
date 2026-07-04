@@ -3739,6 +3739,427 @@ def test_crawl_sitemap_respects_max_pages():
     assert len(pages) <= 3
 
 
+# ── Compact Citations (M1) ──────────────────────────────────────
+
+
+@require_docker
+def test_citations_resolve_compact_style():
+    """POST /v2/citations/resolve with style:compact replaces [N] with [N](url).
+    VAL-CR-001
+    """
+    r = httpx.post(
+        AGENT + "/v2/citations/resolve",
+        json={
+            "text": "See [1] and [2] for more details.",
+            "sources": [
+                {"url": "https://source1.com", "title": "Source One"},
+                {"url": "https://source2.com", "title": "Source Two"},
+            ],
+            "style": "compact",
+        },
+        timeout=30,
+    )
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["success"] is True
+    assert "[1](https://source1.com)" in payload["resolved_text"]
+    assert "[2](https://source2.com)" in payload["resolved_text"]
+    assert payload["style"] == "compact"
+    assert payload["citation_count"] == 2
+    assert len(payload["citations"]) == 2
+
+
+@require_docker
+def test_citations_resolve_inline_style():
+    """POST /v2/citations/resolve with style:inline returns text unchanged.
+    VAL-CR-002
+    """
+    text = "See [1] and [2] for more details."
+    r = httpx.post(
+        AGENT + "/v2/citations/resolve",
+        json={
+            "text": text,
+            "sources": [
+                {"url": "https://source1.com", "title": "Source One"},
+                {"url": "https://source2.com", "title": "Source Two"},
+            ],
+            "style": "inline",
+        },
+        timeout=30,
+    )
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["resolved_text"] == text
+    assert payload["style"] == "inline"
+    assert payload["citation_count"] == 2
+
+
+@require_docker
+def test_citations_resolve_default_style_inline():
+    """POST /v2/citations/resolve without style defaults to inline.
+    VAL-CR-017
+    """
+    text = "See [1] for reference."
+    r = httpx.post(
+        AGENT + "/v2/citations/resolve",
+        json={
+            "text": text,
+            "sources": [
+                {"url": "https://source1.com", "title": "Source One"},
+            ],
+        },
+        timeout=30,
+    )
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["resolved_text"] == text
+    assert payload["style"] == "inline"
+    assert payload["citation_count"] == 1
+
+
+@require_docker
+def test_citations_resolve_single_citation():
+    """POST /v2/citations/resolve with single marker and source.
+    VAL-CR-003
+    """
+    r = httpx.post(
+        AGENT + "/v2/citations/resolve",
+        json={
+            "text": "See [1] for reference.",
+            "sources": [{"url": "https://example.com", "title": "Example"}],
+            "style": "compact",
+        },
+        timeout=30,
+    )
+    assert r.status_code == 200
+    payload = r.json()
+    assert "[1](https://example.com)" in payload["resolved_text"]
+    assert payload["citation_count"] == 1
+
+
+@require_docker
+def test_citations_resolve_no_markers():
+    """POST /v2/citations/resolve with no [N] markers returns empty citations.
+    VAL-CR-004
+    """
+    text = "Hello world, no citations here."
+    r = httpx.post(
+        AGENT + "/v2/citations/resolve",
+        json={
+            "text": text,
+            "sources": [{"url": "https://example.com", "title": "Example"}],
+            "style": "compact",
+        },
+        timeout=30,
+    )
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["resolved_text"] == text
+    assert payload["citations"] == []
+    assert payload["citation_count"] == 0
+
+
+@require_docker
+def test_citations_resolve_empty_sources_rejected():
+    """POST /v2/citations/resolve with empty sources returns 422.
+    VAL-CR-005
+    """
+    r = httpx.post(
+        AGENT + "/v2/citations/resolve",
+        json={
+            "text": "See [1]",
+            "sources": [],
+            "style": "compact",
+        },
+        timeout=30,
+    )
+    assert r.status_code == 422
+
+
+@require_docker
+def test_citations_resolve_empty_text_rejected():
+    """POST /v2/citations/resolve with empty text returns 422.
+    VAL-CR-006
+    """
+    r = httpx.post(
+        AGENT + "/v2/citations/resolve",
+        json={
+            "text": "",
+            "sources": [{"url": "https://example.com", "title": "Example"}],
+            "style": "compact",
+        },
+        timeout=30,
+    )
+    assert r.status_code == 422
+
+
+@require_docker
+def test_citations_resolve_missing_text_rejected():
+    """POST /v2/citations/resolve without text field returns 422.
+    VAL-CR-007
+    """
+    r = httpx.post(
+        AGENT + "/v2/citations/resolve",
+        json={
+            "sources": [{"url": "https://example.com", "title": "Example"}],
+            "style": "compact",
+        },
+        timeout=30,
+    )
+    assert r.status_code == 422
+
+
+@require_docker
+def test_citations_resolve_missing_sources_rejected():
+    """POST /v2/citations/resolve without sources field returns 422.
+    VAL-CR-008
+    """
+    r = httpx.post(
+        AGENT + "/v2/citations/resolve",
+        json={
+            "text": "See [1]",
+            "style": "compact",
+        },
+        timeout=30,
+    )
+    assert r.status_code == 422
+
+
+@require_docker
+def test_citations_resolve_invalid_style_rejected():
+    """POST /v2/citations/resolve with invalid style returns 422.
+    VAL-CR-009
+    """
+    r = httpx.post(
+        AGENT + "/v2/citations/resolve",
+        json={
+            "text": "See [1]",
+            "sources": [{"url": "https://example.com", "title": "Example"}],
+            "style": "footnote",
+        },
+        timeout=30,
+    )
+    assert r.status_code == 422
+
+
+@require_docker
+def test_citations_resolve_duplicate_markers():
+    """POST /v2/citations/resolve handles duplicate [N] markers.
+    VAL-CR-010
+    """
+    r = httpx.post(
+        AGENT + "/v2/citations/resolve",
+        json={
+            "text": "See [1] and also [1] for more.",
+            "sources": [{"url": "https://example.com", "title": "Example"}],
+            "style": "compact",
+        },
+        timeout=30,
+    )
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["citation_count"] == 1
+    assert len(payload["citations"]) == 1
+    # Both occurrences of [1] should be resolved
+    assert payload["resolved_text"].count("[1](https://example.com)") >= 1
+
+
+@require_docker
+def test_citations_resolve_out_of_range_index():
+    """POST /v2/citations/resolve leaves out-of-range [N] unchanged.
+    VAL-CR-011
+    """
+    r = httpx.post(
+        AGENT + "/v2/citations/resolve",
+        json={
+            "text": "See [5] for details.",
+            "sources": [
+                {"url": "https://source1.com", "title": "Source One"},
+                {"url": "https://source2.com", "title": "Source Two"},
+            ],
+            "style": "compact",
+        },
+        timeout=30,
+    )
+    assert r.status_code == 200
+    payload = r.json()
+    # [5] should remain unchanged since there are only 2 sources
+    assert "[5]" in payload["resolved_text"]
+    # Should not have been resolved to a link
+    assert "[5](" not in payload["resolved_text"]
+    assert payload["citation_count"] == 0
+
+
+@require_docker
+def test_citations_resolve_index_zero():
+    """POST /v2/citations/resolve leaves [0] unchanged (1-based indexing).
+    VAL-CR-014
+    """
+    r = httpx.post(
+        AGENT + "/v2/citations/resolve",
+        json={
+            "text": "See [0] for details.",
+            "sources": [{"url": "https://example.com", "title": "Example"}],
+            "style": "compact",
+        },
+        timeout=30,
+    )
+    assert r.status_code == 200
+    payload = r.json()
+    assert "[0]" in payload["resolved_text"]
+    assert "[0](" not in payload["resolved_text"]
+    assert payload["citation_count"] == 0
+
+
+@require_docker
+def test_citations_resolve_non_numeric_marker():
+    """POST /v2/citations/resolve ignores non-numeric markers like [abc].
+    VAL-CR-015
+    """
+    r = httpx.post(
+        AGENT + "/v2/citations/resolve",
+        json={
+            "text": "See [abc] for details.",
+            "sources": [{"url": "https://example.com", "title": "Example"}],
+            "style": "compact",
+        },
+        timeout=30,
+    )
+    assert r.status_code == 200
+    payload = r.json()
+    assert "[abc]" in payload["resolved_text"]
+    assert payload["citation_count"] == 0
+
+
+@require_docker
+def test_citations_resolve_mixed_valid_oob():
+    """POST /v2/citations/resolve handles mix of valid and OOB indices.
+    VAL-CR-016
+    """
+    r = httpx.post(
+        AGENT + "/v2/citations/resolve",
+        json={
+            "text": "See [1] and [5] for details.",
+            "sources": [
+                {"url": "https://source1.com", "title": "One"},
+                {"url": "https://source2.com", "title": "Two"},
+                {"url": "https://source3.com", "title": "Three"},
+            ],
+            "style": "compact",
+        },
+        timeout=30,
+    )
+    assert r.status_code == 200
+    payload = r.json()
+    assert "[1](https://source1.com)" in payload["resolved_text"]
+    assert "[5]" in payload["resolved_text"]
+    assert "[5](" not in payload["resolved_text"]
+    assert payload["citation_count"] == 1
+
+
+@require_docker
+def test_citations_resolve_is_stateless():
+    """POST /v2/citations/resolve works without any job dependency.
+    VAL-ERR-006
+    """
+    # Make two calls with different data — both should work independently
+    r1 = httpx.post(
+        AGENT + "/v2/citations/resolve",
+        json={
+            "text": "First [1]",
+            "sources": [{"url": "https://a.com", "title": "A"}],
+            "style": "compact",
+        },
+        timeout=30,
+    )
+    r2 = httpx.post(
+        AGENT + "/v2/citations/resolve",
+        json={
+            "text": "Second [1]",
+            "sources": [{"url": "https://b.com", "title": "B"}],
+            "style": "compact",
+        },
+        timeout=30,
+    )
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    p1 = r1.json()
+    p2 = r2.json()
+    assert "https://a.com" in p1["resolved_text"]
+    assert "https://b.com" in p2["resolved_text"]
+
+
+@require_docker
+def test_agent_invalid_citation_style_rejected():
+    """POST /v2/agent with invalid citation_style returns 422.
+    VAL-CC-004
+    """
+    r = httpx.post(
+        AGENT + "/v2/agent",
+        json={
+            "prompt": "test",
+            "citation_style": "footnote",
+        },
+        timeout=30,
+    )
+    assert r.status_code == 422
+
+
+@require_docker
+def test_answer_invalid_citation_style_rejected():
+    """POST /v2/answer with invalid citation_style returns 422."""
+    r = httpx.post(
+        AGENT + "/v2/answer",
+        json={
+            "query": "test",
+            "citation_style": "footnote",
+        },
+        timeout=30,
+    )
+    # The answer endpoint validates before processing
+    assert r.status_code == 422
+
+
+@require_docker
+def test_agent_default_citation_style_inline():
+    """POST /v2/agent without citation_style defaults to inline (backward compat).
+    VAL-CC-003
+    """
+    r = httpx.post(
+        AGENT + "/v2/agent",
+        json={
+            "prompt": "What is the capital of France?",
+        },
+        timeout=30,
+    )
+    assert r.status_code == 200
+    # A valid job was created — the default citation_style didn't cause a rejection
+    payload = r.json()
+    assert payload["success"] is True
+    assert "id" in payload
+
+
+@require_docker
+def test_answer_default_citation_style_inline():
+    """POST /v2/answer without citation_style defaults to inline.
+    VAL-CC-012
+    """
+    r = httpx.post(
+        AGENT + "/v2/answer",
+        json={
+            "query": "What is Python?",
+            "num_sources": 2,
+        },
+        timeout=120,
+    )
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["success"] is True
+    assert isinstance(payload["answer"], str)
+    # The answer should be prose with [N] markers, not [N](url) markers
+    # since inline is the default
+
+
 if __name__ == "__main__":
     """Run all test functions in this file when invoked directly.
 

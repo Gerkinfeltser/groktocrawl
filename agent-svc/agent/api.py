@@ -271,7 +271,32 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
                 elif event["type"] == "token":
                     yield f"data: {json.dumps({'type': 'token', 'content': event['content']})}\n\n"
                 elif event["type"] == "done":
-                    yield f"data: {json.dumps({'type': 'done', 'result': event['result'], 'sources': event['sources'], 'latency_ms': event['latency_ms']})}\n\n"
+                    import json as _json
+
+                    done_payload: dict = {
+                        "type": "done",
+                        "result": event["result"],
+                        "sources": event["sources"],
+                        "latency_ms": event["latency_ms"],
+                    }
+                    # Apply citation_style transformation (VAL-CC-008, VAL-CC-009)
+                    source_details = event.get("source_details", [])
+                    cs = body.citation_style
+                    done_payload["citation_style"] = cs.value
+                    if cs == CitationStyle.compact:
+                        compact_sources = []
+                        for i, src in enumerate(source_details, start=1):
+                            compact_sources.append(
+                                {
+                                    "index": i,
+                                    "url": src.get("url", ""),
+                                }
+                            )
+                        done_payload["sources_compact"] = compact_sources
+                        done_payload["source_details"] = []
+                    else:
+                        done_payload["source_details"] = source_details
+                    yield f"data: {_json.dumps(done_payload)}\n\n"
                 elif event["type"] == "error":
                     yield f"data: {json.dumps({'type': 'error', 'content': event['content']})}\n\n"
                 elif event["type"] == "status":
@@ -1836,6 +1861,21 @@ async def resolve_citations(request: Request, body: CitationsResolveRequest):
         - ``inline``: Keep ``[N]`` markers as-is (returns original text).
         - ``compact``: Replace ``[N]`` with ``[N](url)`` self-contained links.
     """
+    # ── Per-client rate limit check (VAL-CR-018) ────────────
+    client_ip = _get_client_ip(request)
+    rate_limiter = request.app.state.rate_limiter
+    allowed, _rate_remaining = await rate_limiter.check(f"{client_ip}:search")
+    if not allowed:
+        from .exceptions import RateLimitedError
+        from .metrics import METRICS
+
+        METRICS.counter("search_calls_total", "Total search calls", ["status"]).inc(
+            {"status": "rate_limited"}
+        )
+        raise RateLimitedError(
+            detail=f"Per-client rate limit exceeded ({rate_limiter.limit}/{rate_limiter.window}s)"
+        )
+
     import re
 
     resolved: list[ResolvedCitation] = []

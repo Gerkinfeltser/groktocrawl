@@ -618,6 +618,7 @@ async def run_research_stream(
                         "I was unable to find or scrape any relevant web pages."
                     ),
                     "sources": [],
+                    "source_details": [],
                     "latency_ms": elapsed,
                 }
                 return
@@ -643,6 +644,7 @@ async def run_research_stream(
                         "I was unable to find or scrape any relevant web pages."
                     ),
                     "sources": [],
+                    "source_details": [],
                     "latency_ms": elapsed,
                 }
                 return
@@ -707,6 +709,7 @@ async def run_research_stream(
                 "type": "done",
                 "result": answer,
                 "sources": source_list,
+                "source_details": all_source_details,
                 "latency_ms": elapsed,
             }
         else:
@@ -714,6 +717,7 @@ async def run_research_stream(
                 "type": "done",
                 "result": full_answer,
                 "sources": source_list,
+                "source_details": all_source_details,
                 "latency_ms": elapsed,
             }
 
