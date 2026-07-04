@@ -115,7 +115,7 @@ class SessionStore:
             "step_count": "0",  # string for HINCRBY compatibility
             "ttl": str(effective_ttl),
         }
-        self.redis.hset(meta_key, mapping=meta_mapping)
+        self.redis.hset(meta_key, mapping=meta_mapping)  # type: ignore[arg-type]
         self.redis.expire(meta_key, effective_ttl)
 
         # Steps stored as JSON string (same as before)
@@ -184,7 +184,7 @@ class SessionStore:
             else:
                 string_updates[k] = str(v) if not isinstance(v, str) else v
 
-        self.redis.hset(_meta_key(session_id), mapping=string_updates)
+        self.redis.hset(_meta_key(session_id), mapping=string_updates)  # type: ignore[arg-type]
 
         # Determine TTL for refresh
         ttl_raw = self.redis.hget(_meta_key(session_id), "ttl")
@@ -245,7 +245,7 @@ class SessionStore:
         ttl_raw = self.redis.hget(meta_key, "ttl")
         ttl = int(ttl_raw) if ttl_raw else self.default_ttl
 
-        existing = self.redis.get(_artifact_key(session_id)) or ""
+        existing: str = str(self.redis.get(_artifact_key(session_id)) or "")
         new_artifact = existing + content
         self.redis.set(
             _artifact_key(session_id),
@@ -257,7 +257,7 @@ class SessionStore:
 
     def get_artifact(self, session_id: str) -> str:
         """Get the full accumulated artifact text."""
-        return self.redis.get(_artifact_key(session_id)) or ""
+        return str(self.redis.get(_artifact_key(session_id)) or "")
 
     # ── Reference Storage (HSET-based) ──────────────────────────
 

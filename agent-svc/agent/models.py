@@ -1707,7 +1707,7 @@ class ExecutePlanRequest(BaseModel):
     """
 
     plan_id: str = Field(..., description="Plan ID from plan generation")
-    modifications: list[dict[str, Any]] | dict[str, Any] | None = Field(
+    modifications: Any = Field(
         default=None,
         description="Optional plan modifications before execution",
     )
@@ -1757,12 +1757,12 @@ class ExecutePlanRequest(BaseModel):
             # Try to interpret as dict form (PlanModifications)
             if "type" in raw:
                 # Looks like a single PlanModification in dict form
-                validated = PlanModification(**raw)
-                self.modifications = [validated]
+                mod = PlanModification(**raw)
+                self.modifications = [mod]
                 return self
             # Otherwise treat as legacy PlanModifications form
-            validated = PlanModifications(**raw)
-            self.modifications = validated
+            mods = PlanModifications(**raw)
+            self.modifications = mods
             return self
 
         raise ValueError(

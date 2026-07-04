@@ -1566,7 +1566,7 @@ async def run_answer(
         if not output_schema:
             answer, citations = _apply_citation_style(answer, source_map, cs)
         else:
-            citations: list[dict] = []
+            citations: list[dict] = []  # type: ignore[no-redef]
             # For structured output, collect source URLs but don't apply citation styles
             seen_indices: set[int] = set()
             import re
@@ -1772,7 +1772,7 @@ async def run_answer_stream(
         else:
             import re
 
-            citations: list[dict] = []
+            citations: list[dict] = []  # type: ignore[no-redef]
             seen_indices: set[int] = set()
             for match in re.finditer(r"\[(\d+)\]", full_answer):
                 idx = int(match.group(1))
