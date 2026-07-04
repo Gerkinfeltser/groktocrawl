@@ -1,7 +1,7 @@
 """MCP server exposing GroktoCrawl tools via Model Context Protocol.
 
 Uses FastMCP from the official mcp SDK (v1.x) with Streamable HTTP
-transport.  Defines exactly 17 tools matching the GroktoCrawl agent-svc
+transport.  Defines 20 tools matching the GroktoCrawl agent-svc
 API surface, with proper readOnlyHint/destructiveHint annotations.
 """
 
@@ -15,6 +15,7 @@ from typing import Any
 
 from groktocrawl_client import GroktocrawlClient
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 logger = logging.getLogger("grokto_crawl.mcp")
@@ -54,16 +55,32 @@ def _json_text(data: dict[str, Any]) -> str:
 
 
 def _resp(data: dict[str, Any]) -> str:
-    """Convert a client result dict to a text response.
+    """Convert a client result dict to a JSON string response.
 
-    If the result contains an ``error`` key, wraps it in a descriptive
-    error string.  Otherwise, serializes the data as JSON.
+    Always returns valid JSON.  When the result contains an ``error``
+    key, wraps it in a ``{"success": false, "error": "...", ...}``
+    envelope so that MCP clients can parse it reliably.
     """
     if isinstance(data, dict) and "error" in data:
-        status = data.get("status_code", "")
-        prefix = f"HTTP {status}: " if status else ""
-        return prefix + str(data["error"])
+        error_obj: dict[str, Any] = {
+            "success": False,
+            "error": str(data["error"]),
+        }
+        if "status_code" in data:
+            error_obj["status_code"] = data["status_code"]
+        return _json_text(error_obj)
     return _json_text(data)
+
+
+def _ensure_success(data: dict[str, Any]) -> None:
+    """Raise :class:`ToolError` if *data* contains an upstream error.
+
+    FastMCP converts ``ToolError`` to a response with ``isError: true``
+    so that MCP clients can programmatically detect 4xx/5xx failures
+    from the upstream agent-svc.
+    """
+    if isinstance(data, dict) and "error" in data:
+        raise ToolError(_resp(data))
 
 
 # ── Tools 1–2: scrape, search (read-only) ─────────────────────────
@@ -92,6 +109,7 @@ async def scrape(
     result = await _client.scrape(
         url=url, formats=formats, only_main_content=only_main_content
     )
+    _ensure_success(result)
     return _resp(result)
 
 
@@ -114,6 +132,7 @@ async def search(
             Defaults to fast when omitted.
     """
     result = await _client.search(query=query, limit=limit, search_type=search_type)
+    _ensure_success(result)
     return _resp(result)
 
 
@@ -142,6 +161,7 @@ async def crawl(
     result = await _client.create_crawl(
         url=url, max_pages=max_pages, max_depth=max_depth
     )
+    _ensure_success(result)
     return _resp(result)
 
 
@@ -157,6 +177,7 @@ async def get_crawl_status(job_id: str) -> str:
         job_id: The crawl job ID returned by the crawl tool.
     """
     result = await _client.get_crawl_status(job_id)
+    _ensure_success(result)
     return _resp(result)
 
 
@@ -171,6 +192,7 @@ async def cancel_crawl(job_id: str) -> str:
         job_id: The crawl job ID to cancel.
     """
     result = await _client.cancel_crawl(job_id)
+    _ensure_success(result)
     return _resp(result)
 
 
@@ -186,6 +208,7 @@ async def get_crawl_errors(job_id: str) -> str:
         job_id: The crawl job ID returned by the crawl tool.
     """
     result = await _client.get_crawl_errors(job_id)
+    _ensure_success(result)
     return _resp(result)
 
 
@@ -205,6 +228,7 @@ async def map(url: str, limit: int = 100) -> str:
         limit: Maximum number of links to return (default 100).
     """
     result = await _client.map(url=url, limit=limit)
+    _ensure_success(result)
     return _resp(result)
 
 
@@ -229,6 +253,7 @@ async def agent(
             When omitted or ``default``, the server-configured model is used.
     """
     result = await _client.agent(prompt=prompt, model=model)
+    _ensure_success(result)
     return _resp(result)
 
 
@@ -244,6 +269,7 @@ async def get_agent_status(job_id: str) -> str:
         job_id: The agent job ID returned by the agent tool.
     """
     result = await _client.get_agent_status(job_id)
+    _ensure_success(result)
     return _resp(result)
 
 
@@ -264,6 +290,7 @@ async def answer(query: str, num_sources: int = 5) -> str:
             default 5).
     """
     result = await _client.answer(question=query, num_sources=num_sources)
+    _ensure_success(result)
     return _resp(result)
 
 
@@ -289,6 +316,7 @@ async def extract(
             provided, the LLM returns data matching the schema.
     """
     result = await _client.create_extract(urls=urls, prompt=prompt, schema=schema)
+    _ensure_success(result)
     return _resp(result)
 
 
@@ -304,6 +332,7 @@ async def get_extract_status(job_id: str) -> str:
         job_id: The extract job ID returned by the extract tool.
     """
     result = await _client.get_extract_status(job_id)
+    _ensure_success(result)
     return _resp(result)
 
 
@@ -322,6 +351,7 @@ async def enrich(url: str) -> str:
         url: The URL or entity name to enrich with web context.
     """
     result = await _client.enrich(url=url)
+    _ensure_success(result)
     return _resp(result)
 
 
@@ -340,6 +370,7 @@ async def find_similar(url: str) -> str:
             with http:// or https://.
     """
     result = await _client.find_similar(url=url)
+    _ensure_success(result)
     return _resp(result)
 
 
@@ -358,6 +389,7 @@ async def batch_scrape(urls: list[str]) -> str:
             concurrently by the scraper service.
     """
     result = await _client.create_batch_scrape(urls=urls)
+    _ensure_success(result)
     return _resp(result)
 
 
@@ -379,6 +411,7 @@ async def generate_llmstxt(url: str, max_pages: int | None = None) -> str:
             Omit for server default.
     """
     result = await _client.create_llmstxt(url=url, max_pages=max_pages)
+    _ensure_success(result)
     return _resp(result)
 
 
@@ -395,6 +428,76 @@ async def get_activity() -> str:
     and debugging.
     """
     result = await _client.get_activity()
+    _ensure_success(result)
+    return _resp(result)
+
+
+# ── Tool 18: get_batch_scrape_status ────────────────────────────────
+
+
+@mcp.tool(annotations=_RO)
+async def get_batch_scrape_status(job_id: str) -> str:
+    """Poll the status of a batch scrape job and return results when done.
+
+    Calls GET /v2/batch/scrape/{job_id} on the GroktoCrawl API.
+    Returns the current status (processing/completed/failed) and,
+    when finished, the scraped content for each URL in the batch.
+
+    Args:
+        job_id: The batch scrape job ID returned by the batch_scrape tool.
+    """
+    result = await _client.get_batch_scrape_status(job_id)
+    _ensure_success(result)
+    return _resp(result)
+
+
+# ── Tool 19: get_llmstxt_status ─────────────────────────────────────
+
+
+@mcp.tool(annotations=_RO)
+async def get_llmstxt_status(job_id: str) -> str:
+    """Poll the status of an llms.txt generation job and return the file when done.
+
+    Calls GET /v2/generate-llmstxt/{job_id} on the GroktoCrawl API.
+    Returns the current status and, when completed, the generated
+    llms.txt content.
+
+    Args:
+        job_id: The llms.txt generation job ID returned by the
+            generate_llmstxt tool.
+    """
+    result = await _client.get_llmstxt_status(job_id)
+    _ensure_success(result)
+    return _resp(result)
+
+
+# ── Tool 20: resolve_citations ──────────────────────────────────────
+
+
+@mcp.tool(annotations=_RO)
+async def resolve_citations(
+    text: str,
+    sources: list[dict[str, Any]],
+    style: str = "inline",
+) -> str:
+    """Resolve compact citation IDs in markdown text to full source cards.
+
+    Calls POST /v2/citations/resolve on the GroktoCrawl API.  In
+    ``compact`` style, replaces ``[N]`` markers with ``[N](url)``
+    self-contained links.  In ``inline`` style, returns the text
+    unchanged with a separate citations map.
+
+    Args:
+        text: The markdown text containing ``[N]`` citation markers.
+        sources: List of source objects, each with ``url`` and
+            ``title`` keys.  Sources are 1-indexed — the first source
+            corresponds to ``[1]``.
+        style: Citation style: ``compact`` transforms ``[N]`` to
+            ``[N](url)``; ``inline`` leaves ``[N]`` as-is.  Defaults
+            to ``inline``.
+    """
+    result = await _client.resolve_citations(text=text, sources=sources, style=style)
+    _ensure_success(result)
     return _resp(result)
 
 

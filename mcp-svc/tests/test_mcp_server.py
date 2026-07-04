@@ -51,15 +51,15 @@ def _text(result: Any) -> str:
 
 
 class TestToolDiscovery:
-    """VAL-MCP-B01: tools/list returns exactly 17 tools."""
+    """VAL-MCP-B01: tools/list returns exactly 20 tools."""
 
     async def test_tool_count(self):
-        """tools/list returns exactly 17 tools."""
+        """tools/list returns exactly 20 tools."""
         tools = await mcp.list_tools()
-        assert len(tools) == 17, f"Expected 17 tools, got {len(tools)}"
+        assert len(tools) == 20, f"Expected 20 tools, got {len(tools)}"
 
     async def test_all_tool_names(self):
-        """All 17 expected tool names are present."""
+        """All 20 expected tool names are present."""
         tools = await mcp.list_tools()
         names = {t.name for t in tools}
         expected = {
@@ -80,6 +80,9 @@ class TestToolDiscovery:
             "batch_scrape",
             "generate_llmstxt",
             "get_activity",
+            "get_batch_scrape_status",
+            "get_llmstxt_status",
+            "resolve_citations",
         }
         missing = expected - names
         extra = names - expected
@@ -150,6 +153,7 @@ class TestToolDiscovery:
             "find_similar": "url",
             "batch_scrape": "urls",
             "generate_llmstxt": "url",
+            "resolve_citations": "text",
         }
 
         for t in tools:
@@ -184,6 +188,9 @@ class TestToolAnnotations:
             "get_extract_status",
             "get_crawl_errors",
             "get_activity",
+            "get_batch_scrape_status",
+            "get_llmstxt_status",
+            "resolve_citations",
         }
         for t in tools:
             if t.name in readonly_tools:
@@ -301,17 +308,20 @@ class TestContentBlocks:
         assert "id" in data
 
     async def test_error_result_includes_status_code(self, monkeypatch):
-        """Error from client is propagated with status_code."""
+        """Error from client is propagated as ToolError with status_code."""
         _patch_client(
             monkeypatch,
             {
                 "scrape": {"error": "Invalid URL", "status_code": 400},
             },
         )
-        result = await mcp.call_tool("scrape", {"url": "https://example.com"})
-        text = _text(result)
-        assert "400" in text
-        assert "Invalid URL" in text
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        with pytest.raises(ToolError) as exc_info:
+            await mcp.call_tool("scrape", {"url": "https://example.com"})
+        err_text = str(exc_info.value)
+        assert "400" in err_text
+        assert "Invalid URL" in err_text
 
 
 # ── Tool Call Routing (VAL-MCP-C01, C02, D04, E01, E06) ───────────
@@ -469,6 +479,63 @@ class TestToolCallRouting:
         await mcp.call_tool("get_activity", {})
         assert captured.get("called") is True
 
+    async def test_get_batch_scrape_status(self, monkeypatch):
+        """get_batch_scrape_status passes job_id through."""
+        captured: dict[str, Any] = {}
+
+        async def _fake_get_batch_scrape_status(job_id: str) -> dict:
+            captured["job_id"] = job_id
+            return {"status": "completed"}
+
+        monkeypatch.setattr(
+            __import__("mcp_server", fromlist=["_client"])._client,
+            "get_batch_scrape_status",
+            _fake_get_batch_scrape_status,
+        )
+        await mcp.call_tool("get_batch_scrape_status", {"job_id": "batch-1"})
+        assert captured.get("job_id") == "batch-1"
+
+    async def test_get_llmstxt_status(self, monkeypatch):
+        """get_llmstxt_status passes job_id through."""
+        captured: dict[str, Any] = {}
+
+        async def _fake_get_llmstxt_status(job_id: str) -> dict:
+            captured["job_id"] = job_id
+            return {"status": "completed", "llmstxt": "# site"}
+
+        monkeypatch.setattr(
+            __import__("mcp_server", fromlist=["_client"])._client,
+            "get_llmstxt_status",
+            _fake_get_llmstxt_status,
+        )
+        await mcp.call_tool("get_llmstxt_status", {"job_id": "llmstxt-1"})
+        assert captured.get("job_id") == "llmstxt-1"
+
+    async def test_resolve_citations_routing(self, monkeypatch):
+        """resolve_citations passes text, sources, and style through."""
+        captured: dict[str, Any] = {}
+
+        async def _fake_resolve_citations(**kwargs: Any) -> dict:
+            captured.update(kwargs)
+            return {"resolved_text": "See [1](https://a.com)", "citations": []}
+
+        monkeypatch.setattr(
+            __import__("mcp_server", fromlist=["_client"])._client,
+            "resolve_citations",
+            _fake_resolve_citations,
+        )
+        await mcp.call_tool(
+            "resolve_citations",
+            {
+                "text": "See [1]",
+                "sources": [{"url": "https://a.com", "title": "A"}],
+                "style": "compact",
+            },
+        )
+        assert captured.get("text") == "See [1]"
+        assert captured.get("sources") == [{"url": "https://a.com", "title": "A"}]
+        assert captured.get("style") == "compact"
+
 
 # ── Error Handling (VAL-MCP-G01) ──────────────────────────────────
 
@@ -508,7 +575,12 @@ class TestErrorHandling:
         ), f"Expected type error, got: {err_str[:200]}"
 
     async def test_error_propagation_with_is_error(self, monkeypatch):
-        """VAL-MCP-G03: HTTP errors are propagated with status code."""
+        """VAL-MCP-G03: HTTP errors are propagated as ToolError with status code.
+
+        FastMCP converts ToolError to a response with isError:true
+        at the MCP protocol level.  Unit tests catch the ToolError
+        directly since mcp.call_tool propagates exceptions.
+        """
         _patch_client(
             monkeypatch,
             {
@@ -518,10 +590,54 @@ class TestErrorHandling:
                 },
             },
         )
-        result = await mcp.call_tool("get_crawl_status", {"job_id": "nonexistent"})
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        with pytest.raises(ToolError) as exc_info:
+            await mcp.call_tool("get_crawl_status", {"job_id": "nonexistent"})
+        err_text = str(exc_info.value)
+        assert "404" in err_text
+        assert "not found" in err_text.lower()
+
+    async def test_upstream_http_error_returns_is_error_true(self, monkeypatch):
+        """Upstream HTTP errors (4xx/5xx) raise ToolError → isError:true.
+
+        When the agent-svc returns an HTTP error, the MCP tool raises
+        ToolError, which FastMCP converts to isError:true at the
+        protocol level.  MCP clients see this as an error result.
+        """
+        _patch_client(
+            monkeypatch,
+            {
+                "scrape": {"error": "Upstream server error", "status_code": 500},
+            },
+        )
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        with pytest.raises(ToolError) as exc_info:
+            await mcp.call_tool("scrape", {"url": "https://example.com"})
+        err_text = str(exc_info.value)
+        assert "500" in err_text
+        assert "Upstream server error" in err_text
+
+    async def test_successful_result_is_valid_json(self, monkeypatch):
+        """Successful tool results return valid JSON without isError.
+
+        When the upstream call succeeds, the tool returns valid JSON
+        with the response data.  MCP clients can parse the JSON to
+        access the structured result.
+        """
+        _patch_client(
+            monkeypatch,
+            {
+                "scrape": {"success": True, "data": {"markdown": "# Hello"}},
+            },
+        )
+        result = await mcp.call_tool("scrape", {"url": "https://example.com"})
         text = _text(result)
-        assert "404" in text
-        assert "not found" in text.lower()
+        # Should be valid JSON, not an error
+        data = json.loads(text)
+        assert data.get("success") is True
+        assert "data" in data
 
 
 # ── Session Consistency (VAL-MCP-B04) ─────────────────────────────

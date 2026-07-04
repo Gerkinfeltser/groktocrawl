@@ -548,6 +548,33 @@ class GroktocrawlClient:
         """
         return await self._get("/v2/activity")
 
+    async def resolve_citations(
+        self,
+        text: str,
+        sources: list[dict],
+        style: str = "inline",
+    ) -> dict:
+        """Resolve compact citation IDs to full source cards.
+
+        Calls POST /v2/citations/resolve on the GroktoCrawl API.
+
+        Args:
+            text: The markdown text containing citation markers (e.g. ``[1]``).
+            sources: List of source dicts with ``url`` and ``title`` keys.
+            style: Citation style — ``inline`` (no transformation) or
+                ``compact`` (replaces ``[N]`` with ``[N](url)``).
+
+        Returns:
+            Dict with ``resolved_text``, ``citations`` array, and
+            ``citation_count``.
+        """
+        body: dict[str, Any] = {
+            "text": text,
+            "sources": sources,
+            "style": style,
+        }
+        return await self._post("/v2/citations/resolve", body)
+
     # ── utility tools ───────────────────────────────────────────
 
     async def health(self) -> dict:

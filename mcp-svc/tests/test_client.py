@@ -10,10 +10,7 @@ import asyncio
 from typing import Any
 
 import httpx
-import pytest
-
 from groktocrawl_client import GroktocrawlClient, _extract_response_detail
-
 
 # ── helpers ──
 
@@ -70,7 +67,9 @@ def _make_matched_client(
 class TestExtractResponseDetail:
     def test_fastapi_detail_string(self):
         resp = httpx.Response(
-            422, json={"detail": "Field required"}, request=httpx.Request("POST", "http://x")
+            422,
+            json={"detail": "Field required"},
+            request=httpx.Request("POST", "http://x"),
         )
         assert _extract_response_detail(resp) == "Field required"
 
@@ -108,7 +107,9 @@ class TestExtractResponseDetail:
 
     def test_non_json_response(self):
         resp = httpx.Response(
-            502, content=b"<html>Bad Gateway</html>", headers={"Content-Type": "text/html"},
+            502,
+            content=b"<html>Bad Gateway</html>",
+            headers={"Content-Type": "text/html"},
             request=httpx.Request("POST", "http://x"),
         )
         assert _extract_response_detail(resp) == "<html>Bad Gateway</html>"
@@ -170,7 +171,11 @@ class TestErrorPropagation:
     def test_http_4xx_becomes_structured_error(self):
         """VAL-MCP-G03: HTTP 4xx returns error with status_code."""
         client = _make_matched_client(
-            {("POST", "/v2/scrape"): _error_handler(400, {"error": "Invalid URL format"})}
+            {
+                ("POST", "/v2/scrape"): _error_handler(
+                    400, {"error": "Invalid URL format"}
+                )
+            }
         )
 
         async def run():
@@ -199,7 +204,11 @@ class TestErrorPropagation:
     def test_http_401_auth_failure(self):
         """VAL-MCP-H03: Invalid API key propagates as 401 error."""
         client = _make_matched_client(
-            {("GET", "/v2/activity"): _error_handler(401, {"detail": "Invalid API key"})}
+            {
+                ("GET", "/v2/activity"): _error_handler(
+                    401, {"detail": "Invalid API key"}
+                )
+            }
         )
 
         async def run():
@@ -213,7 +222,11 @@ class TestErrorPropagation:
     def test_http_404_job_not_found(self):
         """GET nonexistent job returns not-found error."""
         client = _make_matched_client(
-            {("GET", "/v2/crawl/nonexistent"): _error_handler(404, {"detail": "Job not found"})}
+            {
+                ("GET", "/v2/crawl/nonexistent"): _error_handler(
+                    404, {"detail": "Job not found"}
+                )
+            }
         )
 
         async def run():
@@ -226,7 +239,11 @@ class TestErrorPropagation:
     def test_successful_response_not_wrapped_in_error(self):
         """Verify 200 responses are not wrapped as errors."""
         client = _make_matched_client(
-            {("POST", "/v2/scrape"): _json_handler({"success": True, "data": {"markdown": "hello"}})}
+            {
+                ("POST", "/v2/scrape"): _json_handler(
+                    {"success": True, "data": {"markdown": "hello"}}
+                )
+            }
         )
 
         async def run():
@@ -297,7 +314,11 @@ class TestErrorPropagation:
 class TestStatusMethods:
     def test_get_crawl_status(self):
         client = _make_matched_client(
-            {("GET", "/v2/crawl/job-1"): _json_handler({"status": "completed", "completed": 10, "total": 10})}
+            {
+                ("GET", "/v2/crawl/job-1"): _json_handler(
+                    {"status": "completed", "completed": 10, "total": 10}
+                )
+            }
         )
 
         async def run():
@@ -309,7 +330,11 @@ class TestStatusMethods:
 
     def test_cancel_crawl(self):
         client = _make_matched_client(
-            {("DELETE", "/v2/crawl/job-1"): _json_handler({"success": True, "status": "cancelled"})}
+            {
+                ("DELETE", "/v2/crawl/job-1"): _json_handler(
+                    {"success": True, "status": "cancelled"}
+                )
+            }
         )
 
         async def run():
@@ -323,7 +348,10 @@ class TestStatusMethods:
         client = _make_matched_client(
             {
                 ("GET", "/v2/crawl/job-1/errors"): _json_handler(
-                    {"errors": [{"url": "https://bad.example", "error": "timeout"}], "robots_blocked": []}
+                    {
+                        "errors": [{"url": "https://bad.example", "error": "timeout"}],
+                        "robots_blocked": [],
+                    }
                 )
             }
         )
@@ -337,7 +365,11 @@ class TestStatusMethods:
 
     def test_get_agent_status(self):
         client = _make_matched_client(
-            {("GET", "/v2/agent/job-1"): _json_handler({"status": "completed", "data": {"result": "research"}})}
+            {
+                ("GET", "/v2/agent/job-1"): _json_handler(
+                    {"status": "completed", "data": {"result": "research"}}
+                )
+            }
         )
 
         async def run():
@@ -349,7 +381,11 @@ class TestStatusMethods:
 
     def test_get_extract_status(self):
         client = _make_matched_client(
-            {("GET", "/v2/extract/job-1"): _json_handler({"status": "completed", "data": {"structured": {"key": "value"}}})}
+            {
+                ("GET", "/v2/extract/job-1"): _json_handler(
+                    {"status": "completed", "data": {"structured": {"key": "value"}}}
+                )
+            }
         )
 
         async def run():
@@ -361,7 +397,11 @@ class TestStatusMethods:
 
     def test_get_activity(self):
         client = _make_matched_client(
-            {("GET", "/v2/activity"): _json_handler({"active_jobs": 3, "crawls": 1, "agents": 2})}
+            {
+                ("GET", "/v2/activity"): _json_handler(
+                    {"active_jobs": 3, "crawls": 1, "agents": 2}
+                )
+            }
         )
 
         async def run():
@@ -437,7 +477,11 @@ class TestAllTools:
 
     def test_01_scrape_endpoint(self):
         client = _make_matched_client(
-            {("POST", "/v2/scrape"): _json_handler({"success": True, "data": {"markdown": "# hello"}})}
+            {
+                ("POST", "/v2/scrape"): _json_handler(
+                    {"success": True, "data": {"markdown": "# hello"}}
+                )
+            }
         )
 
         async def run():
@@ -448,7 +492,11 @@ class TestAllTools:
 
     def test_02_search_endpoint(self):
         client = _make_matched_client(
-            {("POST", "/v2/search"): _json_handler({"data": {"web": [{"url": "https://x.com"}]}})}
+            {
+                ("POST", "/v2/search"): _json_handler(
+                    {"data": {"web": [{"url": "https://x.com"}]}}
+                )
+            }
         )
 
         async def run():
@@ -466,7 +514,9 @@ class TestAllTools:
             if request.method == "POST" and request.url.path == "/v2/crawl":
                 return httpx.Response(200, json={"id": "crawl-99"}, request=request)
             if request.method == "GET" and "/v2/crawl/crawl-99" in request.url.path:
-                return httpx.Response(200, json={"status": "completed", "data": []}, request=request)
+                return httpx.Response(
+                    200, json={"status": "completed", "data": []}, request=request
+                )
             return httpx.Response(404, json={"error": "not found"}, request=request)
 
         transport = httpx.MockTransport(_handler)
@@ -520,7 +570,11 @@ class TestAllTools:
 
     def test_07_map_endpoint(self):
         client = _make_matched_client(
-            {("POST", "/v2/map"): _json_handler({"links": ["https://a.com", "https://b.com"]})}
+            {
+                ("POST", "/v2/map"): _json_handler(
+                    {"links": ["https://a.com", "https://b.com"]}
+                )
+            }
         )
 
         async def run():
@@ -539,7 +593,9 @@ class TestAllTools:
                 return httpx.Response(200, json={"id": "agent-1"}, request=request)
             if request.method == "GET" and "/v2/agent/agent-1" in request.url.path:
                 return httpx.Response(
-                    200, json={"status": "completed", "data": {"result": "answer"}}, request=request
+                    200,
+                    json={"status": "completed", "data": {"result": "answer"}},
+                    request=request,
                 )
             return httpx.Response(404, json={"error": "not found"}, request=request)
 
@@ -589,7 +645,9 @@ class TestAllTools:
                 return httpx.Response(200, json={"id": "ext-1"}, request=request)
             if request.method == "GET" and "/v2/extract/ext-1" in request.url.path:
                 return httpx.Response(
-                    200, json={"status": "completed", "data": {"key": "val"}}, request=request
+                    200,
+                    json={"status": "completed", "data": {"key": "val"}},
+                    request=request,
                 )
             return httpx.Response(404, json={"error": "not found"}, request=request)
 
@@ -630,7 +688,11 @@ class TestAllTools:
 
     def test_14_find_similar_endpoint(self):
         client = _make_matched_client(
-            {("POST", "/v2/find-similar"): _json_handler({"similar": ["https://b.com"]})}
+            {
+                ("POST", "/v2/find-similar"): _json_handler(
+                    {"similar": ["https://b.com"]}
+                )
+            }
         )
 
         async def run():
@@ -647,8 +709,13 @@ class TestAllTools:
             call_count += 1
             if request.method == "POST" and request.url.path == "/v2/batch/scrape":
                 return httpx.Response(200, json={"id": "batch-1"}, request=request)
-            if request.method == "GET" and "/v2/batch/scrape/batch-1" in request.url.path:
-                return httpx.Response(200, json={"status": "completed"}, request=request)
+            if (
+                request.method == "GET"
+                and "/v2/batch/scrape/batch-1" in request.url.path
+            ):
+                return httpx.Response(
+                    200, json={"status": "completed"}, request=request
+                )
             return httpx.Response(404, json={"error": "not found"}, request=request)
 
         transport = httpx.MockTransport(_handler)
@@ -671,8 +738,13 @@ class TestAllTools:
             call_count += 1
             if request.method == "POST" and request.url.path == "/v2/generate-llmstxt":
                 return httpx.Response(200, json={"id": "llmstxt-1"}, request=request)
-            if request.method == "GET" and "/v2/generate-llmstxt/llmstxt-1" in request.url.path:
-                return httpx.Response(200, json={"status": "completed"}, request=request)
+            if (
+                request.method == "GET"
+                and "/v2/generate-llmstxt/llmstxt-1" in request.url.path
+            ):
+                return httpx.Response(
+                    200, json={"status": "completed"}, request=request
+                )
             return httpx.Response(404, json={"error": "not found"}, request=request)
 
         transport = httpx.MockTransport(_handler)
@@ -698,6 +770,33 @@ class TestAllTools:
 
         result = asyncio.run(run())
         assert result["jobs"] == 0
+
+    def test_18_resolve_citations_endpoint(self):
+        """Verify resolve_citations hits POST /v2/citations/resolve."""
+        client = _make_matched_client(
+            {
+                ("POST", "/v2/citations/resolve"): _json_handler(
+                    {
+                        "resolved_text": "See [1](https://a.com)",
+                        "citations": [{"index": 1, "url": "https://a.com"}],
+                        "citation_count": 1,
+                        "style": "compact",
+                    }
+                )
+            }
+        )
+
+        async def run():
+            return await client.resolve_citations(
+                text="See [1]",
+                sources=[{"url": "https://a.com", "title": "A"}],
+                style="compact",
+            )
+
+        result = asyncio.run(run())
+        assert result["resolved_text"] == "See [1](https://a.com)"
+        assert result["citation_count"] == 1
+        assert result["style"] == "compact"
 
 
 # ── VAL-MCP-K04: Recovery after transient outage ──
