@@ -5182,8 +5182,8 @@ def test_memory_delete_removes_from_both():
     assert get_r2.status_code == 404
 
     del_r2 = httpx.delete(AGENT + f"/v2/memory/{artifact_id}", timeout=30)
-    assert del_r2.status_code == 200
-    assert del_r2.json()["deleted"] is False
+    assert del_r2.status_code == 404
+    assert del_r2.json()["success"] is False
 
 
 def test_memory_sweep_preserves_active():
@@ -5790,12 +5790,16 @@ def test_memory_get_nonexistent_404():
 
 
 def test_memory_delete_nonexistent_404():
-    """VAL-MEM-037: DELETE nonexistent memory_id returns success with deleted=false."""
-    r = httpx.delete(AGENT + "/v2/memory/nonexistent-uuid-12345", timeout=30)
-    assert r.status_code == 200, f"Expected 200 with deleted=false, got {r.status_code}"
+    """VAL-MEM-037: DELETE nonexistent memory_id returns 404 with error details."""
+    r = httpx.delete(
+        AGENT + "/v2/memory/00000000-0000-0000-0000-000000000000", timeout=30
+    )
+    assert r.status_code == 404, f"Expected 404, got {r.status_code}: {r.text}"
     data = r.json()
-    assert data.get("success") is True
-    assert data.get("deleted") is False, f"Should report deleted=false: {data}"
+    assert data.get("success") is False, f"Should report success=false: {data}"
+    assert "not found" in data.get("error", "").lower(), (
+        f"Error should indicate not found: {data}"
+    )
 
 
 def test_memory_consistent_metadata():
@@ -5921,31 +5925,27 @@ def test_memory_cache_hit_latency():
 
 
 def test_agent_empty_prompt_422():
-    """VAL-MEM-041: Agent request with empty prompt is handled gracefully.
+    """VAL-MEM-041: Agent request with empty prompt returns 422.
 
-    The system should either reject empty prompts with 422 (if the model
-    enforces min_length) or accept them and create a job that either
-    completes or fails gracefully.  The critical requirement is that
-    empty prompts do not crash the server.
+    The prompt field has min_length=1 validation enforced by Pydantic
+    before the research memory lookup is attempted.
     """
-    # Empty prompt — may be accepted (200) or rejected (422)
+    # Empty prompt — must return 422
     r = httpx.post(
         AGENT + "/v2/agent",
         json={"prompt": ""},
         timeout=30,
     )
-    # Either 422 (rejected) or 200 (accepted) — must not crash
-    assert r.status_code in (200, 422), (
-        f"Expected 200 or 422 for empty prompt, got {r.status_code}: {r.text[:200]}"
+    assert r.status_code == 422, (
+        f"Expected 422 for empty prompt, got {r.status_code}: {r.text[:200]}"
     )
-
-    # If accepted (200), verify the job reaches a terminal state
-    if r.status_code == 200:
-        job_id = r.json().get("id")
-        assert job_id, f"Expected job ID: {r.text[:200]}"
-        payload = _poll_agent_job(job_id, timeout_s=120)
-        assert payload["status"] in ("completed", "failed"), (
-            f"Empty-prompt job should reach terminal state: {payload}"
+    error_detail = r.json().get("detail", [])
+    # Check that the error references the prompt field
+    if isinstance(error_detail, list) and len(error_detail) > 0:
+        field_locs = [err.get("loc", []) for err in error_detail]
+        prompt_refs = [loc for loc in field_locs if "prompt" in loc]
+        assert len(prompt_refs) > 0, (
+            f"Expected prompt field in validation error: {error_detail}"
         )
 
     # Missing prompt field entirely — should return 422

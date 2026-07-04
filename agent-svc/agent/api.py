@@ -2922,8 +2922,10 @@ async def delete_memory(request: Request, memory_id: str) -> dict[str, Any]:
         memory_id: The memory ID to delete.
 
     Returns:
-        ``{"success": true, "deleted": true}`` if deleted,
-        ``{"success": true, "deleted": false}`` if not found.
+        ``{"success": true, "deleted": true}`` if deleted.
+
+    Raises:
+        ``NotFoundError`` (404) if the memory entry does not exist.
     """
     from .research_memory import ResearchMemory
     from .settings import load_settings
@@ -2939,7 +2941,12 @@ async def delete_memory(request: Request, memory_id: str) -> dict[str, Any]:
     )
     try:
         deleted = await memory.delete(memory_id)
-        return {"success": True, "deleted": deleted}
+        if not deleted:
+            raise NotFoundError(
+                detail="Memory entry not found",
+                details={"memory_id": memory_id},
+            )
+        return {"success": True, "deleted": True}
     finally:
         await memory.close()
 

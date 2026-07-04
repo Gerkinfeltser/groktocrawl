@@ -452,7 +452,10 @@ class ScrapeResponse(BaseModel):
 
 class AgentRequest(BaseModel):
     prompt: str = Field(
-        ..., max_length=100000, description="What the agent should research"
+        ...,
+        min_length=1,
+        max_length=100000,
+        description="What the agent should research",
     )
     urls: list[str] | None = Field(
         None, description="Optional seed URLs to constrain research"
@@ -1715,10 +1718,11 @@ class MemoryBatchQueryResponse(BaseModel):
 class MemoryBatchStoreEntry(BaseModel):
     """A single entry in a batch store request."""
 
-    query: str = Field(..., description="Research question")
-    artifact: str = Field(..., description="LLM-synthesised answer")
+    query: str = Field(..., min_length=1, description="Research question")
+    artifact: str = Field(..., min_length=1, description="LLM-synthesised answer")
     sources: list[dict] = Field(
-        default_factory=list,
+        ...,
+        min_length=1,
         description="Source documents with url and title",
     )
     model: str = Field(default="", description="LLM model name")
