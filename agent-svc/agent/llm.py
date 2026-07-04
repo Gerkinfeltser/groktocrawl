@@ -194,17 +194,12 @@ class LLMClient:
             body["enable_thinking"] = True
 
         # If schema is provided, request structured JSON output
-        # Uses strict json_schema mode for better compliance (vs json_object)
+        # Uses json_object mode (widely supported across providers) with
+        # schema injected into system prompt.  json_schema strict mode is
+        # provider-specific (DeepSeek, Anthropic, etc. may not support it).
         # Empty schema {} is treated as no-schema — do not send response_format
         if schema and any(schema):
-            body["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "response",
-                    "schema": schema,
-                    "strict": True,
-                },
-            }
+            body["response_format"] = {"type": "json_object"}
             # Also inject schema into the system prompt as a fallback hint
             messages[0]["content"] += (
                 f"\n\nYou MUST respond with valid JSON matching this schema:\n"

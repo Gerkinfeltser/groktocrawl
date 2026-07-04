@@ -317,11 +317,15 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
                 artifact_text, sources, body.citation_style
             )
 
-            # Replay artifact as token events
-            chunk_size = 8
-            for i in range(0, len(transformed_text), chunk_size):
-                chunk = transformed_text[i : i + chunk_size]
-                yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
+            # Schema mode (schema or output_schema): skip token replay,
+            # emit only done event (matches non-cached schema streaming behavior)
+            has_schema = bool(body.output_schema or body.schema_)
+            if not has_schema:
+                # Replay artifact as token events
+                chunk_size = 8
+                for i in range(0, len(transformed_text), chunk_size):
+                    chunk = transformed_text[i : i + chunk_size]
+                    yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
 
             latency_ms = int((_time.monotonic() - stream_start) * 1000)
             done_payload: dict = {
