@@ -813,6 +813,14 @@ async def _process_plan_execution_async(
                     query = description or prompt
                     if modifications and modifications.get("narrow"):
                         query = f"{modifications.get('narrow')} {query}"
+                    # Apply modify_query modifications for this specific phase
+                    if modifications and modifications.get("modify_queries"):
+                        for mq in modifications["modify_queries"]:
+                            if mq.get("phase_index") == phase_idx and mq.get(
+                                "new_query"
+                            ):
+                                query = mq["new_query"]
+                                break
 
                     try:
                         results, _health = await searxng.search(query, limit=10)

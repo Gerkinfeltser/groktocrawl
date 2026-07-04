@@ -1711,6 +1711,14 @@ class ExecutePlanRequest(BaseModel):
         default=None,
         description="Optional plan modifications before execution",
     )
+    stream: bool = Field(
+        default=False,
+        description="When True, stream execution results via SSE events",
+    )
+    webhook: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional webhook URL and configuration for completion/failure notifications",
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 

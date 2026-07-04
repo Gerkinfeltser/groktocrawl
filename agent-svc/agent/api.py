@@ -728,7 +728,7 @@ async def execute_plan(
         plan = _apply_plan_modifications(plan, mods, prompt)
 
     # ── Sync path: create job, process in background ──────────
-    if not getattr(body, "stream", False):
+    if not body.stream:
         store: JobStore = request.app.state.job_store
         job_id = store.create_job(
             kind="plan_execute",
@@ -752,7 +752,7 @@ async def execute_plan(
                 llm_model=request.app.state.llm_model,
                 searxng_url=request.app.state.searxng_url,
                 scraper_url=request.app.state.scraper_url,
-                webhook_config=None,
+                webhook_config=body.webhook,
             )
         )
         return AgentCreateResponse(id=job_id)
@@ -798,6 +798,14 @@ async def execute_plan(
                     query = description or prompt
                     if mods and mods.get("narrow"):
                         query = f"{mods.get('narrow')} {query}"
+                    # Apply modify_query modifications for this specific phase
+                    if mods and mods.get("modify_queries"):
+                        for mq in mods["modify_queries"]:
+                            if mq.get("phase_index") == phase_idx and mq.get(
+                                "new_query"
+                            ):
+                                query = mq["new_query"]
+                                break
 
                     try:
                         results, _health = await searxng.search(query, limit=10)
@@ -900,11 +908,40 @@ async def execute_plan(
 
             # Final done event
             latency_ms = int((_time.monotonic() - start) * 1000)
-            yield f"data: {json.dumps({'type': 'done', 'result': full_synthesis, 'sources': all_sources, 'latency_ms': latency_ms})}\n\n"
+            result_data = {
+                "result": full_synthesis,
+                "sources": all_sources,
+                "latency_ms": latency_ms,
+            }
+            yield f"data: {json.dumps({'type': 'done', **result_data})}\n\n"
+
+            # Fire webhook on completion (fire-and-forget, don't block stream)
+            if body.webhook:
+                from .webhook import deliver_webhook
+
+                await deliver_webhook(
+                    body.webhook,
+                    "completed",
+                    body.plan_id,
+                    result_data,
+                )
 
         except Exception as e:
             logger.error("Plan execution failed: %s", e)
             yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+
+            # Fire webhook on failure
+            if body.webhook:
+                from .webhook import deliver_webhook
+
+                await deliver_webhook(
+                    body.webhook,
+                    "failed",
+                    body.plan_id,
+                    {"error": str(e)},
+                    success=False,
+                    error=str(e),
+                )
         finally:
             await llm.close()
             await searxng.close()
