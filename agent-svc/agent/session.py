@@ -105,9 +105,9 @@ class SessionManager:
             raise ValueError(f"Session not found: {session_id}")
 
         # Acquire per-session lock for concurrent step serialisation.
-        # If another step is in progress, block briefly then fail with
-        # a clear message so the client can retry.
-        lock_acquired = self.store.acquire_lock(session_id, timeout=30)
+        # Uses async backoff so the FastAPI event loop is not blocked
+        # while waiting for the lock (ADR-0040).
+        lock_acquired = await self.store.acquire_lock(session_id, timeout=30)
         if not lock_acquired:
             raise ValueError(
                 f"Session {session_id} is currently executing another step. "

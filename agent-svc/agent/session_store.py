@@ -330,31 +330,50 @@ class SessionStore:
 
     # ── Per-Session Locking ─────────────────────────────────────
 
-    def acquire_lock(self, session_id: str, timeout: int = 30) -> bool:
+    async def acquire_lock(self, session_id: str, timeout: int = 30) -> bool:
         """Acquire a per-session lock for concurrent step execution.
 
-        Uses ``SETNX`` with an expiry timeout so stale locks do not
-        permanently block a session.  The lock value is a timestamp
-        for debugging.
+        Uses ``SETNX`` with async blocking retry so that concurrent steps
+        on the same session are serialised rather than rejected.  The lock
+        value is a timestamp for debugging.
+
+        Per ADR-0040: "If two steps race on the same session, the second
+        waits for the first's step to complete."  This implementation
+        blocks with exponential backoff (up to 50ms max delay) using
+        ``asyncio.sleep`` to avoid blocking the FastAPI event loop.
 
         Args:
             session_id: The session to lock.
-            timeout: Lock timeout in seconds (default 30).  If a step
-                takes longer than this, the lock auto-expires and
-                another caller can acquire it.
+            timeout: Maximum time in seconds to wait for the lock
+                (default 30).  Once acquired, the lock auto-expires
+                after this many seconds so stale locks do not permanently
+                block a session.
 
         Returns:
-            True if the lock was acquired, False if another caller
-            holds the lock.
+            True if the lock was acquired, False if the timeout was
+            exceeded without acquiring the lock.
         """
+        import asyncio
+        import time as _time
+
         lock_val = f"{_now_iso()}"
-        acquired = self.redis.set(
-            _lock_key(session_id),
-            lock_val,
-            nx=True,
-            ex=timeout,
-        )
-        return bool(acquired)
+        deadline = _time.monotonic() + timeout
+        backoff = 0.005  # start at 5ms
+        max_backoff = 0.05  # cap at 50ms
+
+        while _time.monotonic() < deadline:
+            acquired = self.redis.set(
+                _lock_key(session_id),
+                lock_val,
+                nx=True,
+                ex=timeout,
+            )
+            if acquired:
+                return True
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
+
+        return False
 
     def release_lock(self, session_id: str) -> None:
         """Release the per-session lock.
