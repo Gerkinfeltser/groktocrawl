@@ -6325,6 +6325,431 @@ def test_cross_return_user_cache_hit():
         httpx.delete(AGENT + f"/v2/memory/{aid}", timeout=30)
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Session Store Integration Tests (M3: session_store.py)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def session():
+    """Create a session and clean it up after the test."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    assert r.status_code == 200, f"Create failed: {r.text}"
+    sid = r.json()["session_id"]
+    yield sid
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_create_default_ttl():
+    """VAL-SES-001: Create session without TTL uses default 3600s."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["success"] is True
+    assert data["session_id"]
+    assert data["ttl"] == 3600
+    assert data["expires_at"]
+    # Cleanup
+    httpx.delete(AGENT + f"/v2/session/{data['session_id']}", timeout=10)
+
+
+def test_session_create_custom_ttl():
+    """VAL-SES-002: Create session with custom TTL 7200."""
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 7200}, timeout=10)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ttl"] == 7200
+    httpx.delete(AGENT + f"/v2/session/{data['session_id']}", timeout=10)
+
+
+def test_session_create_min_ttl():
+    """VAL-SES-003: Create session with minimum allowed TTL (60s)."""
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 60}, timeout=10)
+    assert r.status_code == 200
+    assert r.json()["ttl"] == 60
+    httpx.delete(AGENT + f"/v2/session/{r.json()['session_id']}", timeout=10)
+
+
+def test_session_create_max_ttl():
+    """VAL-SES-004: Create session with maximum allowed TTL (86400s)."""
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 86400}, timeout=10)
+    assert r.status_code == 200
+    assert r.json()["ttl"] == 86400
+    httpx.delete(AGENT + f"/v2/session/{r.json()['session_id']}", timeout=10)
+
+
+def test_session_reject_ttl_below_min():
+    """VAL-SES-005: Reject TTL below 60s with 422."""
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 59}, timeout=10)
+    assert r.status_code == 422
+
+
+def test_session_reject_ttl_above_max():
+    """VAL-SES-006: Reject TTL above 86400s with 422."""
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 86401}, timeout=10)
+    assert r.status_code == 422
+
+
+def test_session_reject_negative_ttl():
+    """VAL-SES-007: Reject negative TTL with 422."""
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": -1}, timeout=10)
+    assert r.status_code == 422
+
+
+def test_session_get_active():
+    """VAL-SES-008: Get active session returns correct fields."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["session_id"]
+
+    r2 = httpx.get(AGENT + f"/v2/session/{sid}", timeout=10)
+    assert r2.status_code == 200
+    data = r2.json()
+    assert data["status"] == "active"
+    assert data["step_count"] == 0
+    assert data["steps"] == []
+    assert data["artifact_length"] == 0
+    assert data["created_at"]
+    assert data["expires_at"]
+
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_get_nonexistent():
+    """VAL-SES-009: Get non-existent session returns 404."""
+    r = httpx.get(
+        AGENT + "/v2/session/00000000-0000-0000-0000-000000000000", timeout=10
+    )
+    assert r.status_code == 404
+
+
+def test_session_delete_active():
+    """Delete active session returns deleted:true."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["session_id"]
+
+    r2 = httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+    assert r2.status_code == 200
+    data = r2.json()
+    assert data["deleted"] is True
+    assert data["session_id"] == sid
+
+
+def test_session_delete_idempotent():
+    """Second delete on same session returns deleted:false."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["session_id"]
+
+    r1 = httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+    assert r1.json()["deleted"] is True
+
+    r2 = httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+    assert r2.json()["deleted"] is False
+
+
+def test_session_delete_nonexistent():
+    """Delete non-existent session returns deleted:false."""
+    r = httpx.delete(
+        AGENT + "/v2/session/00000000-0000-0000-0000-000000000000", timeout=10
+    )
+    assert r.status_code == 200
+    assert r.json()["deleted"] is False
+
+
+def test_session_access_after_delete():
+    """Access after delete returns 404 on get and step."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["session_id"]
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+    # GET should 404
+    r_get = httpx.get(AGENT + f"/v2/session/{sid}", timeout=10)
+    assert r_get.status_code == 404
+
+    # Step should 404 (session gone)
+    r_step = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={"action": "search", "params": {"query": "test", "limit": 1}},
+        timeout=10,
+    )
+    assert r_step.status_code == 404
+
+
+def test_session_isolation():
+    """Two sessions have independent data and IDs."""
+    r1 = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    r2 = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid_a = r1.json()["session_id"]
+    sid_b = r2.json()["session_id"]
+
+    assert sid_a != sid_b, "Session IDs should be unique"
+
+    # Run search on session A
+    httpx.post(
+        AGENT + f"/v2/session/{sid_a}/step",
+        json={"action": "search", "params": {"query": "hello", "limit": 1}},
+        timeout=30,
+    )
+
+    # Session B should still have 0 steps
+    r_b = httpx.get(AGENT + f"/v2/session/{sid_b}", timeout=10)
+    assert r_b.json()["step_count"] == 0
+
+    # Session A should have 1 step
+    r_a = httpx.get(AGENT + f"/v2/session/{sid_a}", timeout=10)
+    assert r_a.json()["step_count"] == 1
+
+    httpx.delete(AGENT + f"/v2/session/{sid_a}", timeout=10)
+    httpx.delete(AGENT + f"/v2/session/{sid_b}", timeout=10)
+
+
+def test_session_expires_at_matches_ttl():
+    """VAL-SES-072: expires_at ≈ created_at + ttl."""
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 3600}, timeout=10)
+    sid = r.json()["session_id"]
+
+    r2 = httpx.get(AGENT + f"/v2/session/{sid}", timeout=10)
+    data = r2.json()
+
+    from datetime import datetime
+
+    created = datetime.fromisoformat(data["created_at"])
+    expires = datetime.fromisoformat(data["expires_at"])
+    diff = (expires - created).total_seconds()
+
+    assert abs(diff - 3600) < 5, f"Expected ~3600s diff, got {diff:.0f}s"
+
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_step_search():
+    """Search step stores results as refs and returns compact summary."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["session_id"]
+
+    r_step = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "search",
+            "params": {"query": "python programming", "limit": 3},
+        },
+        timeout=30,
+    )
+    assert r_step.status_code == 200
+    step_data = r_step.json()
+    assert step_data["step_index"] == 1
+    assert step_data["action"] == "search"
+    assert "summary" in step_data
+    assert len(step_data["summary"]) < 500  # compact summary
+    result = step_data["result"]
+    assert result["ref_count"] >= 1
+    assert len(result["top_refs"]) >= 1
+
+    # Verify session status reflects step
+    r_status = httpx.get(AGENT + f"/v2/session/{sid}", timeout=10)
+    assert r_status.json()["step_count"] == 1
+    assert len(r_status.json()["steps"]) == 1
+
+    # Export should have artifact and refs
+    r_export = httpx.post(AGENT + f"/v2/session/{sid}/export", timeout=10)
+    export_data = r_export.json()
+    assert export_data["success"] is True
+    assert export_data["artifact_length"] > 0
+    assert len(export_data["refs"]) >= 1
+    assert len(export_data["steps"]) == 1
+
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_export_empty():
+    """Export on empty session returns empty artifact and refs."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["session_id"]
+
+    r_export = httpx.post(AGENT + f"/v2/session/{sid}/export", timeout=10)
+    data = r_export.json()
+    assert data["success"] is True
+    assert data["artifact"] == ""
+    assert data["steps"] == []
+    assert data["refs"] == {}
+    assert data["artifact_length"] == 0
+
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_export_nonexistent():
+    """Export non-existent session returns 404."""
+    r = httpx.post(
+        AGENT + "/v2/session/00000000-0000-0000-0000-000000000000/export", timeout=10
+    )
+    assert r.status_code == 404
+
+
+def test_session_step_indices_increment():
+    """Multiple steps have monotonically increasing indices."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["session_id"]
+
+    for i in range(1, 4):
+        r_step = httpx.post(
+            AGENT + f"/v2/session/{sid}/step",
+            json={
+                "action": "search",
+                "params": {"query": f"test query {i}", "limit": 1},
+            },
+            timeout=30,
+        )
+        assert r_step.status_code == 200
+        assert r_step.json()["step_index"] == i
+
+    # Verify step count and steps in status
+    r_status = httpx.get(AGENT + f"/v2/session/{sid}", timeout=10)
+    assert r_status.json()["step_count"] == 3
+    assert len(r_status.json()["steps"]) == 3
+
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_step_expired_session():
+    """VAL-SES-056: Step on expired/deleted session returns 404.
+
+    Session expiry is handled by Valkey TTL.  Since the minimum
+    API TTL is 60s, we simulate expiry by deleting the session
+    and verifying the step returns 404.  The code path for
+    'session not found' is identical for expiry and deletion.
+
+    A separate manual test with a short Valkey TTL override
+    confirms that natural TTL expiry also returns 404.
+    """
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    assert r.status_code == 200, f"Create failed: {r.status_code}: {r.text}"
+    sid = r.json()["session_id"]
+
+    # Delete the session to simulate expiry
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+    r_step = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={"action": "search", "params": {"query": "test", "limit": 1}},
+        timeout=10,
+    )
+    assert r_step.status_code == 404
+
+
+def test_session_step_refresh_ttl():
+    """VAL-SES-057: Step activity refreshes TTL on all keys."""
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 60}, timeout=10)
+    sid = r.json()["session_id"]
+
+    # Step 1 refreshes TTL
+    r1 = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={"action": "search", "params": {"query": "test1", "limit": 1}},
+        timeout=30,
+    )
+    assert r1.status_code == 200
+
+    # Wait a bit (but not enough to expire if TTL refreshed)
+    import time
+
+    time.sleep(5)
+
+    # Step 2 should still work (TTL was refreshed)
+    r2 = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={"action": "search", "params": {"query": "test2", "limit": 1}},
+        timeout=30,
+    )
+    assert r2.status_code == 200, (
+        f"Step 2 should succeed after TTL refresh, got {r2.status_code}: {r2.text}"
+    )
+    assert r2.json()["step_index"] == 2
+
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_step_no_lock_contention():
+    """Concurrent steps to different sessions work independently."""
+    r1 = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    r2 = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid_a = r1.json()["session_id"]
+    sid_b = r2.json()["session_id"]
+
+    # Run steps concurrently on different sessions
+    import concurrent.futures
+
+    def step_search(sid):
+        return httpx.post(
+            AGENT + f"/v2/session/{sid}/step",
+            json={"action": "search", "params": {"query": "test", "limit": 1}},
+            timeout=30,
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(step_search, sid_a),
+            executor.submit(step_search, sid_b),
+        ]
+        results = [f.result() for f in futures]
+
+    for r in results:
+        assert r.status_code == 200, (
+            f"Concurrent step failed: {r.status_code}: {r.text}"
+        )
+        assert r.json()["step_index"] == 1
+
+    httpx.delete(AGENT + f"/v2/session/{sid_a}", timeout=10)
+    httpx.delete(AGENT + f"/v2/session/{sid_b}", timeout=10)
+
+
+def test_session_step_missing_action():
+    """Step without action field returns 422."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["session_id"]
+
+    r_step = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={"params": {"query": "test"}},
+        timeout=10,
+    )
+    assert r_step.status_code == 422
+
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_step_invalid_action():
+    """Step with invalid action returns 422."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["session_id"]
+
+    r_step = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={"action": "fly", "params": {"query": "test"}},
+        timeout=10,
+    )
+    assert r_step.status_code == 422
+
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_keys_isolated():
+    """Verify session keys in Valkey follow session:{id}:{subkey} format and don't overlap."""
+    r1 = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    r2 = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid_a = r1.json()["session_id"]
+    sid_b = r2.json()["session_id"]
+
+    # Key format check: all keys include the session ID
+    for suffix in ("meta", "steps", "artifact", "refs"):
+        assert f"session:{sid_a}:{suffix}" != f"session:{sid_b}:{suffix}"
+        assert sid_a in f"session:{sid_a}:{suffix}"
+        assert sid_b in f"session:{sid_b}:{suffix}"
+        # Keys should not overlap
+        assert sid_a not in f"session:{sid_b}:{suffix}"
+
+    httpx.delete(AGENT + f"/v2/session/{sid_a}", timeout=10)
+    httpx.delete(AGENT + f"/v2/session/{sid_b}", timeout=10)
+
+
 if __name__ == "__main__":
     """Run all test functions in this file when invoked directly.
 

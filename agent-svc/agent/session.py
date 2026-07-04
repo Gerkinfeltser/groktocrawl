@@ -104,6 +104,44 @@ class SessionManager:
         if session is None:
             raise ValueError(f"Session not found: {session_id}")
 
+        # Acquire per-session lock for concurrent step serialisation.
+        # If another step is in progress, block briefly then fail with
+        # a clear message so the client can retry.
+        lock_acquired = self.store.acquire_lock(session_id, timeout=30)
+        if not lock_acquired:
+            raise ValueError(
+                f"Session {session_id} is currently executing another step. "
+                "Retry in a moment."
+            )
+
+        try:
+            result = await self._execute_step(
+                session_id=session_id,
+                action=action,
+                params=params,
+                searxng_url=searxng_url,
+                scraper_url=scraper_url,
+                llm_base_url=llm_base_url,
+                llm_api_key=llm_api_key,
+                llm_model=llm_model,
+            )
+        finally:
+            self.store.release_lock(session_id)
+
+        return result
+
+    async def _execute_step(
+        self,
+        session_id: str,
+        action: str,
+        params: dict[str, Any],
+        searxng_url: str = "http://searxng:8080",
+        scraper_url: str = "http://scraper-svc:8001",
+        llm_base_url: str = "https://api.openai.com/v1",
+        llm_api_key: str = "",
+        llm_model: str = "gpt-4o-mini",
+    ) -> dict:
+        """Internal dispatch for step actions (called under lock)."""
         if action == "search":
             result = await self._step_search(
                 session_id=session_id,
@@ -159,10 +197,11 @@ class SessionManager:
         # Build a compact refs view (URLs + titles only, no full content)
         compact_refs: dict[str, dict[str, str]] = {}
         for ref_id, ref_data in refs.items():
+            char_count = ref_data.get("char_count", 0)
             compact_refs[ref_id] = {
                 "url": ref_data.get("url", ""),
                 "title": ref_data.get("title", ""),
-                "char_count": ref_data.get("char_count", 0),
+                "char_count": str(char_count),
             }
 
         return {
@@ -460,7 +499,9 @@ class SessionManager:
         max_sources = params.get("max_sources", 3)
 
         if not ref:
-            raise ValueError("deepen action requires a 'ref' parameter (citation reference)")
+            raise ValueError(
+                "deepen action requires a 'ref' parameter (citation reference)"
+            )
         if not depth_prompt:
             raise ValueError("deepen action requires a 'depth_prompt' parameter")
 
@@ -629,7 +670,11 @@ class SessionManager:
             session_id,
             {
                 "action": "deepen",
-                "params": {"ref": ref, "depth_prompt": depth_prompt, "max_sources": max_sources},
+                "params": {
+                    "ref": ref,
+                    "depth_prompt": depth_prompt,
+                    "max_sources": max_sources,
+                },
                 "summary": f"Deepen: {ref!r} — {depth_prompt[:80]}...",
             },
         )
