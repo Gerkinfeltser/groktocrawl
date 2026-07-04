@@ -82,7 +82,9 @@ async def _process_agent_async(
     citation_style: Any = None,
 ) -> None:
     settings = _get_worker_settings()
-    redis_url = f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
     store = JobStore(redis_url)
     from .models import CitationStyle
 
@@ -97,24 +99,29 @@ async def _process_agent_async(
     try:
         from .research_memory import ResearchMemory
 
-        memory = ResearchMemory(redis_url=redis_url)
-        cache_result = memory.query(question=prompt)
+        memory = ResearchMemory(
+            redis_url=redis_url,
+            semantic_url=settings.semantic_url,
+        )
+        cache_result = await memory.query(prompt=prompt)
         if cache_result["hit"]:
             freshness = cache_result.get("freshness", "stale")
-            if freshness == "fresh":
-                # Cache hit is fresh — return cached result directly
+            if freshness == "fresh" or freshness == "aging":
+                # Cache hit is fresh or aging — return cached result directly
                 logger.info(
-                    "Research memory fresh hit for agent %s — returning cached result",
+                    "Research memory %s hit for agent %s — returning cached result",
+                    freshness,
                     job_id,
                 )
-                artifact = cache_result["artifact"]
+                entry = cache_result["artifact"]
                 cached_payload = {
-                    "result": artifact.get("answer", ""),
-                    "sources": artifact.get("sources", []),
-                    "source_details": artifact.get("sources", []),
+                    "result": entry.get("artifact", ""),
+                    "sources": entry.get("sources", []),
+                    "source_details": entry.get("sources", []),
                     "from_cache": True,
-                    "cache_freshness": freshness,
-                    "cache_age_hours": cache_result.get("age_hours", 0),
+                    "freshness": freshness,
+                    "similarity": cache_result.get("similarity", 0),
+                    "memory_id": cache_result.get("memory_id", ""),
                 }
                 store.complete_job(job_id, cached_payload)
                 await deliver_webhook(
@@ -128,7 +135,7 @@ async def _process_agent_async(
                     "(cached version exists, age: %.1fh)",
                     freshness,
                     job_id,
-                    cache_result.get("age_hours", 0),
+                    0,
                 )
                 stale_cache_hit = cache_result
         else:
@@ -177,7 +184,10 @@ async def _process_agent_async(
         try:
             from .research_memory import ResearchMemory
 
-            memory = ResearchMemory(redis_url=redis_url)
+            memory = ResearchMemory(
+                redis_url=redis_url,
+                semantic_url=settings.semantic_url,
+            )
             answer = result.get("result", "")
             sources = result.get("source_details", result.get("sources", []))
             metadata: dict[str, Any] = {
@@ -189,10 +199,11 @@ async def _process_agent_async(
             if hasattr(result, "get"):
                 metadata["latency_ms"] = result.get("latency_ms", 0)
 
-            artifact_id = memory.store(
-                question=prompt,
-                answer=answer,
+            artifact_id = await memory.store(
+                prompt=prompt,
+                artifact=answer,
                 sources=sources,
+                model=llm_model,
                 metadata=metadata,
             )
             logger.info(
@@ -212,7 +223,9 @@ async def _process_agent_async(
         if stale_cache_hit:
             result["cached_version_exists"] = True
             result["cached_version_age_hours"] = stale_cache_hit.get("age_hours", 0)
-            result["cached_version_freshness"] = stale_cache_hit.get("freshness", "stale")
+            result["cached_version_freshness"] = stale_cache_hit.get(
+                "freshness", "stale"
+            )
 
         return result
 

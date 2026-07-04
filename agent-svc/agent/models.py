@@ -1612,17 +1612,20 @@ class ResearchMemoryQueryResponse(BaseModel):
     Attributes:
         hit: Whether a semantically similar artifact was found.
         artifact: The full artifact dict if ``hit`` is True, with keys
-            ``question``, ``answer``, ``sources``, ``created_at``,
-            and ``metadata``.
-        age_hours: Age of the matched artifact in hours (``None`` on miss).
+            ``query``, ``artifact``, ``sources``, ``model``,
+            ``created_at``, ``expires_at``, and ``user_id``.
+        similarity: Cosine similarity score of the best match
+            (``None`` on miss).
         freshness: Freshness classification: ``"fresh"``, ``"aging"``,
             or ``"stale"`` (``None`` on miss).
+        memory_id: The UUID of the matched entry (``None`` on miss).
     """
 
     hit: bool = False
     artifact: dict | None = None
-    age_hours: float | None = None
+    similarity: float | None = None
     freshness: str | None = None
+    memory_id: str | None = None
 
 
 class ResearchMemoryStoreRequest(BaseModel):

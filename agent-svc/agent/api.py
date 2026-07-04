@@ -2632,8 +2632,8 @@ async def research_memory_query(
 ) -> ResearchMemoryQueryResponse:
     """Search research memory for a semantically similar cached artifact.
 
-    Embeds the question and scans stored artifacts for cosine-similarity
-    matches above the configured threshold (default 0.85).  Returns the
+    Embeds the question via semantic-svc, searches Qdrant for similar
+    entries, and fetches matching artifacts from Valkey.  Returns the
     best match with freshness classification.
 
     Args:
@@ -2652,10 +2652,15 @@ async def research_memory_query(
         f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
     )
 
-    memory = ResearchMemory(redis_url=redis_url)
-    max_age = body.max_age_hours if body.max_age_hours is not None else 72
-    result = memory.query(question=body.question, max_age_hours=max_age)
-    return ResearchMemoryQueryResponse(**result)
+    memory = ResearchMemory(
+        redis_url=redis_url,
+        semantic_url=settings.semantic_url,
+    )
+    try:
+        result = await memory.query(prompt=body.question)
+        return ResearchMemoryQueryResponse(**result)
+    finally:
+        await memory.close()
 
 
 @router.post(
@@ -2667,9 +2672,8 @@ async def research_memory_store(
 ) -> ResearchMemoryStoreResponse:
     """Store a research artifact in the cross-session memory.
 
-    The question is embedded via BAAI/bge-m3 and the full artifact
-    (question, answer, sources, embedding, metadata) is stored in Valkey
-    with a 72-hour TTL.
+    Embeds the question via semantic-svc, stores the artifact in Valkey
+    with TTL, and upserts a point in Qdrant for similarity search.
 
     Args:
         body: Contains ``question``, ``answer``, ``sources``, and
@@ -2686,19 +2690,25 @@ async def research_memory_store(
         f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
     )
 
-    memory = ResearchMemory(redis_url=redis_url)
-    artifact_id = memory.store(
-        question=body.question,
-        answer=body.answer,
-        sources=body.sources,
-        metadata=body.metadata,
+    memory = ResearchMemory(
+        redis_url=redis_url,
+        semantic_url=settings.semantic_url,
     )
-    return ResearchMemoryStoreResponse(artifact_id=artifact_id)
+    try:
+        artifact_id = await memory.store(
+            prompt=body.question,
+            artifact=body.answer,
+            sources=body.sources,
+            metadata=body.metadata,
+        )
+        return ResearchMemoryStoreResponse(artifact_id=artifact_id)
+    finally:
+        await memory.close()
 
 
 @router.delete("/v2/research-memory/{artifact_id}")
 async def research_memory_delete(request: Request, artifact_id: str) -> dict:
-    """Delete a research memory artifact by ID.
+    """Delete a research memory artifact by ID from both Valkey and Qdrant.
 
     Args:
         artifact_id: The artifact ID returned by the store endpoint.
@@ -2715,9 +2725,115 @@ async def research_memory_delete(request: Request, artifact_id: str) -> dict:
         f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
     )
 
-    memory = ResearchMemory(redis_url=redis_url)
-    deleted = memory.delete(artifact_id)
-    return {"success": deleted}
+    memory = ResearchMemory(
+        redis_url=redis_url,
+        semantic_url=settings.semantic_url,
+    )
+    try:
+        deleted = await memory.delete(artifact_id)
+        return {"success": deleted}
+    finally:
+        await memory.close()
+
+
+# ── Research Memory: direct Valkey routes ───────────────────────
+
+
+@router.get("/v2/memory/{memory_id}")
+async def get_memory(request: Request, memory_id: str) -> dict[str, Any]:
+    """Retrieve a research memory artifact by ID.
+
+    Returns the full stored artifact including query, artifact text,
+    sources, model, created_at, expires_at, and user_id.
+
+    Args:
+        memory_id: The memory ID (UUID v4).
+
+    Returns:
+        200 with the artifact dict, or 404 if not found.
+    """
+    from .research_memory import ResearchMemory
+    from .settings import load_settings
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    memory = ResearchMemory(
+        redis_url=redis_url,
+        semantic_url=settings.semantic_url,
+    )
+    try:
+        entry = await memory.get(memory_id)
+        if entry is None:
+            raise NotFoundError(
+                detail="Memory artifact not found",
+                details={"memory_id": memory_id},
+            )
+        return {"success": True, "memory_id": memory_id, **entry}
+    finally:
+        await memory.close()
+
+
+@router.delete("/v2/memory/{memory_id}")
+async def delete_memory(request: Request, memory_id: str) -> dict[str, Any]:
+    """Delete a research memory artifact from both Valkey and Qdrant.
+
+    Args:
+        memory_id: The memory ID to delete.
+
+    Returns:
+        ``{"success": true, "deleted": true}`` if deleted,
+        ``{"success": true, "deleted": false}`` if not found.
+    """
+    from .research_memory import ResearchMemory
+    from .settings import load_settings
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    memory = ResearchMemory(
+        redis_url=redis_url,
+        semantic_url=settings.semantic_url,
+    )
+    try:
+        deleted = await memory.delete(memory_id)
+        return {"success": True, "deleted": deleted}
+    finally:
+        await memory.close()
+
+
+@router.post("/v2/memory/sweep")
+async def sweep_memory(request: Request) -> dict[str, Any]:
+    """Sweep orphaned Qdrant points whose Valkey keys have expired.
+
+    Trigger a manual cleanup of the research_memory Qdrant collection.
+    Scans all points and removes those with no corresponding Valkey key.
+
+    Returns:
+        ``{"success": true, "swept": N}`` where N is the number of
+        Qdrant points removed.
+    """
+    from .research_memory import ResearchMemory
+    from .settings import load_settings
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    memory = ResearchMemory(
+        redis_url=redis_url,
+        semantic_url=settings.semantic_url,
+    )
+    try:
+        count = await memory.sweep()
+        return {"success": True, "swept": count}
+    finally:
+        await memory.close()
 
 
 async def _index_scrape(url: str, title: str, content: str, request: Request) -> None:
