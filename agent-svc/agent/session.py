@@ -107,8 +107,11 @@ class SessionManager:
         # Acquire per-session lock for concurrent step serialisation.
         # Uses async backoff so the FastAPI event loop is not blocked
         # while waiting for the lock (ADR-0040).
-        lock_acquired = await self.store.acquire_lock(session_id, timeout=30)
-        if not lock_acquired:
+        # lease_ttl=120 covers long scrape steps (timeout=70s + overhead).
+        owner_token = await self.store.acquire_lock(
+            session_id, timeout=30, lease_ttl=120
+        )
+        if owner_token is None:
             raise ValueError(
                 f"Session {session_id} is currently executing another step. "
                 "Retry in a moment."
@@ -126,7 +129,7 @@ class SessionManager:
                 llm_model=llm_model,
             )
         finally:
-            self.store.release_lock(session_id)
+            self.store.release_lock(session_id, owner_token)
 
         return result
 

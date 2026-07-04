@@ -480,7 +480,7 @@ class AgentRequest(BaseModel):
     )
     citation_style: CitationStyle = Field(
         default=CitationStyle.inline,
-        description="Citation formatting style: inline, compact, footnote, or none",
+        description="Citation formatting style: inline or compact. inline uses bare [N] markers with a separate citations list; compact embeds [N](url) directly in the answer text.",
     )
     force_fresh: bool = Field(
         default=False,
@@ -1117,7 +1117,7 @@ class AnswerRequest(BaseModel):
     )
     citation_style: CitationStyle = Field(
         default=CitationStyle.inline,
-        description="Citation formatting style: inline, compact, footnote, or none",
+        description="Citation formatting style: inline or compact. inline uses bare [N] markers with a separate citations list; compact embeds [N](url) directly in the answer text.",
     )
 
     model_config = ConfigDict(populate_by_name=True)

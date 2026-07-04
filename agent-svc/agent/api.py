@@ -139,9 +139,10 @@ def _resolve_output_schema(
 
     - ``output_schema`` takes priority over ``schema`` alias.
     - Empty dicts (``{}``) are treated as ``None`` (no schema).
+    - ``None`` means "not set" — falls back to ``schema`` alias.
     - Returns ``None`` when no valid schema is provided.
     """
-    effective = output_schema or schema_alias
+    effective = output_schema if output_schema is not None else schema_alias
     if effective is not None and not any(effective):
         return None
     return effective
@@ -2272,6 +2273,7 @@ async def resolve_citations(request: Request, body: CitationsResolveRequest):
 
     if style == CitationStyle.compact:
         # Replace [N] with [N](url) — self-contained link
+        # Use (?!\() to avoid matching already-linked [N](url) markers
         def _compact_replacer(match: re.Match) -> str:
             idx = int(match.group(1))
             if idx in src_map and idx not in seen_indices:
@@ -2289,7 +2291,7 @@ async def resolve_citations(request: Request, body: CitationsResolveRequest):
                 return f"[{idx}]({src.url})"
             return match.group(0)
 
-        text = re.sub(r"\[(\d+)\]", _compact_replacer, text)
+        text = re.sub(r"\[(\d+)\](?!\()", _compact_replacer, text)
     else:  # inline — return as-is but build citation list
         for match in re.finditer(r"\[(\d+)\]", text):
             idx = int(match.group(1))
@@ -3104,7 +3106,11 @@ async def research_memory_query(
         semantic_url=settings.semantic_url,
     )
     try:
-        result = await memory.query(prompt=body.question)
+        user_id = _derive_user_id(request)
+        result = await memory.query(
+            prompt=body.question,
+            user_id=user_id,
+        )
         return ResearchMemoryQueryResponse(**result)
     finally:
         await memory.close()
@@ -3142,10 +3148,12 @@ async def research_memory_store(
         semantic_url=settings.semantic_url,
     )
     try:
+        user_id = _derive_user_id(request)
         artifact_id = await memory.store(
             prompt=body.question,
             artifact=body.answer,
             sources=body.sources,
+            user_id=user_id,
             metadata=body.metadata,
         )
         return ResearchMemoryStoreResponse(artifact_id=artifact_id)
@@ -3267,10 +3275,26 @@ async def sweep_memory(request: Request) -> dict[str, Any]:
     Trigger a manual cleanup of the research_memory Qdrant collection.
     Scans all points and removes those with no corresponding Valkey key.
 
+    **Admin-only operation**: Rate-limited to 1 call per 60s per
+    client IP to prevent operational DoS from repeated full Qdrant
+    scans.
+
     Returns:
         ``{"success": true, "swept": N}`` where N is the number of
         Qdrant points removed.
     """
+    # Rate limit: one sweep per 60s per client IP
+    client_ip = _get_client_ip(request)
+    rate_limiter = request.app.state.rate_limiter
+    allowed, _remaining = await rate_limiter.check(f"{client_ip}:memory_sweep")
+    if not allowed:
+        from .exceptions import RateLimitedError
+
+        raise RateLimitedError(
+            detail=f"Sweep rate limit exceeded — max 1 per {rate_limiter.window}s. "
+            "This is an admin-only maintenance endpoint."
+        )
+
     from .research_memory import ResearchMemory
     from .settings import load_settings
 
@@ -3329,7 +3353,11 @@ async def memory_batch_query(
         semantic_url=settings.semantic_url,
     )
     try:
-        raw_results = await memory.batch_query(queries=body.queries)
+        user_id = _derive_user_id(request)
+        raw_results = await memory.batch_query(
+            queries=body.queries,
+            user_id=user_id,
+        )
         results: list[MemoryBatchQueryEntry] = []
         for i, r in enumerate(raw_results):
             entry = MemoryBatchQueryEntry(
@@ -3393,8 +3421,10 @@ async def memory_batch_store(
         semantic_url=settings.semantic_url,
     )
     try:
+        user_id = _derive_user_id(request)
         raw_results = await memory.batch_store(
             entries=[e.model_dump() for e in body.entries],
+            user_id=user_id,
         )
         results: list[MemoryBatchStoreResult] = []
         stored = 0

@@ -295,8 +295,8 @@ class ResearchMemory:
                 freshness = "stale"
 
             logger.info(
-                "Research memory HIT for %r (similarity=%.3f, freshness=%s)",
-                prompt[:80],
+                "Research memory HIT (memory_id=%s, similarity=%.3f, freshness=%s)",
+                memory_id,
                 score,
                 freshness,
             )

@@ -330,12 +330,16 @@ class SessionStore:
 
     # ── Per-Session Locking ─────────────────────────────────────
 
-    async def acquire_lock(self, session_id: str, timeout: int = 30) -> bool:
+    async def acquire_lock(
+        self, session_id: str, timeout: int = 30, lease_ttl: int = 120
+    ) -> str | None:
         """Acquire a per-session lock for concurrent step execution.
 
         Uses ``SETNX`` with async blocking retry so that concurrent steps
         on the same session are serialised rather than rejected.  The lock
-        value is a timestamp for debugging.
+        value is an ownership token (UUID) used for compare-and-delete on
+        release, preventing accidental deletion of another caller's lock
+        after lease expiry.
 
         Per ADR-0040: "If two steps race on the same session, the second
         waits for the first's step to complete."  This implementation
@@ -345,18 +349,22 @@ class SessionStore:
         Args:
             session_id: The session to lock.
             timeout: Maximum time in seconds to wait for the lock
-                (default 30).  Once acquired, the lock auto-expires
-                after this many seconds so stale locks do not permanently
-                block a session.
+                (default 30).  Only affects how long we block before
+                giving up.
+            lease_ttl: How long the lock key lives in Valkey before
+                auto-expiring (default 120).  Must be longer than the
+                longest expected step (e.g. scrape timeout = 70s).
 
         Returns:
-            True if the lock was acquired, False if the timeout was
-            exceeded without acquiring the lock.
+            The ownership token (str) if the lock was acquired, or
+            ``None`` if the timeout was exceeded without acquiring
+            the lock.
         """
         import asyncio
         import time as _time
+        import uuid as _uuid
 
-        lock_val = f"{_now_iso()}"
+        owner_token = str(_uuid.uuid4())
         deadline = _time.monotonic() + timeout
         backoff = 0.005  # start at 5ms
         max_backoff = 0.05  # cap at 50ms
@@ -364,24 +372,39 @@ class SessionStore:
         while _time.monotonic() < deadline:
             acquired = self.redis.set(
                 _lock_key(session_id),
-                lock_val,
+                owner_token,
                 nx=True,
-                ex=timeout,
+                ex=lease_ttl,
             )
             if acquired:
-                return True
+                return owner_token
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, max_backoff)
 
-        return False
+        return None
 
-    def release_lock(self, session_id: str) -> None:
-        """Release the per-session lock.
+    def release_lock(self, session_id: str, owner_token: str) -> None:
+        """Release the per-session lock using compare-and-delete.
 
-        Only deletes the lock key — does not check ownership.  The
-        lock timeout provides a safety net against orphaned locks.
+        Only deletes the lock key if its current value matches
+        *owner_token*, preventing accidental deletion of another
+        caller's lock after lease expiry and re-acquisition.
+
+        Args:
+            session_id: The session to unlock.
+            owner_token: The ownership token returned by
+                :meth:`acquire_lock`.
         """
-        self.redis.delete(_lock_key(session_id))
+        lock_key = _lock_key(session_id)
+        # Lua script for atomic compare-and-delete
+        script = """
+        if redis.call("get", KEYS[1]) == ARGV[1] then
+            return redis.call("del", KEYS[1])
+        else
+            return 0
+        end
+        """
+        self.redis.eval(script, 1, lock_key, owner_token)
 
     def is_locked(self, session_id: str) -> bool:
         """Check whether the session lock is currently held."""

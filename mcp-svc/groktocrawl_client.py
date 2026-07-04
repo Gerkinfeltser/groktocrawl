@@ -385,25 +385,42 @@ class GroktocrawlClient:
         """Parse a document (file at URL) to markdown.
 
         Downloads the file and sends it to the parse endpoint as
-        multipart form data.
+        multipart form data.  Uses a separate unauthenticated client
+        for the download to avoid leaking the GROKTOCRAWL_API_KEY to
+        third-party hosts.
         """
         import os
 
         client = await self._client_ctx()
+
         try:
-            # Download the file first
-            dl_resp = await client.get(file_url)
-            dl_resp.raise_for_status()
+            # Download the file with a separate unauthenticated client
+            # to avoid leaking the API key to third-party hosts.
+            dl_headers: dict[str, str] = {}
+            if "user-agent" in (client.headers or {}):
+                dl_headers["User-Agent"] = client.headers["user-agent"]
+
+            dl_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(self._default_timeout),
+                headers=dl_headers,
+                follow_redirects=True,
+            )
+            try:
+                dl_resp = await dl_client.get(file_url)
+                dl_resp.raise_for_status()
+                file_content = dl_resp.content
+                dl_content_type = dl_resp.headers.get(
+                    "content-type", "application/octet-stream"
+                )
+            finally:
+                await dl_client.aclose()
 
             filename = os.path.basename(file_url.rsplit("?", 1)[0]) or "file"
-            content_type = dl_resp.headers.get(
-                "content-type", "application/octet-stream"
-            )
 
-            # Upload to parse endpoint
+            # Upload to parse endpoint using the authenticated client
             parse_resp = await client.post(
                 "/v2/parse",
-                files={"file": (filename, dl_resp.content, content_type)},
+                files={"file": (filename, file_content, dl_content_type)},
             )
             parse_resp.raise_for_status()
             return parse_resp.json()

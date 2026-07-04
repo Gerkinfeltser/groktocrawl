@@ -1249,17 +1249,16 @@ def _apply_citation_style(
 
     if citation_style == CitationStyle.compact:
         # Replace [N] with [N](url) — self-contained link
+        # Use (?!\() to avoid matching already-linked [N](url) markers
         def _compact_replacer(match: re.Match) -> str:
             idx = int(match.group(1))
-            if idx in seen_indices:
-                return match.group(0)
             if 1 <= idx <= len(source_map):
                 seen_indices.add(idx)
                 url = source_map[idx - 1]["url"]
                 return f"[{idx}]({url})"
             return match.group(0)
 
-        answer = re.sub(r"\[(\d+)\]", _compact_replacer, answer)
+        answer = re.sub(r"\[(\d+)\](?!\()", _compact_replacer, answer)
         for idx in sorted(seen_indices):
             citations.append({"index": idx, "url": source_map[idx - 1]["url"]})
 
