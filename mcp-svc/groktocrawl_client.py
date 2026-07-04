@@ -1,11 +1,39 @@
 """HTTP client for the GroktoCrawl agent-svc API."""
 
 import logging
+import os
+import time
 from typing import Any
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_response_detail(response: httpx.Response) -> str:
+    """Extract a human-readable detail from an error response body.
+
+    Tries JSON first (looking for ``detail``, ``error``, or ``message``
+    keys), then falls back to the raw text (truncated).
+    """
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            # FastAPI-style validation errors have a 'detail' key
+            if "detail" in body:
+                detail = body["detail"]
+                if isinstance(detail, list):
+                    # FastAPI validation errors: detail is a list of error objects
+                    return "; ".join(str(d.get("msg", str(d))) for d in detail[:3])
+                if isinstance(detail, str):
+                    return detail[:500]
+            # GroktoCrawl-style errors
+            for key in ("error", "message"):
+                if key in body and isinstance(body[key], str):
+                    return body[key][:500]
+        return response.text[:300]
+    except (ValueError, TypeError):
+        return response.text[:300]
 
 
 class GroktocrawlClient:
@@ -14,13 +42,46 @@ class GroktocrawlClient:
     Wraps httpx.AsyncClient with typed convenience methods for each
     endpoint.  Every method returns a ``dict`` — on HTTP or transport
     errors the dict contains an ``error`` key with a human-readable
-    message.
+    message and (when applicable) a ``status_code`` key.
+
+    Usage::
+
+        async with GroktocrawlClient.from_env() as client:
+            result = await client.scrape("https://example.com")
     """
 
-    def __init__(self, base_url: str, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str | None = None,
+        default_timeout: float = 120.0,
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
+        self._default_timeout = default_timeout
         self._client: httpx.AsyncClient | None = None
+
+    @classmethod
+    def from_env(cls, default_timeout: float = 120.0) -> "GroktocrawlClient":
+        """Create a client from environment variables.
+
+        Reads ``GROKTOCRAWL_URL`` for the agent-svc base URL (falls back
+        to ``GROKTOCRAWL_API_URL`` for backward compatibility, then
+        ``http://localhost:8080``).  Reads ``GROKTOCRAWL_API_KEY`` for
+        the optional API key.
+        """
+        base_url = os.environ.get(
+            "GROKTOCRAWL_URL",
+            os.environ.get("GROKTOCRAWL_API_URL", "http://localhost:8080"),
+        )
+        api_key = os.environ.get("GROKTOCRAWL_API_KEY") or None
+        return cls(base_url=base_url, api_key=api_key, default_timeout=default_timeout)
+
+    async def __aenter__(self) -> "GroktocrawlClient":
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        await self.close()
 
     def _headers(self) -> dict[str, str]:
         h: dict[str, str] = {}
@@ -34,7 +95,7 @@ class GroktocrawlClient:
             self._client = httpx.AsyncClient(
                 base_url=self._base_url,
                 headers=self._headers(),
-                timeout=httpx.Timeout(120.0),
+                timeout=httpx.Timeout(self._default_timeout),
             )
         return self._client
 
@@ -45,48 +106,74 @@ class GroktocrawlClient:
 
     # ── helpers ─────────────────────────────────────────────────
 
-    async def _post(self, path: str, json_data: dict | None = None) -> dict:
+    def _error_result(self, msg: str, *, status_code: int | None = None) -> dict:
+        result: dict[str, Any] = {"error": msg}
+        if status_code is not None:
+            result["status_code"] = status_code
+        return result
+
+    async def _request(
+        self, method: str, path: str, json_data: dict | None = None
+    ) -> dict:
+        """Unified request helper with structured error handling.
+
+        Discriminates between HTTP errors, timeouts, connection failures,
+        and other transport errors — each producing a descriptive error
+        dict with appropriate detail.
+        """
         client = await self._client_ctx()
+        start = time.monotonic()
         try:
-            resp = await client.post(path, json=json_data)
+            resp = await client.request(method, path, json=json_data)
             resp.raise_for_status()
             return resp.json()
         except httpx.HTTPStatusError as exc:
-            logger.warning("HTTP %s for %s %s", exc.response.status_code, "POST", path)
-            return {"error": f"HTTP {exc.response.status_code}: {exc.response.text[:300]}"}
+            duration = time.monotonic() - start
+            status_code = exc.response.status_code
+            detail = _extract_response_detail(exc.response)
+            logger.warning(
+                "HTTP %s for %s %s (%.1fs)",
+                status_code,
+                method,
+                path,
+                duration,
+            )
+            return self._error_result(
+                f"HTTP {status_code}: {detail}",
+                status_code=status_code,
+            )
+        except httpx.TimeoutException:
+            duration = time.monotonic() - start
+            logger.error(
+                "Timeout (%.1fs) for %s %s (threshold: %.0fs)",
+                duration,
+                method,
+                path,
+                self._default_timeout,
+            )
+            return self._error_result(
+                f"Request timed out after {duration:.1f}s "
+                f"(timeout: {self._default_timeout:.0f}s) for "
+                f"{method.upper()} {path}"
+            )
+        except httpx.ConnectError as exc:
+            logger.error("Connection failed for %s %s: %s", method, path, exc)
+            return self._error_result(
+                f"Connection failed: unable to reach server at "
+                f"{self._base_url} — is agent-svc running?"
+            )
         except Exception as exc:
-            logger.error("Request failed for %s %s: %s", "POST", path, exc)
-            return {"error": str(exc)}
+            logger.error("Request failed for %s %s: %s", method, path, exc)
+            return self._error_result(str(exc))
+
+    async def _post(self, path: str, json_data: dict | None = None) -> dict:
+        return await self._request("POST", path, json_data)
 
     async def _get(self, path: str) -> dict:
-        client = await self._client_ctx()
-        try:
-            resp = await client.get(path)
-            resp.raise_for_status()
-            return resp.json()
-        except httpx.HTTPStatusError as exc:
-            logger.warning("HTTP %s for %s %s", exc.response.status_code, "GET", path)
-            return {"error": f"HTTP {exc.response.status_code}: {exc.response.text[:300]}"}
-        except Exception as exc:
-            logger.error("Request failed for %s %s: %s", "GET", path, exc)
-            return {"error": str(exc)}
+        return await self._request("GET", path)
 
     async def _delete(self, path: str) -> dict:
-        client = await self._client_ctx()
-        try:
-            resp = await client.delete(path)
-            resp.raise_for_status()
-            return resp.json()
-        except httpx.HTTPStatusError as exc:
-            logger.warning("HTTP %s for %s %s", exc.response.status_code, "DELETE", path)
-            return {"error": f"HTTP {exc.response.status_code}: {exc.response.text[:300]}"}
-        except Exception as exc:
-            logger.error("Request failed for %s %s: %s", "DELETE", path, exc)
-            return {"error": str(exc)}
-
-    @staticmethod
-    def _error_result(msg: str) -> dict:
-        return {"error": msg}
+        return await self._request("DELETE", path)
 
     # ── API methods ─────────────────────────────────────────────
 
@@ -143,9 +230,7 @@ class GroktocrawlClient:
             await asyncio.sleep(1.0)
         return self._error_result("Agent job timed out after 120s")
 
-    async def answer(
-        self, question: str, output_schema: dict | None = None
-    ) -> dict:
+    async def answer(self, question: str, output_schema: dict | None = None) -> dict:
         """Grounded Q&A — synchronous."""
         body: dict[str, Any] = {"query": question}
         if output_schema:
@@ -227,7 +312,9 @@ class GroktocrawlClient:
             dl_resp.raise_for_status()
 
             filename = os.path.basename(file_url.rsplit("?", 1)[0]) or "file"
-            content_type = dl_resp.headers.get("content-type", "application/octet-stream")
+            content_type = dl_resp.headers.get(
+                "content-type", "application/octet-stream"
+            )
 
             # Upload to parse endpoint
             parse_resp = await client.post(
@@ -237,8 +324,12 @@ class GroktocrawlClient:
             parse_resp.raise_for_status()
             return parse_resp.json()
         except httpx.HTTPStatusError as exc:
-            logger.warning("HTTP %s for parse of %s", exc.response.status_code, file_url)
-            return {"error": f"HTTP {exc.response.status_code}: {exc.response.text[:300]}"}
+            logger.warning(
+                "HTTP %s for parse of %s", exc.response.status_code, file_url
+            )
+            return {
+                "error": f"HTTP {exc.response.status_code}: {exc.response.text[:300]}"
+            }
         except Exception as exc:
             logger.error("Parse failed for %s: %s", file_url, exc)
             return {"error": str(exc)}
@@ -305,6 +396,76 @@ class GroktocrawlClient:
             await asyncio.sleep(1.0)
         return self._error_result("Generate LLMs.txt timed out after 120s")
 
+    # ── status / cancellation / activity tools ──────────────────
+
+    async def get_crawl_status(self, job_id: str) -> dict:
+        """Get the current status of a crawl job.
+
+        Args:
+            job_id: The crawl job ID returned by :meth:`crawl`.
+
+        Returns:
+            Status dict with ``status``, ``completed``, ``total``,
+            ``data``, and other crawl-specific fields.
+        """
+        return await self._get(f"/v2/crawl/{job_id}")
+
+    async def cancel_crawl(self, job_id: str) -> dict:
+        """Cancel an in-progress crawl job.
+
+        Args:
+            job_id: The crawl job ID to cancel.
+
+        Returns:
+            Confirmation dict with ``success`` and ``status`` fields.
+        """
+        return await self._delete(f"/v2/crawl/{job_id}")
+
+    async def get_crawl_errors(self, job_id: str) -> dict:
+        """Get per-URL errors for a crawl job.
+
+        Args:
+            job_id: The crawl job ID.
+
+        Returns:
+            Error listing with ``errors`` array and
+            ``robots_blocked`` array.
+        """
+        return await self._get(f"/v2/crawl/{job_id}/errors")
+
+    async def get_agent_status(self, job_id: str) -> dict:
+        """Get the current status of an agent research job.
+
+        Args:
+            job_id: The agent job ID returned by :meth:`agent`.
+
+        Returns:
+            Status dict with ``status``, ``data``, ``source_details``,
+            and other agent-specific fields.
+        """
+        return await self._get(f"/v2/agent/{job_id}")
+
+    async def get_extract_status(self, job_id: str) -> dict:
+        """Get the current status of an extract job.
+
+        Args:
+            job_id: The extract job ID returned by :meth:`extract`.
+
+        Returns:
+            Status dict with ``status``, ``data``, and extraction results.
+        """
+        return await self._get(f"/v2/extract/{job_id}")
+
+    async def get_activity(self) -> dict:
+        """Get recent API activity / job queue status.
+
+        Returns:
+            Activity listing with active jobs across all job types.
+        """
+        return await self._get("/v2/activity")
+
+    # ── utility tools ───────────────────────────────────────────
+
     async def health(self) -> dict:
         """Server health check."""
         return await self._get("/health")
@@ -313,9 +474,7 @@ class GroktocrawlClient:
         """Create a browser session."""
         return await self._post("/v2/browser", {"ttl": ttl})
 
-    async def browser_action(
-        self, session_id: str, action: str, **kwargs: Any
-    ) -> dict:
+    async def browser_action(self, session_id: str, action: str, **kwargs: Any) -> dict:
         """Execute an action in a browser session."""
         body: dict[str, Any] = {"action": action}
         body.update(kwargs)
@@ -327,9 +486,7 @@ class GroktocrawlClient:
 
     async def monitor_create(self, url: str, schedule: str) -> dict:
         """Create a change monitor."""
-        return await self._post(
-            "/v2/monitor", {"url": url, "schedule": schedule}
-        )
+        return await self._post("/v2/monitor", {"url": url, "schedule": schedule})
 
     async def monitor_list(self) -> dict:
         """List all monitors."""

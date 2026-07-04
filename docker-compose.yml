@@ -199,7 +199,7 @@ services:
     ports:
       - '8083:8083'
     environment:
-      - GROKTOCRAWL_API_URL=http://agent-svc:8080
+      - GROKTOCRAWL_URL=http://agent-svc:8080
       - GROKTOCRAWL_API_KEY=${API_KEY:-}
     depends_on:
       agent-svc:

@@ -12,17 +12,19 @@ import logging
 import os
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
-
 from browser_handler import BrowserHandler
 from groktocrawl_client import GroktocrawlClient
+from mcp.server.fastmcp import FastMCP
 from session_store import SessionStore
 
 logger = logging.getLogger(__name__)
 
 # ── Configuration ──────────────────────────────────────────────────
 
-API_URL = os.environ.get("GROKTOCRAWL_API_URL", "http://localhost:8080")
+API_URL = os.environ.get(
+    "GROKTOCRAWL_URL",
+    os.environ.get("GROKTOCRAWL_API_URL", "http://localhost:8080"),
+)
 API_KEY = os.environ.get("GROKTOCRAWL_API_KEY") or None
 PORT = int(os.environ.get("PORT", "8083"))
 
