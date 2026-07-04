@@ -4533,10 +4533,10 @@ def test_answer_output_schema_num_sources_one():
 
     answer_text = payload["answer"]
     if not answer_text.startswith("I was unable to find"):
-        try:
+        import contextlib
+
+        with contextlib.suppress(json.JSONDecodeError):
             json.loads(answer_text)
-        except json.JSONDecodeError:
-            pass
 
 
 def test_answer_non_json_fallback():
@@ -4951,10 +4951,10 @@ def test_cross_endpoint_citation_style_consistency():
     if not answer_text.startswith("I was unable to find") and answer_payload.get(
         "sources"
     ):
-        try:
-            json.loads(answer_text)
-        except json.JSONDecodeError:
-            pass  # May be prose with markdown citations
+        import contextlib
+
+        with contextlib.suppress(json.JSONDecodeError):
+            json.loads(answer_text)  # May be prose with markdown citations
 
     # Citations/resolve with compact style
     resolve_r = httpx.post(
@@ -5678,6 +5678,94 @@ def test_memory_batch_store_empty():
     assert data.get("stored_count") == 0
     assert data.get("failed_count") == 0
     assert data.get("results") == []
+
+
+def test_memory_batch_store_partial_success():
+    """VAL-MEM-022: Batch store handles partial success with per-entry status.
+
+    Store multiple entries via batch store.  Verify that:
+    - The response format supports per-entry success/failure reporting
+    - Each result entry has success, memory_id (on success),
+      and optionally error (on failure)
+    - The response includes stored_count and failed_count fields
+    - All entries succeed when services are healthy
+
+    True partial failure (where one entry's embedding fails but others
+    succeed) requires service disruption and is verified via code review
+    of research_memory.py:_store_one which catches exceptions per-entry
+    and returns {"success": False, "error": str(exc)} on failure.
+    """
+    entry_a_query = f"partial batch A {int(time.time())}"
+    entry_b_query = f"partial batch B {int(time.time())}"
+    entry_c_query = f"partial batch C {int(time.time())}"
+
+    batch_r = httpx.post(
+        AGENT + "/v2/memory/batch/store",
+        json={
+            "entries": [
+                {
+                    "query": entry_a_query,
+                    "artifact": "Partial batch answer A.",
+                    "sources": [{"url": "https://a-partial.example.com", "title": "A"}],
+                    "model": "test-model",
+                },
+                {
+                    "query": entry_b_query,
+                    "artifact": "Partial batch answer B.",
+                    "sources": [{"url": "https://b-partial.example.com", "title": "B"}],
+                    "model": "test-model",
+                },
+                {
+                    "query": entry_c_query,
+                    "artifact": "Partial batch answer C.",
+                    "sources": [{"url": "https://c-partial.example.com", "title": "C"}],
+                    "model": "test-model",
+                },
+            ]
+        },
+        timeout=60,
+    )
+    assert batch_r.status_code == 200, (
+        f"Batch store should return 200, got {batch_r.status_code}: {batch_r.text[:300]}"
+    )
+    data = batch_r.json()
+    assert data.get("success") is True
+    assert isinstance(data.get("stored_count"), int), (
+        "Response must include stored_count field"
+    )
+    assert isinstance(data.get("failed_count"), int), (
+        "Response must include failed_count field"
+    )
+    assert data["stored_count"] + data["failed_count"] == 3, (
+        f"stored_count + failed_count should equal total entries (3), "
+        f"got {data['stored_count']} + {data['failed_count']}"
+    )
+
+    results = data.get("results", [])
+    assert len(results) == 3, f"Expected 3 results, got {len(results)}"
+
+    mids: list[str] = []
+    for i, r in enumerate(results):
+        assert "success" in r, f"Result {i} missing 'success' field"
+        if r.get("success"):
+            assert r.get("memory_id"), f"Successful entry {i} must have memory_id: {r}"
+            mids.append(r["memory_id"])
+        else:
+            assert "error" in r, f"Failed entry {i} must have error field: {r}"
+
+    # All entries should succeed when services are healthy
+    assert data["stored_count"] == 3, (
+        f"Expected all 3 entries to succeed, got stored={data['stored_count']}, "
+        f"failed={data['failed_count']}"
+    )
+    assert data["failed_count"] == 0
+
+    # Cleanup: delete each stored artifact
+    try:
+        for mid in mids:
+            httpx.delete(AGENT + f"/v2/memory/{mid}", timeout=30)
+    except Exception:
+        pass
 
 
 def test_memory_batch_query_empty():
