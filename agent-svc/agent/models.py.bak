@@ -1178,14 +1178,11 @@ class SessionStepRequest(BaseModel):
           list of URLs), ``scrape_options`` (optional).
         - ``query``: Run LLM over accumulated session context.  Params:
           ``question`` (required), ``model`` (optional).
-        - ``deepen``: Drill deeper into a cited source.  Params: ``ref``
-          (required, citation ref from session), ``depth_prompt`` (required,
-          follow-up question), ``max_sources`` (optional, default 3).
     """
 
     action: str = Field(
         ...,
-        description="Step action: search, scrape, query, or deepen",
+        description="Step action: search, scrape, or query",
     )
     params: dict[str, Any] = Field(
         default_factory=dict,
@@ -1195,7 +1192,7 @@ class SessionStepRequest(BaseModel):
     @field_validator("action")
     @classmethod
     def validate_action(cls, value: str) -> str:
-        allowed = {"search", "scrape", "query", "deepen"}
+        allowed = {"search", "scrape", "query"}
         if value not in allowed:
             raise ValueError(
                 f"Unknown action: {value!r}. Supported: {', '.join(sorted(allowed))}"
@@ -1388,136 +1385,3 @@ class BatchScrapeErrorsResponse(BaseModel):
 
     success: bool = True
     errors: list[CrawlErrorItem] = Field(default_factory=list)
-
-
-# ── Plan-Consent (Phase 3) ─────────────────────────────────────
-
-
-class PlanRequest(BaseModel):
-    """Request to generate a structured research plan.
-
-    Attributes:
-        prompt: The user's natural-language research question.
-        model: Optional per-request LLM override.  When ``"default"``
-            or omitted, the environment-configured model is used.
-    """
-
-    prompt: str = Field(
-        ...,
-        max_length=100000,
-        description="Natural-language research question to plan for",
-    )
-    model: str | None = Field(
-        default=None,
-        description="Optional per-request LLM model override",
-    )
-
-
-class PlanResponse(BaseModel):
-    """Response from POST /v2/agent/plan.
-
-    Returns the generated plan ID and the full plan object so the
-    client can display it for review and modification before executing.
-    """
-
-    success: bool = True
-    plan_id: str = ""
-    plan: dict = Field(default_factory=dict)
-
-
-class PlanModifications(BaseModel):
-    """Optional modifications to apply to a plan before execution.
-
-    All fields are optional.  When provided, they modify the stored plan
-    in-memory before execution begins (the stored plan is NOT mutated).
-
-    Attributes:
-        narrow: Optional focus string to narrow the research scope.
-            Injected into the first search phase as additional context.
-        add_dimension: Additional analysis dimensions to append.
-        remove_dimension: Dimensions to exclude from the analysis.
-    """
-
-    narrow: str | None = Field(
-        default=None,
-        max_length=5000,
-        description="Narrow the research focus with this additional context",
-    )
-    add_dimension: list[str] | None = Field(
-        default=None,
-        description="Additional analysis dimensions to include",
-    )
-    remove_dimension: list[str] | None = Field(
-        default=None,
-        description="Dimensions to exclude from the analysis",
-    )
-
-
-class ExecutePlanRequest(BaseModel):
-    """Request to execute a previously-generated research plan.
-
-    Loads the plan from Valkey, applies any modifications, and streams
-    research results as Server-Sent Events.
-
-    Attributes:
-        plan_id: The plan ID returned by POST /v2/agent/plan.
-        modifications: Optional adjustments to narrow scope or change
-            analysis dimensions before execution.
-    """
-
-    plan_id: str = Field(..., description="Plan ID from POST /v2/agent/plan")
-    modifications: PlanModifications | None = Field(
-        default=None,
-        description="Optional plan modifications before execution",
-    )
-
-    model_config = ConfigDict(populate_by_name=True)
-
-
-# ── Depth Injection (Phase 3) ──────────────────────────────────
-
-
-class DeepenRequest(BaseModel):
-    """Request to drill deeper into a cited source within a research session.
-
-    Used as a standalone request to the deepen endpoint or embedded in
-    ``SessionStepRequest.params`` for the ``deepen`` session action.
-
-    Attributes:
-        ref: Citation reference from the session (e.g., ``ref_2_3``).
-        depth_prompt: Follow-up question or investigation angle.
-        max_sources: Maximum new sources to discover (default 3).
-    """
-
-    ref: str = Field(
-        ...,
-        description="Citation reference from the session (e.g., ref_2_3)",
-    )
-    depth_prompt: str = Field(
-        ...,
-        max_length=10000,
-        description="Follow-up question or investigation angle",
-    )
-    max_sources: int | None = Field(
-        default=None,
-        ge=1,
-        le=10,
-        description="Maximum new sources to discover (default 3)",
-    )
-
-
-class DeepenResponse(BaseModel):
-    """Response from a deepen action.
-
-    Attributes:
-        new_findings: LLM-synthesised findings from the deep-dive.
-        new_sources: List of newly discovered source dicts with
-            ``url`` and ``title``.
-        inserted_at: Citation reference where findings were inserted
-            into the session artifact.
-    """
-
-    success: bool = True
-    new_findings: str = ""
-    new_sources: list[dict] = Field(default_factory=list)
-    inserted_at: str = ""
