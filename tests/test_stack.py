@@ -4375,6 +4375,40 @@ def test_agent_strict_constrain_to_urls_with_schema():
     assert payload["status"] in ("completed", "failed"), (
         f"Expected completed or failed, got {payload['status']}"
     )
+    if payload["status"] == "completed" and payload.get("data"):
+        data = payload["data"]
+        result = data.get("result", "")
+        if not result.startswith("I was unable to find"):
+            # Verify JSON schema conformance
+            try:
+                parsed = json.loads(result)
+                assert "summary" in parsed, (
+                    f"Schema conformance: missing required key 'summary'. "
+                    f"Got keys: {list(parsed.keys())}"
+                )
+                assert isinstance(parsed["summary"], str), (
+                    f"Schema conformance: 'summary' should be string, "
+                    f"got {type(parsed['summary'])}"
+                )
+            except json.JSONDecodeError:
+                pytest.fail(
+                    f"Result not valid JSON despite output_schema: {result[:200]}"
+                )
+            # Verify URL constraint: sources should only contain the
+            # constrained URL when strict_constrain_to_urls is set
+            sources = data.get("sources", [])
+            if sources:
+                constrained_url = TEST_SITE + "/pricing"
+                for source in sources:
+                    source_url = (
+                        source if isinstance(source, str) else source.get("url", "")
+                    )
+                    assert (
+                        constrained_url in source_url or source_url == constrained_url
+                    ), (
+                        f"URL constraint violated: source {source_url} not from "
+                        f"constrained URL {constrained_url}"
+                    )
 
 
 # ── Answer Edge Cases ───────────────────────────────────────────
@@ -4778,8 +4812,10 @@ def test_agent_backward_compat_no_new_fields():
         assert isinstance(data.get("sources"), list) or data.get("sources") is None
         if "source_details" in data:
             assert isinstance(data["source_details"], list)
-        if "sources_compact" in data:
-            assert data["sources_compact"] == [] or data["sources_compact"] is None
+        assert "sources_compact" not in data, (
+            "backward compat: sources_compact should not be present when "
+            "citation_style is not specified (VAL-ERR-009)"
+        )
 
 
 def test_agent_bare_minimum_request():

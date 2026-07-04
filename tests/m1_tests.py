@@ -4,10 +4,14 @@
 # ═══════════════════════════════════════════════════════════════════
 
 import json
+import os
 import time
 
 import httpx
 import pytest
+
+AGENT = os.getenv("AGENT_BASE_URL", "http://localhost:8080")
+TEST_SITE = os.getenv("TEST_SITE_BASE_URL", "http://localhost:8005")
 
 # ── Helpers ─────────────────────────────────────────────────────
 
@@ -16,7 +20,7 @@ def _post_agent(body: dict, timeout: int = 30) -> httpx.Response:
     """POST /v2/agent with rate-limit retry (up to 3 attempts)."""
     last = None
     for _ in range(3):
-        r = httpx.post(AGENT + "/v2/agent", json=body, timeout=timeout)  # noqa: F821
+        r = httpx.post(AGENT + "/v2/agent", json=body, timeout=timeout)
         if r.status_code != 429:
             return r
         last = r
@@ -35,7 +39,7 @@ def _poll_agent_job(job_id: str, timeout_s: int = 90) -> dict:
     """Poll agent job until terminal state. Returns final payload."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        status = httpx.get(AGENT + f"/v2/agent/{job_id}", timeout=120)  # noqa: F821
+        status = httpx.get(AGENT + f"/v2/agent/{job_id}", timeout=120)
         payload = status.json()
         if payload["status"] in ("completed", "failed"):
             return payload
@@ -202,7 +206,7 @@ def test_agent_strict_constrain_to_urls_with_schema():
     r = _post_agent(
         {
             "prompt": "Summarize the content of this page",
-            "urls": [TEST_SITE + "/pricing"],  # noqa: F821
+            "urls": [TEST_SITE + "/pricing"],
             "strict_constrain_to_urls": True,
             "output_schema": schema,
         }
@@ -214,6 +218,40 @@ def test_agent_strict_constrain_to_urls_with_schema():
     assert payload["status"] in ("completed", "failed"), (
         f"Expected completed or failed, got {payload['status']}"
     )
+    if payload["status"] == "completed" and payload.get("data"):
+        data = payload["data"]
+        result = data.get("result", "")
+        if not result.startswith("I was unable to find"):
+            # Verify JSON schema conformance
+            try:
+                parsed = json.loads(result)
+                assert "summary" in parsed, (
+                    f"Schema conformance: missing required key 'summary'. "
+                    f"Got keys: {list(parsed.keys())}"
+                )
+                assert isinstance(parsed["summary"], str), (
+                    f"Schema conformance: 'summary' should be string, "
+                    f"got {type(parsed['summary'])}"
+                )
+            except json.JSONDecodeError:
+                pytest.fail(
+                    f"Result not valid JSON despite output_schema: {result[:200]}"
+                )
+            # Verify URL constraint: sources should only contain the
+            # constrained URL when strict_constrain_to_urls is set
+            sources = data.get("sources", [])
+            if sources:
+                constrained_url = TEST_SITE + "/pricing"
+                for source in sources:
+                    source_url = (
+                        source if isinstance(source, str) else source.get("url", "")
+                    )
+                    assert (
+                        constrained_url in source_url or source_url == constrained_url
+                    ), (
+                        f"URL constraint violated: source {source_url} not from "
+                        f"constrained URL {constrained_url}"
+                    )
 
 
 # ── Answer Edge Cases ───────────────────────────────────────────
@@ -230,7 +268,7 @@ def test_answer_output_schema_with_citations():
         "required": ["summary"],
     }
     r = httpx.post(
-        AGENT + "/v2/answer",  # noqa: F821
+        AGENT + "/v2/answer",
         json={
             "query": "What is the pricing on the fixture site?",
             "num_sources": 3,
@@ -277,7 +315,7 @@ def test_answer_complex_output_schema():
         "required": ["results"],
     }
     r = httpx.post(
-        AGENT + "/v2/answer",  # noqa: F821
+        AGENT + "/v2/answer",
         json={
             "query": "What are the top 2 search engines?",
             "num_sources": 2,
@@ -320,7 +358,7 @@ def test_answer_output_schema_num_sources_one():
         "required": ["fact"],
     }
     r = httpx.post(
-        AGENT + "/v2/answer",  # noqa: F821
+        AGENT + "/v2/answer",
         json={
             "query": "What is the pricing on the fixture site?",
             "num_sources": 1,
@@ -351,7 +389,7 @@ def test_answer_non_json_fallback():
         "required": ["answer"],
     }
     r = httpx.post(
-        AGENT + "/v2/answer",  # noqa: F821
+        AGENT + "/v2/answer",
         json={
             "query": "What is the pricing on the fixture site?",
             "num_sources": 1,
@@ -396,7 +434,7 @@ def test_agent_large_output_schema():
         f"Expected 200, 422, 413, or 429, got {r.status_code}: {r.text[:200]}"
     )
     # Verify server is still healthy
-    health = httpx.get(AGENT + "/health", timeout=10)  # noqa: F821
+    health = httpx.get(AGENT + "/health", timeout=10)
     assert health.status_code == 200
 
 
@@ -438,7 +476,7 @@ def test_agent_self_referencing_ref_schema():
             "Job should reach terminal state"
         )
 
-    health = httpx.get(AGENT + "/health", timeout=10)  # noqa: F821
+    health = httpx.get(AGENT + "/health", timeout=10)
     assert health.status_code == 200
 
 
@@ -465,7 +503,7 @@ def test_agent_unsupported_schema_keywords():
     assert r.status_code in (200, 422, 429), (
         f"Expected 200, 422, or 429, got {r.status_code}: {r.text[:200]}"
     )
-    health = httpx.get(AGENT + "/health", timeout=10)  # noqa: F821
+    health = httpx.get(AGENT + "/health", timeout=10)
     assert health.status_code == 200
 
 
@@ -481,7 +519,7 @@ def test_agent_rate_limit_with_output_schema():
         "required": ["answer"],
     }
     r = httpx.post(
-        AGENT + "/v2/agent",  # noqa: F821
+        AGENT + "/v2/agent",
         json={"prompt": "test rate limit with schema", "output_schema": schema},
         timeout=30,
     )
@@ -512,7 +550,7 @@ def test_agent_llm_health_check_streaming():
         "required": ["answer"],
     }
     r = httpx.post(
-        AGENT + "/v2/agent",  # noqa: F821
+        AGENT + "/v2/agent",
         json={
             "prompt": "test health check",
             "output_schema": schema,
@@ -619,8 +657,10 @@ def test_agent_backward_compat_no_new_fields():
         assert isinstance(data.get("sources"), list) or data.get("sources") is None
         if "source_details" in data:
             assert isinstance(data["source_details"], list)
-        if "sources_compact" in data:
-            assert data["sources_compact"] == [] or data["sources_compact"] is None
+        assert "sources_compact" not in data, (
+            "backward compat: sources_compact should not be present when "
+            "citation_style is not specified (VAL-ERR-009)"
+        )
 
 
 def test_agent_bare_minimum_request():
@@ -669,7 +709,7 @@ def test_cross_endpoint_compact_citations_resolvable():
 
     # Verify citations resolve endpoint works
     resolve_r = httpx.post(
-        AGENT + "/v2/citations/resolve",  # noqa: F821
+        AGENT + "/v2/citations/resolve",
         json={
             "text": "Test [1] marker",
             "sources": [{"url": "https://example.com", "title": "Example"}],
@@ -699,7 +739,7 @@ def test_answer_output_schema_with_compact_citations():
         },
     }
     r = httpx.post(
-        AGENT + "/v2/answer",  # noqa: F821
+        AGENT + "/v2/answer",
         json={
             "query": "what are the key features of Django and Flask?",
             "output_schema": schema,
@@ -737,7 +777,7 @@ def test_cross_endpoint_citation_style_consistency():
 
     # Answer with compact citations
     answer_r = httpx.post(
-        AGENT + "/v2/answer",  # noqa: F821
+        AGENT + "/v2/answer",
         json={
             "query": "What is a REST API?",
             "citation_style": "compact",
@@ -759,7 +799,7 @@ def test_cross_endpoint_citation_style_consistency():
 
     # Citations/resolve with compact style
     resolve_r = httpx.post(
-        AGENT + "/v2/citations/resolve",  # noqa: F821
+        AGENT + "/v2/citations/resolve",
         json={
             "text": "See [1]",
             "sources": [{"url": "https://example.com", "title": "Example"}],
@@ -772,7 +812,7 @@ def test_cross_endpoint_citation_style_consistency():
 
     # Citations/resolve with inline style
     inline_r = httpx.post(
-        AGENT + "/v2/citations/resolve",  # noqa: F821
+        AGENT + "/v2/citations/resolve",
         json={
             "text": "See [1]",
             "sources": [{"url": "https://example.com", "title": "Example"}],
@@ -804,7 +844,7 @@ def test_agent_invalid_output_schema_graceful_failure():
     assert "id" in r2.json()
 
     # Server health check
-    health = httpx.get(AGENT + "/health", timeout=10)  # noqa: F821
+    health = httpx.get(AGENT + "/health", timeout=10)
     assert health.status_code == 200
 
 
