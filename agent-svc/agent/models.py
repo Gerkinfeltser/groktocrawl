@@ -475,6 +475,10 @@ class AgentRequest(BaseModel):
         default=CitationStyle.inline,
         description="Citation formatting style: inline, compact, footnote, or none",
     )
+    force_fresh: bool = Field(
+        default=False,
+        description="When True, bypass the research memory cache and run fresh research pipeline",
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 

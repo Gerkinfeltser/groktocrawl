@@ -4,6 +4,7 @@ Targets Firecrawl v2 API compatibility where possible.
 """
 
 import logging
+import os
 from datetime import UTC
 from typing import Any
 
@@ -135,6 +136,35 @@ def _resolve_output_schema(
     return effective
 
 
+def _derive_user_id(request: Request) -> str | None:
+    """Derive a user identifier from the request for cache scoping.
+
+    When RESEARCH_MEMORY_SCOPE=per_user, the user_id is derived from
+    the ``X-API-Key`` or ``Authorization: Bearer`` header.  When no
+    API key is present, the client IP is used as a fallback.
+
+    Returns ``None`` for global scope (no per-user isolation).
+    """
+    import hashlib
+    import os as _os
+
+    scope = _os.environ.get("RESEARCH_MEMORY_SCOPE", "global")
+    if scope != "per_user":
+        return None
+
+    # Try API key first
+    api_key = (
+        request.headers.get("X-API-Key", "")
+        or request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    )
+    if api_key:
+        # Hash the key for privacy — we only need a stable identifier
+        return hashlib.sha256(api_key.encode()).hexdigest()[:16]
+
+    # Fall back to client IP
+    return _get_client_ip(request)
+
+
 @router.get("/v2/activity", response_model=ActivityResponse)
 async def list_activity(request: Request) -> ActivityResponse:
     """List all active/processing jobs across all job types.
@@ -215,7 +245,100 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
         {"status": "allowed"}
     )
 
-    # Streaming path — run inline, return SSE
+    # ── Research Memory: check cache before LLM health check ──
+    # If cache hit and streaming, we can return immediately without LLM.
+    user_id = _derive_user_id(request)
+    cache_hit_data: dict | None = None
+    if not body.force_fresh:
+        try:
+            from .research_memory import ResearchMemory
+            from .settings import load_settings
+
+            settings = load_settings()
+            redis_url = (
+                f"redis://{settings.valkey_host}:{settings.valkey_port}"
+                f"/{settings.valkey_db}"
+            )
+            memory = ResearchMemory(
+                redis_url=redis_url,
+                semantic_url=settings.semantic_url,
+            )
+            memory_scope = os.environ.get("RESEARCH_MEMORY_SCOPE", "global")
+            cache_result = await memory.query(
+                prompt=body.prompt,
+                user_id=user_id if memory_scope == "per_user" else None,
+            )
+            if cache_result["hit"]:
+                freshness = cache_result.get("freshness", "stale")
+                if freshness == "fresh" or freshness == "aging":
+                    cache_hit_data = cache_result
+            # stale — fall through to normal pipeline
+        except Exception:
+            logger.warning(
+                "Streaming agent cache lookup failed — proceeding with normal pipeline",
+                exc_info=True,
+            )
+
+    # ── Cache HIT + streaming: return cached artifact as SSE ─────
+    if cache_hit_data is not None and body.stream:
+        from fastapi.responses import StreamingResponse
+
+        async def cache_hit_stream() -> Any:
+            import json
+            import time as _time
+
+            stream_start = _time.monotonic()
+            entry = cache_hit_data["artifact"]
+            artifact_text = entry.get("artifact", "")
+            sources = entry.get("sources", [])
+
+            # Apply citation style
+            from .research import _apply_citation_style
+
+            transformed_text, _ = _apply_citation_style(
+                artifact_text, sources, body.citation_style
+            )
+
+            # Replay artifact as token events
+            chunk_size = 8
+            for i in range(0, len(transformed_text), chunk_size):
+                chunk = transformed_text[i : i + chunk_size]
+                yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
+
+            latency_ms = int((_time.monotonic() - stream_start) * 1000)
+            done_payload: dict = {
+                "type": "done",
+                "result": transformed_text,
+                "sources": [s.get("url", "") for s in sources],
+                "latency_ms": latency_ms,
+                "from_cache": True,
+                "memory_id": cache_hit_data.get("memory_id", ""),
+                "freshness": cache_hit_data.get("freshness", "fresh"),
+                "similarity": cache_hit_data.get("similarity", 0),
+                "citation_style": body.citation_style.value,
+            }
+            if body.citation_style == CitationStyle.compact:
+                compact_srcs = []
+                for i, src in enumerate(sources, start=1):
+                    compact_srcs.append({"index": i, "url": src.get("url", "")})
+                done_payload["sources_compact"] = compact_srcs
+                done_payload["source_details"] = []
+            else:
+                done_payload["source_details"] = sources
+            yield f"data: {json.dumps(done_payload)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        headers = {
+            "X-Search-Budget": f"{max_searches}/{max_searches}",
+            "X-Search-Rate-Remaining": f"{rate_remaining}/{rate_limiter.limit}",
+        }
+        return StreamingResponse(
+            cache_hit_stream(),
+            media_type="text/event-stream",
+            headers=headers,
+        )
+
+    # Streaming path — run inline, return SSE (cache miss or force_fresh)
     if body.stream:
         # Pre-flight LLM health check — fail fast before opening the stream
         from .llm import LLMClient
@@ -244,6 +367,8 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
         from fastapi.responses import StreamingResponse
 
         async def event_stream() -> Any:
+            import json
+
             from .research import run_research_stream
 
             async for event in run_research_stream(
@@ -260,8 +385,6 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
                 include_images=body.include_images,
                 citation_style=body.citation_style,
             ):
-                import json
-
                 if event["type"] == "sources_pending":
                     yield f"data: {json.dumps({'type': 'sources_pending', 'sources': event['sources']})}\n\n"
                 elif event["type"] == "source_scraped":
@@ -333,6 +456,7 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
 
     from .worker import _process_agent_async
 
+    user_id = _derive_user_id(request)
     request.app.state.task_tracker.create_background_task(
         _process_agent_async(
             job_id=job_id,
@@ -348,6 +472,8 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
             requested_model=body.model,
             include_images=body.include_images,
             citation_style=body.citation_style,
+            force_fresh=body.force_fresh,
+            user_id=user_id,
         )
     )
 

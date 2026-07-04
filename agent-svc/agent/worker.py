@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Callable, Coroutine
 from typing import Any
@@ -80,6 +81,8 @@ async def _process_agent_async(
     requested_model: str | None = None,
     include_images: bool = False,
     citation_style: Any = None,
+    force_fresh: bool = False,
+    user_id: str | None = None,
 ) -> None:
     settings = _get_worker_settings()
     redis_url = (
@@ -94,58 +97,90 @@ async def _process_agent_async(
         else CitationStyle.inline
     )
 
-    # ── Phase 4: Research Memory — check cache before pipeline ──────
-    stale_cache_hit: dict | None = None
-    try:
-        from .research_memory import ResearchMemory
+    # ── Research Memory scope ─────────────────────────────────────
+    memory_scope = os.environ.get("RESEARCH_MEMORY_SCOPE", "global")
+    if memory_scope == "per_user" and user_id is None:
+        user_id = "anonymous"
 
-        memory = ResearchMemory(
-            redis_url=redis_url,
-            semantic_url=settings.semantic_url,
-        )
-        cache_result = await memory.query(prompt=prompt)
-        if cache_result["hit"]:
-            freshness = cache_result.get("freshness", "stale")
-            if freshness == "fresh" or freshness == "aging":
-                # Cache hit is fresh or aging — return cached result directly
-                logger.info(
-                    "Research memory %s hit for agent %s — returning cached result",
-                    freshness,
-                    job_id,
-                )
-                entry = cache_result["artifact"]
-                cached_payload = {
-                    "result": entry.get("artifact", ""),
-                    "sources": entry.get("sources", []),
-                    "source_details": entry.get("sources", []),
-                    "from_cache": True,
-                    "freshness": freshness,
-                    "similarity": cache_result.get("similarity", 0),
-                    "memory_id": cache_result.get("memory_id", ""),
-                }
-                store.complete_job(job_id, cached_payload)
-                await deliver_webhook(
-                    webhook_config, "completed", job_id, cached_payload
-                )
-                return
+    # ── Research Memory — check cache before pipeline ──────────────
+    stale_cache_hit: dict | None = None
+    if not force_fresh:
+        try:
+            from .research_memory import ResearchMemory
+
+            memory = ResearchMemory(
+                redis_url=redis_url,
+                semantic_url=settings.semantic_url,
+            )
+            cache_result = await memory.query(
+                prompt=prompt,
+                user_id=user_id if memory_scope == "per_user" else None,
+            )
+            if cache_result["hit"]:
+                freshness = cache_result.get("freshness", "stale")
+                if freshness == "fresh" or freshness == "aging":
+                    # Cache hit is fresh or aging — return cached result directly
+                    logger.info(
+                        "Research memory %s hit for agent %s — returning cached result",
+                        freshness,
+                        job_id,
+                    )
+                    entry = cache_result["artifact"]
+                    # Apply citation style to cached artifact if needed
+                    sources = entry.get("sources", [])
+                    result_text = entry.get("artifact", "")
+                    from .research import _apply_citation_style
+
+                    result_text, _ = _apply_citation_style(result_text, sources, cs)
+
+                    cached_payload: dict[str, Any] = {
+                        "result": result_text,
+                        "sources": [s.get("url", "") for s in sources],
+                        "source_details": sources,
+                        "from_cache": True,
+                        "freshness": freshness,
+                        "similarity": cache_result.get("similarity", 0),
+                        "memory_id": cache_result.get("memory_id", ""),
+                    }
+                    # Apply compact citation transformation
+                    if cs == CitationStyle.compact:
+                        compact_sources = []
+                        for i, src in enumerate(sources, start=1):
+                            compact_sources.append(
+                                {
+                                    "index": i,
+                                    "url": src.get("url", ""),
+                                }
+                            )
+                        cached_payload["sources_compact"] = compact_sources
+                        cached_payload["source_details"] = []
+                    store.complete_job(job_id, cached_payload)
+                    await deliver_webhook(
+                        webhook_config, "completed", job_id, cached_payload
+                    )
+                    return
+                else:
+                    # Stale hit — run normal pipeline but note cached version
+                    logger.info(
+                        "Research memory %s hit for agent %s — running fresh research "
+                        "(cached version exists)",
+                        freshness,
+                        job_id,
+                    )
+                    stale_cache_hit = cache_result
             else:
-                # Stale hit — run normal pipeline but note cached version
-                logger.info(
-                    "Research memory %s hit for agent %s — running fresh research "
-                    "(cached version exists, age: %.1fh)",
-                    freshness,
-                    job_id,
-                    0,
-                )
-                stale_cache_hit = cache_result
-        else:
-            logger.debug("Research memory miss for agent %s", job_id)
-    except Exception:
-        logger.warning(
-            "Research memory lookup failed for agent %s — proceeding with "
-            "normal pipeline",
+                logger.debug("Research memory miss for agent %s", job_id)
+        except Exception:
+            logger.warning(
+                "Research memory lookup failed for agent %s — proceeding with "
+                "normal pipeline",
+                job_id,
+                exc_info=True,
+            )
+    else:
+        logger.info(
+            "force_fresh=True for agent %s — bypassing research memory cache",
             job_id,
-            exc_info=True,
         )
 
     async def work_fn() -> dict[str, Any]:
@@ -186,7 +221,7 @@ async def _process_agent_async(
             # Drop the full source_details to save payload size
             result["source_details"] = []
 
-        # ── Phase 4: Store fresh result in research memory ──────
+        # ── Store fresh result in research memory ──────────────────
         try:
             from .research_memory import ResearchMemory
 
@@ -195,7 +230,10 @@ async def _process_agent_async(
                 semantic_url=settings.semantic_url,
             )
             answer = result.get("result", "")
-            sources = result.get("source_details", result.get("sources", []))
+            # Use source_details if available (richer), fall back to sources
+            store_sources = result.get("source_details", result.get("sources", []))
+            if not store_sources:
+                store_sources = result.get("sources", [])
             metadata: dict[str, Any] = {
                 "model": llm_model,
                 "citation_style": cs.value,
@@ -205,22 +243,25 @@ async def _process_agent_async(
             if hasattr(result, "get"):
                 metadata["latency_ms"] = result.get("latency_ms", 0)
 
+            memory_user_id = user_id if memory_scope == "per_user" else None
             artifact_id = await memory.store(
                 prompt=prompt,
                 artifact=answer,
-                sources=sources,
+                sources=store_sources,
                 model=llm_model,
+                user_id=memory_user_id,
                 metadata=metadata,
             )
             logger.info(
-                "Stored research memory artifact %s for agent %s",
+                "Stored research memory artifact %s for agent %s (scope=%s)",
                 artifact_id,
                 job_id,
+                memory_scope,
             )
             result["research_memory_id"] = artifact_id
         except Exception:
             logger.warning(
-                "Failed to store research memory for agent %s",
+                "Failed to store research memory for agent %s (service may be down)",
                 job_id,
                 exc_info=True,
             )
