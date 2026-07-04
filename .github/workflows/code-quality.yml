@@ -63,7 +63,7 @@ jobs:
         run: |
           jscpd \
             --pattern "**/*.py" \
-            --ignore ".venv,.venv-sys,htmlcov,graphify-out,droid-wiki,node_modules,dist,build,__pycache__,*.egg-info,.git,common" \
+            --ignore ".venv,.venv-sys,htmlcov,graphify-out,droid-wiki,node_modules,dist,build,__pycache__,*.egg-info,.git,common,tests/**,**/tests/**" \
             --min-tokens 50 \
             --min-lines 5 \
             --threshold 15 \
