@@ -13,6 +13,7 @@ from fastapi import APIRouter, Request, Response
 
 from .exceptions import (
     BrowserError,
+    ConflictError,
     InvalidRequestError,
     NotFoundError,
     ScrapeError,
@@ -2138,7 +2139,12 @@ async def session_step(
             result=result,
         )
     except ValueError as e:
-        raise NotFoundError(detail=str(e))
+        msg = str(e)
+        if "not found" in msg.lower():
+            raise NotFoundError(detail=msg)
+        if "currently executing" in msg.lower():
+            raise ConflictError(detail=msg)
+        raise InvalidRequestError(detail=msg)
 
 
 @router.get("/v2/session/{session_id}", response_model=SessionStatusResponse)

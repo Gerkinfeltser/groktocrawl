@@ -58,6 +58,12 @@ class SearchError(GroktoCrawlError):
     detail = "Search failed"
 
 
+class ConflictError(GroktoCrawlError):
+    status_code = 409
+    error_code = "CONFLICT"
+    detail = "Resource conflict"
+
+
 class RateLimitedError(GroktoCrawlError):
     status_code = 429
     error_code = "RATE_LIMITED"

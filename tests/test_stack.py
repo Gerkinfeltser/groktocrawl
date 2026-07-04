@@ -6877,7 +6877,12 @@ def test_session_step_query_on_context_val_ses_014():
 
 
 def test_session_step_query_empty_fails_val_ses_015():
-    """VAL-SES-015: Query step on empty session returns 404 error."""
+    """VAL-SES-015: Query step on empty session returns 400 (invalid request).
+
+    The session exists but has no accumulated context — this is a client
+    error (the session is valid, but the step is invalid for the current
+    state), so it should return 400, not 404.
+    """
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
     sid = r.json()["sessionId"]
 
@@ -6889,7 +6894,7 @@ def test_session_step_query_empty_fails_val_ses_015():
         },
         timeout=30,
     )
-    assert step.status_code == 404, f"Expected 404, got {step.status_code}: {step.text}"
+    assert step.status_code == 400, f"Expected 400, got {step.status_code}: {step.text}"
     data = step.json()
     assert "no accumulated context" in data.get("error", "").lower()
 
@@ -9034,6 +9039,51 @@ def test_session_malformed_id_export_val_ses_010():
         timeout=30,
     )
     assert r.status_code == 404
+
+
+def test_session_step_lock_contention_409():
+    """Lock contention on session step returns 409 Conflict.
+
+    Manually sets the session lock in Valkey to simulate another step
+    holding the lock, then verifies the API returns 409 Conflict.
+
+    This test takes ~30 seconds because the session step handler's
+    lock acquisition has a 30-second backoff timeout.  The lock key
+    is set with a 35-second TTL to outlast the backoff, causing the
+    acquire_lock to return False and the handler to return 409.
+    """
+    import redis as redis_mod
+
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["sessionId"]
+
+    # Acquire the session lock directly in Valkey, bypassing the API.
+    # This simulates a concurrent step that still holds the lock.
+    valkey = redis_mod.Redis(host="valkey", port=6379, db=0, socket_connect_timeout=5)
+    lock_key = f"session:{sid}:lock"
+    try:
+        valkey.set(lock_key, "test-lock-contention", ex=35)
+
+        # Step should fail because the lock is already held.
+        # The acquire_lock loop backs off for 30 seconds before giving up.
+        step = httpx.post(
+            AGENT + f"/v2/session/{sid}/step",
+            json={"action": "search", "params": {"query": "test", "limit": 1}},
+            timeout=40,
+        )
+        assert step.status_code == 409, (
+            f"Expected 409 Conflict for lock contention, "
+            f"got {step.status_code}: {step.text}"
+        )
+        data = step.json()
+        assert "currently executing" in data.get("error", "").lower(), (
+            f"Error should mention lock contention: {data}"
+        )
+    finally:
+        valkey.delete(lock_key)
+        valkey.close()
+        # Clean up the session
+        httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
 
 
 if __name__ == "__main__":
