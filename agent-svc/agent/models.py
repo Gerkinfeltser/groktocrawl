@@ -1521,3 +1521,94 @@ class DeepenResponse(BaseModel):
     new_findings: str = ""
     new_sources: list[dict] = Field(default_factory=list)
     inserted_at: str = ""
+
+
+# ── Research Memory (Phase 4) ──────────────────────────────────
+
+
+class ResearchMemoryQueryRequest(BaseModel):
+    """Request to search the research memory for a semantically similar
+    cached artifact.
+
+    Attributes:
+        question: The research question to search for.  Embedded via
+            BAAI/bge-m3 and matched against stored artifacts by cosine
+            similarity.
+        max_age_hours: Maximum age in hours of artifacts to consider.
+            Default 72 (3 days).  Older artifacts are skipped.
+    """
+
+    question: str = Field(
+        ...,
+        max_length=100000,
+        description="Research question to search for in memory",
+    )
+    max_age_hours: int | None = Field(
+        default=None,
+        ge=1,
+        le=720,
+        description="Maximum age in hours of artifacts to consider (default 72)",
+    )
+
+
+class ResearchMemoryQueryResponse(BaseModel):
+    """Response from a research memory query.
+
+    Attributes:
+        hit: Whether a semantically similar artifact was found.
+        artifact: The full artifact dict if ``hit`` is True, with keys
+            ``question``, ``answer``, ``sources``, ``created_at``,
+            and ``metadata``.
+        age_hours: Age of the matched artifact in hours (``None`` on miss).
+        freshness: Freshness classification: ``"fresh"``, ``"aging"``,
+            or ``"stale"`` (``None`` on miss).
+    """
+
+    hit: bool = False
+    artifact: dict | None = None
+    age_hours: float | None = None
+    freshness: str | None = None
+
+
+class ResearchMemoryStoreRequest(BaseModel):
+    """Request to store a research artifact in memory.
+
+    Attributes:
+        question: The original research question (used for semantic
+            indexing).
+        answer: The LLM-synthesised answer (markdown).
+        sources: List of source dicts, each with at minimum ``url``
+            and ``title``.
+        metadata: Optional dict with extra context (model used,
+            user context, etc.).
+    """
+
+    question: str = Field(
+        ...,
+        max_length=100000,
+        description="Original research question",
+    )
+    answer: str = Field(
+        ...,
+        max_length=500000,
+        description="LLM-synthesised answer",
+    )
+    sources: list[dict] = Field(
+        ...,
+        description="Source documents with url and title",
+    )
+    metadata: dict | None = Field(
+        default=None,
+        description="Optional extra context",
+    )
+
+
+class ResearchMemoryStoreResponse(BaseModel):
+    """Response from storing a research artifact in memory.
+
+    Attributes:
+        artifact_id: UUID v4 identifier for the stored artifact.
+    """
+
+    artifact_id: str = ""
+

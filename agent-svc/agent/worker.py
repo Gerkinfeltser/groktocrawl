@@ -82,9 +82,8 @@ async def _process_agent_async(
     citation_style: Any = None,
 ) -> None:
     settings = _get_worker_settings()
-    store = JobStore(
-        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
-    )
+    redis_url = f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    store = JobStore(redis_url)
     from .models import CitationStyle
 
     cs = (
@@ -92,6 +91,55 @@ async def _process_agent_async(
         if isinstance(citation_style, CitationStyle)
         else CitationStyle.inline
     )
+
+    # ── Phase 4: Research Memory — check cache before pipeline ──────
+    stale_cache_hit: dict | None = None
+    try:
+        from .research_memory import ResearchMemory
+
+        memory = ResearchMemory(redis_url=redis_url)
+        cache_result = memory.query(question=prompt)
+        if cache_result["hit"]:
+            freshness = cache_result.get("freshness", "stale")
+            if freshness == "fresh":
+                # Cache hit is fresh — return cached result directly
+                logger.info(
+                    "Research memory fresh hit for agent %s — returning cached result",
+                    job_id,
+                )
+                artifact = cache_result["artifact"]
+                cached_payload = {
+                    "result": artifact.get("answer", ""),
+                    "sources": artifact.get("sources", []),
+                    "source_details": artifact.get("sources", []),
+                    "from_cache": True,
+                    "cache_freshness": freshness,
+                    "cache_age_hours": cache_result.get("age_hours", 0),
+                }
+                store.complete_job(job_id, cached_payload)
+                await deliver_webhook(
+                    webhook_config, "completed", job_id, cached_payload
+                )
+                return
+            else:
+                # Stale hit — run normal pipeline but note cached version
+                logger.info(
+                    "Research memory %s hit for agent %s — running fresh research "
+                    "(cached version exists, age: %.1fh)",
+                    freshness,
+                    job_id,
+                    cache_result.get("age_hours", 0),
+                )
+                stale_cache_hit = cache_result
+        else:
+            logger.debug("Research memory miss for agent %s", job_id)
+    except Exception:
+        logger.warning(
+            "Research memory lookup failed for agent %s — proceeding with "
+            "normal pipeline",
+            job_id,
+            exc_info=True,
+        )
 
     async def work_fn() -> dict[str, Any]:
         result = await run_research(
@@ -124,6 +172,48 @@ async def _process_agent_async(
             result["sources_compact"] = compact_sources
             # Drop the full source_details to save payload size
             result["source_details"] = []
+
+        # ── Phase 4: Store fresh result in research memory ──────
+        try:
+            from .research_memory import ResearchMemory
+
+            memory = ResearchMemory(redis_url=redis_url)
+            answer = result.get("result", "")
+            sources = result.get("source_details", result.get("sources", []))
+            metadata: dict[str, Any] = {
+                "model": llm_model,
+                "citation_style": cs.value,
+            }
+            if requested_model and requested_model != "default":
+                metadata["requested_model"] = requested_model
+            if hasattr(result, "get"):
+                metadata["latency_ms"] = result.get("latency_ms", 0)
+
+            artifact_id = memory.store(
+                question=prompt,
+                answer=answer,
+                sources=sources,
+                metadata=metadata,
+            )
+            logger.info(
+                "Stored research memory artifact %s for agent %s",
+                artifact_id,
+                job_id,
+            )
+            result["research_memory_id"] = artifact_id
+        except Exception:
+            logger.warning(
+                "Failed to store research memory for agent %s",
+                job_id,
+                exc_info=True,
+            )
+
+        # Note stale cache existence if applicable
+        if stale_cache_hit:
+            result["cached_version_exists"] = True
+            result["cached_version_age_hours"] = stale_cache_hit.get("age_hours", 0)
+            result["cached_version_freshness"] = stale_cache_hit.get("freshness", "stale")
+
         return result
 
     await _run_job_with_observability(job_id, "agent", store, webhook_config, work_fn)

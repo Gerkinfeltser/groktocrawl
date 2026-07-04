@@ -62,6 +62,10 @@ from .models import (
     MapRequest,
     MapResponse,
     MonitorCreateRequest,
+    ResearchMemoryQueryRequest,
+    ResearchMemoryQueryResponse,
+    ResearchMemoryStoreRequest,
+    ResearchMemoryStoreResponse,
     MonitorDeleteResponse,
     MonitorListResponse,
     MonitorResponse,
@@ -2527,6 +2531,108 @@ async def get_llmstxt_status(request: Request, job_id: str) -> LLMsTextStatusRes
         error=job.get("error"),
         expires_at=job.get("completed_at") or job.get("created_at"),
     )
+
+
+# ── Research Memory (Phase 4) ──────────────────────────────────
+
+
+@router.post(
+    "/v2/research-memory/query",
+    response_model=ResearchMemoryQueryResponse,
+)
+async def research_memory_query(
+    request: Request, body: ResearchMemoryQueryRequest
+) -> ResearchMemoryQueryResponse:
+    """Search research memory for a semantically similar cached artifact.
+
+    Embeds the question and scans stored artifacts for cosine-similarity
+    matches above the configured threshold (default 0.85).  Returns the
+    best match with freshness classification.
+
+    Args:
+        body: Contains ``question`` (the text to search for) and
+            optional ``max_age_hours`` (default 72).
+
+    Returns:
+        ``ResearchMemoryQueryResponse`` with ``hit``, ``artifact``,
+        ``age_hours``, and ``freshness`` fields.
+    """
+    from .research_memory import ResearchMemory
+    from .settings import load_settings
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    memory = ResearchMemory(redis_url=redis_url)
+    max_age = body.max_age_hours if body.max_age_hours is not None else 72
+    result = memory.query(question=body.question, max_age_hours=max_age)
+    return ResearchMemoryQueryResponse(**result)
+
+
+@router.post(
+    "/v2/research-memory/store",
+    response_model=ResearchMemoryStoreResponse,
+)
+async def research_memory_store(
+    request: Request, body: ResearchMemoryStoreRequest
+) -> ResearchMemoryStoreResponse:
+    """Store a research artifact in the cross-session memory.
+
+    The question is embedded via BAAI/bge-m3 and the full artifact
+    (question, answer, sources, embedding, metadata) is stored in Valkey
+    with a 72-hour TTL.
+
+    Args:
+        body: Contains ``question``, ``answer``, ``sources``, and
+            optional ``metadata``.
+
+    Returns:
+        ``ResearchMemoryStoreResponse`` with the new ``artifact_id``.
+    """
+    from .research_memory import ResearchMemory
+    from .settings import load_settings
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    memory = ResearchMemory(redis_url=redis_url)
+    artifact_id = memory.store(
+        question=body.question,
+        answer=body.answer,
+        sources=body.sources,
+        metadata=body.metadata,
+    )
+    return ResearchMemoryStoreResponse(artifact_id=artifact_id)
+
+
+@router.delete("/v2/research-memory/{artifact_id}")
+async def research_memory_delete(
+    request: Request, artifact_id: str
+) -> dict:
+    """Delete a research memory artifact by ID.
+
+    Args:
+        artifact_id: The artifact ID returned by the store endpoint.
+
+    Returns:
+        ``{"success": true}`` if deleted, ``{"success": false}`` if
+        the artifact was not found.
+    """
+    from .research_memory import ResearchMemory
+    from .settings import load_settings
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    memory = ResearchMemory(redis_url=redis_url)
+    deleted = memory.delete(artifact_id)
+    return {"success": deleted}
 
 
 async def _index_scrape(url: str, title: str, content: str, request: Request) -> None:
