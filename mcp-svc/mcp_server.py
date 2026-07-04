@@ -57,18 +57,22 @@ def _json_text(data: dict[str, Any]) -> str:
 def _resp(data: dict[str, Any]) -> str:
     """Convert a client result dict to a JSON string response.
 
-    Always returns valid JSON.  When the result contains an ``error``
-    key, wraps it in a ``{"success": false, "error": "...", ...}``
+    Always returns valid JSON.  When the result contains a truthy
+    ``error`` value (non-None, non-empty) and ``success`` is not
+    explicitly True, wraps it in a ``{"success": false, ...}``
     envelope so that MCP clients can parse it reliably.
     """
-    if isinstance(data, dict) and "error" in data:
-        error_obj: dict[str, Any] = {
-            "success": False,
-            "error": str(data["error"]),
-        }
-        if "status_code" in data:
-            error_obj["status_code"] = data["status_code"]
-        return _json_text(error_obj)
+    if isinstance(data, dict):
+        error_val = data.get("error")
+        success_val = data.get("success")
+        if error_val and success_val is not True:
+            error_obj: dict[str, Any] = {
+                "success": False,
+                "error": str(error_val),
+            }
+            if "status_code" in data:
+                error_obj["status_code"] = data["status_code"]
+            return _json_text(error_obj)
     return _json_text(data)
 
 
@@ -78,9 +82,19 @@ def _ensure_success(data: dict[str, Any]) -> None:
     FastMCP converts ``ToolError`` to a response with ``isError: true``
     so that MCP clients can programmatically detect 4xx/5xx failures
     from the upstream agent-svc.
+
+    Important: agent-svc includes ``"error": null`` in successful
+    responses, so we must only treat truthy error values (non-None,
+    non-empty) as actual errors.  Additionally, an explicit
+    ``"success": true`` flag overrides any error key.
     """
-    if isinstance(data, dict) and "error" in data:
-        raise ToolError(_resp(data))
+    if isinstance(data, dict):
+        error_val = data.get("error")
+        success_val = data.get("success")
+        # Only treat as error when there's a truthy error value AND
+        # success is not explicitly True.
+        if error_val and success_val is not True:
+            raise ToolError(_resp(data))
 
 
 # ── Tools 1–2: scrape, search (read-only) ─────────────────────────

@@ -639,6 +639,84 @@ class TestErrorHandling:
         assert data.get("success") is True
         assert "data" in data
 
+    async def test_error_null_not_treated_as_error(self, monkeypatch):
+        """Responses with ``error: null`` and ``success: true`` are NOT errors.
+
+        The agent-svc includes ``"error": null`` in successful scrape
+        responses.  The MCP server must ignore null/empty error values
+        and NOT raise ToolError.  This ensures tools like scrape,
+        get_crawl_status, and get_crawl_errors return proper JSON
+        instead of isError:true for valid responses.
+        """
+        _patch_client(
+            monkeypatch,
+            {
+                "scrape": {
+                    "success": True,
+                    "data": {"markdown": "# Hello"},
+                    "error": None,
+                },
+                "get_crawl_status": {
+                    "success": True,
+                    "status": "completed",
+                    "completed": 10,
+                    "total": 10,
+                    "data": [],
+                    "error": None,
+                },
+                "get_crawl_errors": {
+                    "success": True,
+                    "errors": [],
+                    "robots_blocked": [],
+                    "error": None,
+                },
+            },
+        )
+        # scrape with error:null should succeed (no ToolError → no isError)
+        result = await mcp.call_tool("scrape", {"url": "https://example.com"})
+        text = _text(result)
+        data = json.loads(text)
+        assert data.get("success") is True
+        assert "data" in data
+        # error:null is present in the raw agent-svc response but
+        # _ensure_success does NOT raise ToolError — the result is
+        # valid JSON with the expected data fields
+
+        # get_crawl_status with error:null should succeed
+        result = await mcp.call_tool("get_crawl_status", {"job_id": "job-1"})
+        text = _text(result)
+        data = json.loads(text)
+        assert data.get("success") is True
+        assert data.get("status") == "completed"
+        assert data.get("data") == []
+
+        # get_crawl_errors with error:null should succeed
+        result = await mcp.call_tool("get_crawl_errors", {"job_id": "job-1"})
+        text = _text(result)
+        data = json.loads(text)
+        assert data.get("success") is True
+        assert "errors" in data
+        assert data.get("errors") == []
+
+    async def test_error_empty_string_not_treated_as_error(self, monkeypatch):
+        """Responses with empty error string are NOT treated as errors.
+
+        An empty error string ``""`` is falsy and should not trigger
+        ToolError/isError:true.  The response should contain valid
+        data with success:true.
+        """
+        _patch_client(
+            monkeypatch,
+            {
+                "scrape": {"success": True, "data": {"markdown": "ok"}, "error": ""},
+            },
+        )
+        result = await mcp.call_tool("scrape", {"url": "https://example.com"})
+        text = _text(result)
+        data = json.loads(text)
+        assert data.get("success") is True
+        assert "data" in data
+
 
 # ── Session Consistency (VAL-MCP-B04) ─────────────────────────────
 
