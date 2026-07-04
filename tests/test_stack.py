@@ -10610,14 +10610,26 @@ def test_cross_plan_agent_structured_output_val_cross_005():
         source_urls = set()
 
     # Step 2: Answer on similar topic — should show cross-endpoint overlap
-    answer_r = httpx.post(
-        AGENT + "/v2/answer",
-        json={
-            "query": "what are the tradeoffs between FastAPI and Flask?",
-            "num_sources": 2,
-        },
-        timeout=180,
-    )
+    # Use rate-limit retry (up to 3 attempts with 15s backoff) since
+    # the agent call above may have consumed rate-limit budget
+    answer_r = None
+    for _attempt in range(3):
+        answer_r = httpx.post(
+            AGENT + "/v2/answer",
+            json={
+                "query": "what are the tradeoffs between FastAPI and Flask?",
+                "num_sources": 2,
+            },
+            timeout=180,
+        )
+        if answer_r.status_code != 429:
+            break
+        time.sleep(15)
+
+    if answer_r.status_code == 429:
+        pytest.skip(
+            "Answer endpoint rate-limited — cannot verify cross-endpoint overlap"
+        )
     assert answer_r.status_code == 200, f"Answer failed: {answer_r.text}"
     answer_data = answer_r.json()
     assert answer_data["success"] is True
