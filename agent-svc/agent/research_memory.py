@@ -567,3 +567,94 @@ class ResearchMemory:
             logger.warning("Research memory sweep failed", exc_info=True)
 
         return removed
+
+    # ── Batch operations ────────────────────────────────────────
+
+    async def batch_query(
+        self,
+        queries: list[str],
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search for cached artifacts for multiple queries.
+
+        Each query is independently embedded and searched.  Results are
+        returned in the same order as the input queries.
+
+        Args:
+            queries: List of research question strings.
+            user_id: Optional user scope for filtering.
+
+        Returns:
+            List of result dicts, one per input query.  Each dict has:
+            - ``hit`` (bool)
+            - ``artifact`` (dict | None)
+            - ``similarity`` (float | None)
+            - ``freshness`` (str | None)
+            - ``memory_id`` (str | None)
+        """
+        import asyncio as _asyncio
+
+        async def _query_one(q: str) -> dict[str, Any]:
+            try:
+                return await self.query(prompt=q, user_id=user_id)
+            except Exception:
+                logger.warning(
+                    "Batch query failed for %r",
+                    q[:80],
+                    exc_info=True,
+                )
+                return {"hit": False}
+
+        # Run queries concurrently
+        tasks = [_query_one(q) for q in queries]
+        results: Any = await _asyncio.gather(*tasks)
+        return list(results)  # type: ignore[arg-type]
+
+    async def batch_store(
+        self,
+        entries: list[dict[str, Any]],
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Store multiple research artifacts independently.
+
+        Each entry is stored independently.  If one fails (e.g. embedding
+        failure), the others still succeed.  Per-entry status is returned.
+
+        Args:
+            entries: List of dicts, each with:
+                - ``query`` (str) — the research question
+                - ``artifact`` (str) — the LLM answer
+                - ``sources`` (list[dict]) — source documents
+                - ``model`` (str, optional) — LLM model name
+            user_id: Optional user scope.
+
+        Returns:
+            List of result dicts, one per input entry.  Each dict has:
+            - ``success`` (bool)
+            - ``memory_id`` (str | None)
+            - ``error`` (str | None) — present only on failure
+        """
+        import asyncio as _asyncio
+
+        async def _store_one(entry: dict[str, Any]) -> dict[str, Any]:
+            try:
+                mid = await self.store(
+                    prompt=entry["query"],
+                    artifact=entry["artifact"],
+                    sources=entry.get("sources", []),
+                    model=entry.get("model", ""),
+                    user_id=user_id,
+                )
+                return {"success": True, "memory_id": mid}
+            except Exception as exc:
+                logger.warning(
+                    "Batch store failed for %r: %s",
+                    entry.get("query", "")[:80],
+                    exc,
+                    exc_info=True,
+                )
+                return {"success": False, "memory_id": None, "error": str(exc)}
+
+        tasks = [_store_one(e) for e in entries]
+        results: Any = await _asyncio.gather(*tasks)
+        return list(results)  # type: ignore[arg-type]

@@ -62,6 +62,12 @@ from .models import (
     LLMsTextStatusResponse,
     MapRequest,
     MapResponse,
+    MemoryBatchQueryEntry,
+    MemoryBatchQueryRequest,
+    MemoryBatchQueryResponse,
+    MemoryBatchStoreRequest,
+    MemoryBatchStoreResponse,
+    MemoryBatchStoreResult,
     MonitorCreateRequest,
     MonitorDeleteResponse,
     MonitorListResponse,
@@ -2964,6 +2970,137 @@ async def sweep_memory(request: Request) -> dict[str, Any]:
     try:
         count = await memory.sweep()
         return {"success": True, "swept": count}
+    finally:
+        await memory.close()
+
+
+# ── Research Memory: Batch Operations ───────────────────────────
+
+
+@router.post(
+    "/v2/memory/batch/query",
+    response_model=MemoryBatchQueryResponse,
+)
+async def memory_batch_query(
+    request: Request,
+    body: MemoryBatchQueryRequest,
+) -> MemoryBatchQueryResponse:
+    """Batch lookup of multiple queries against research memory.
+
+    Each query is independently embedded and searched.  Results are
+    returned in the same order as the input queries.
+
+    Args:
+        body: Contains ``queries`` (list of strings).
+
+    Returns:
+        ``MemoryBatchQueryResponse`` with ``results`` array of
+        per-query hit/miss, similarity, freshness, and artifact data.
+    """
+    from .research_memory import ResearchMemory
+    from .settings import load_settings
+
+    if not body.queries:
+        return MemoryBatchQueryResponse(success=True, results=[])
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    memory = ResearchMemory(
+        redis_url=redis_url,
+        semantic_url=settings.semantic_url,
+    )
+    try:
+        raw_results = await memory.batch_query(queries=body.queries)
+        results: list[MemoryBatchQueryEntry] = []
+        for i, r in enumerate(raw_results):
+            entry = MemoryBatchQueryEntry(
+                hit=r.get("hit", False),
+                similarity=r.get("similarity"),
+                freshness=r.get("freshness"),
+                memory_id=r.get("memory_id"),
+            )
+            if r.get("hit") and r.get("artifact"):
+                art = r["artifact"]
+                entry.query = art.get(
+                    "query", body.queries[i] if i < len(body.queries) else ""
+                )
+                entry.artifact = art.get("artifact", "")
+                entry.sources = art.get("sources", [])
+            results.append(entry)
+        return MemoryBatchQueryResponse(success=True, results=results)
+    finally:
+        await memory.close()
+
+
+@router.post(
+    "/v2/memory/batch/store",
+    response_model=MemoryBatchStoreResponse,
+)
+async def memory_batch_store(
+    request: Request,
+    body: MemoryBatchStoreRequest,
+) -> MemoryBatchStoreResponse:
+    """Batch store multiple research artifacts in memory.
+
+    Each entry is stored independently.  If one fails (e.g. embedding
+    failure), the others still succeed.  Per-entry status is returned.
+
+    Args:
+        body: Contains ``entries`` list of ``{query, artifact, sources,
+            model}`` dicts.
+
+    Returns:
+        ``MemoryBatchStoreResponse`` with ``stored_count``,
+        ``failed_count``, and per-entry ``results``.
+    """
+    from .research_memory import ResearchMemory
+    from .settings import load_settings
+
+    if not body.entries:
+        return MemoryBatchStoreResponse(
+            success=True,
+            stored_count=0,
+            failed_count=0,
+            results=[],
+        )
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    memory = ResearchMemory(
+        redis_url=redis_url,
+        semantic_url=settings.semantic_url,
+    )
+    try:
+        raw_results = await memory.batch_store(
+            entries=[e.model_dump() for e in body.entries],
+        )
+        results: list[MemoryBatchStoreResult] = []
+        stored = 0
+        failed = 0
+        for r in raw_results:
+            if r.get("success"):
+                stored += 1
+            else:
+                failed += 1
+            results.append(
+                MemoryBatchStoreResult(
+                    success=r.get("success", False),
+                    memory_id=r.get("memory_id"),
+                    error=r.get("error"),
+                )
+            )
+        return MemoryBatchStoreResponse(
+            success=True,
+            stored_count=stored,
+            failed_count=failed,
+            results=results,
+        )
     finally:
         await memory.close()
 

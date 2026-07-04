@@ -1673,3 +1673,84 @@ class ResearchMemoryStoreResponse(BaseModel):
     """
 
     artifact_id: str = ""
+
+
+# ── Research Memory Batch Operations ────────────────────────────
+
+
+class MemoryBatchQueryRequest(BaseModel):
+    """Batch query request: look up multiple queries against memory.
+
+    Each query is independently embedded and searched against Qdrant.
+    Results are returned in the same order as queries.
+    """
+
+    queries: list[str] = Field(
+        default_factory=list,
+        max_length=100,
+        description="List of query strings to look up",
+    )
+
+
+class MemoryBatchQueryEntry(BaseModel):
+    """A single batch query result entry."""
+
+    hit: bool = False
+    similarity: float | None = None
+    freshness: str | None = None
+    memory_id: str | None = None
+    query: str | None = None
+    artifact: str | None = None
+    sources: list[dict] | None = None
+    error: str | None = None
+
+
+class MemoryBatchQueryResponse(BaseModel):
+    """Batch query response containing per-query results."""
+
+    success: bool = True
+    results: list[MemoryBatchQueryEntry] = Field(default_factory=list)
+
+
+class MemoryBatchStoreEntry(BaseModel):
+    """A single entry in a batch store request."""
+
+    query: str = Field(..., description="Research question")
+    artifact: str = Field(..., description="LLM-synthesised answer")
+    sources: list[dict] = Field(
+        default_factory=list,
+        description="Source documents with url and title",
+    )
+    model: str = Field(default="", description="LLM model name")
+
+
+class MemoryBatchStoreRequest(BaseModel):
+    """Batch store request: store multiple artifacts independently.
+
+    Each entry is stored independently.  Partial success is allowed —
+    if one entry fails (e.g. embedding failure), the others still
+    succeed with per-entry status.
+    """
+
+    entries: list[MemoryBatchStoreEntry] = Field(
+        default_factory=list,
+        max_length=100,
+        description="List of artifacts to store",
+    )
+
+
+class MemoryBatchStoreResult(BaseModel):
+    """Per-entry result from a batch store operation."""
+
+    success: bool = False
+    memory_id: str | None = None
+    error: str | None = None
+
+
+class MemoryBatchStoreResponse(BaseModel):
+    """Batch store response with per-entry status."""
+
+    success: bool = True
+    stored_count: int = 0
+    failed_count: int = 0
+    results: list[MemoryBatchStoreResult] = Field(default_factory=list)
