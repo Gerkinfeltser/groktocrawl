@@ -478,6 +478,30 @@ class AgentRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
+    @field_validator("output_schema")
+    @classmethod
+    def validate_output_schema(cls, value: Any) -> dict[str, Any] | None:
+        """Reject non-dict output_schema values (e.g., arrays, strings) with 422."""
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"output_schema must be a JSON Schema object (dict), got {type(value).__name__}"
+            )
+        return value
+
+    @field_validator("schema_")
+    @classmethod
+    def validate_schema_(cls, value: Any) -> dict[str, Any] | None:
+        """Reject non-dict schema alias values with 422."""
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"schema must be a JSON Schema object (dict), got {type(value).__name__}"
+            )
+        return value
+
 
 class AgentCreateResponse(BaseModel):
     success: bool = True
@@ -1072,6 +1096,11 @@ class AnswerRequest(BaseModel):
     )
     model: str = Field(default="default", description="Per-request LLM override")
     stream: bool = Field(default=False, description="SSE streaming response")
+    schema_: dict[str, Any] | None = Field(
+        None,
+        alias="schema",
+        description="JSON Schema for structured output (alias for output_schema)",
+    )
     output_schema: dict[str, Any] | None = Field(
         None, description="JSON Schema for structured output from the answer"
     )
@@ -1079,6 +1108,32 @@ class AnswerRequest(BaseModel):
         default=CitationStyle.inline,
         description="Citation formatting style: inline, compact, footnote, or none",
     )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator("output_schema")
+    @classmethod
+    def validate_output_schema(cls, value: Any) -> dict[str, Any] | None:
+        """Reject non-dict output_schema values (e.g., arrays, strings) with 422."""
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"output_schema must be a JSON Schema object (dict), got {type(value).__name__}"
+            )
+        return value
+
+    @field_validator("schema_")
+    @classmethod
+    def validate_schema_(cls, value: Any) -> dict[str, Any] | None:
+        """Reject non-dict schema alias values with 422."""
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"schema must be a JSON Schema object (dict), got {type(value).__name__}"
+            )
+        return value
 
 
 class AnswerResponse(BaseModel):
@@ -1611,4 +1666,3 @@ class ResearchMemoryStoreResponse(BaseModel):
     """
 
     artifact_id: str = ""
-

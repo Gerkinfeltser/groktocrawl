@@ -62,10 +62,6 @@ from .models import (
     MapRequest,
     MapResponse,
     MonitorCreateRequest,
-    ResearchMemoryQueryRequest,
-    ResearchMemoryQueryResponse,
-    ResearchMemoryStoreRequest,
-    ResearchMemoryStoreResponse,
     MonitorDeleteResponse,
     MonitorListResponse,
     MonitorResponse,
@@ -75,6 +71,10 @@ from .models import (
     ParseResponse,
     PlanRequest,
     PlanResponse,
+    ResearchMemoryQueryRequest,
+    ResearchMemoryQueryResponse,
+    ResearchMemoryStoreRequest,
+    ResearchMemoryStoreResponse,
     ResolvedCitation,
     ScrapeData,
     ScrapeRequest,
@@ -117,6 +117,22 @@ def _get_client_ip(request: Request) -> str:
     if request.client:
         return request.client.host
     return "unknown"
+
+
+def _resolve_output_schema(
+    output_schema: dict[str, Any] | None,
+    schema_alias: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Resolve the effective output schema from request fields.
+
+    - ``output_schema`` takes priority over ``schema`` alias.
+    - Empty dicts (``{}``) are treated as ``None`` (no schema).
+    - Returns ``None`` when no valid schema is provided.
+    """
+    effective = output_schema or schema_alias
+    if effective is not None and not any(effective):
+        return None
+    return effective
 
 
 @router.get("/v2/activity", response_model=ActivityResponse)
@@ -233,7 +249,7 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
             async for event in run_research_stream(
                 prompt=body.prompt,
                 urls=body.urls,
-                schema=body.schema_ or body.output_schema,
+                schema=body.output_schema or body.schema_,
                 searxng_url=request.app.state.searxng_url,
                 scraper_url=request.app.state.scraper_url,
                 llm_base_url=request.app.state.llm_base_url,
@@ -290,7 +306,7 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
             job_id=job_id,
             prompt=body.prompt,
             urls=body.urls,
-            schema_=body.schema_ or body.output_schema,
+            schema_=body.output_schema or body.schema_,
             llm_base_url=request.app.state.llm_base_url,
             llm_api_key=request.app.state.llm_api_key,
             llm_model=request.app.state.llm_model,
@@ -380,7 +396,9 @@ async def create_plan(request: Request, body: PlanRequest) -> PlanResponse:
     from .settings import load_settings
 
     settings = load_settings()
-    redis_url = f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
 
     store = PlanStore(redis_url=redis_url)
     plan_id = store.create(prompt=body.prompt, plan=plan)
@@ -414,7 +432,9 @@ async def execute_plan(request: Request, body: ExecutePlanRequest) -> Any:
     from .settings import load_settings
 
     settings = load_settings()
-    redis_url = f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
 
     plan_store = PlanStore(redis_url=redis_url)
     doc = plan_store.get(body.plan_id)
@@ -484,8 +504,11 @@ async def execute_plan(request: Request, body: ExecutePlanRequest) -> Any:
                             seen_urls.add(url)
                             new_urls.append(url)
                             all_sources.append(
-                                {"url": url, "title": r.get("title", ""),
-                                 "relevance": r.get("description", "")}
+                                {
+                                    "url": url,
+                                    "title": r.get("title", ""),
+                                    "relevance": r.get("description", ""),
+                                }
                             )
 
                     yield f"data: {json.dumps({'type': 'search', 'query': query, 'result_count': len(new_urls), 'new_urls': new_urls[:10]})}\n\n"
@@ -493,10 +516,14 @@ async def execute_plan(request: Request, body: ExecutePlanRequest) -> Any:
                     # Scrape discovered URLs
                     if new_urls:
                         scraped_docs, scraped_details = await _scrape_urls(
-                            new_urls[:5], scraper,
-                            min_sources=1, max_attempts=min(5, len(new_urls)),
+                            new_urls[:5],
+                            scraper,
+                            min_sources=1,
+                            max_attempts=min(5, len(new_urls)),
                         )
-                        for doc, detail in zip(scraped_docs, scraped_details):
+                        for doc, detail in zip(
+                            scraped_docs, scraped_details, strict=False
+                        ):
                             accumulated_context_parts.append(doc)
                             yield f"data: {json.dumps({'type': 'scrape', 'url': detail.get('url', ''), 'chars': len(doc)})}\n\n"
 
@@ -508,16 +535,28 @@ async def execute_plan(request: Request, body: ExecutePlanRequest) -> Any:
 
                 elif action == "synthesize":
                     # Build context from accumulated documents
-                    context = "\n\n---\n\n".join(accumulated_context_parts) if accumulated_context_parts else ""
-                    synthesis_prompt = description or f"Synthesise findings for: {prompt}"
+                    context = (
+                        "\n\n---\n\n".join(accumulated_context_parts)
+                        if accumulated_context_parts
+                        else ""
+                    )
+                    synthesis_prompt = (
+                        description or f"Synthesise findings for: {prompt}"
+                    )
 
                     # Include dimensions in the synthesis prompt
                     dimensions = plan.get("dimensions", [])
                     if body.modifications:
                         if body.modifications.add_dimension:
-                            dimensions = list(dimensions) + body.modifications.add_dimension
+                            dimensions = (
+                                list(dimensions) + body.modifications.add_dimension
+                            )
                         if body.modifications.remove_dimension:
-                            dimensions = [d for d in dimensions if d not in (body.modifications.remove_dimension or [])]
+                            dimensions = [
+                                d
+                                for d in dimensions
+                                if d not in (body.modifications.remove_dimension or [])
+                            ]
 
                     if dimensions:
                         dims_str = ", ".join(dimensions)
@@ -543,7 +582,7 @@ async def execute_plan(request: Request, body: ExecutePlanRequest) -> Any:
                             "and cite specific sources."
                         ),
                         user_prompt=synthesis_prompt,
-                        context=context if context else None,
+                        context=context or None,
                     ):
                         if chunk["type"] == "token":
                             full_synthesis += chunk["content"]
@@ -613,7 +652,10 @@ def _apply_plan_modifications(
             # No search phase exists — prepend one
             phases.insert(
                 0,
-                {"action": "search", "description": f"[FOCUS: {narrow}] Search for: {prompt}"},
+                {
+                    "action": "search",
+                    "description": f"[FOCUS: {narrow}] Search for: {prompt}",
+                },
             )
 
     # Add dimensions
@@ -1696,6 +1738,9 @@ async def answer(request: Request, body: AnswerRequest, response: Response) -> A
     if body.stream:
         from fastapi.responses import StreamingResponse
 
+        # Resolve effective schema: output_schema takes priority, empty dict treated as None
+        effective_schema = _resolve_output_schema(body.output_schema, body.schema_)
+
         async def event_stream() -> Any:
             from .research import run_answer_stream
 
@@ -1712,7 +1757,7 @@ async def answer(request: Request, body: AnswerRequest, response: Response) -> A
                 llm_model=request.app.state.llm_model,
                 requested_model=body.model if body.model != "default" else None,
                 max_searches_per_request=max_searches,
-                output_schema=body.output_schema,
+                output_schema=effective_schema,
                 citation_style=body.citation_style,
             ):
                 if event["type"] == "sources_pending":
@@ -1748,6 +1793,8 @@ async def answer(request: Request, body: AnswerRequest, response: Response) -> A
     # Sync path
     from .research import run_answer
 
+    effective_schema = _resolve_output_schema(body.output_schema, body.schema_)
+
     result = await run_answer(
         query=body.query,
         num_sources=body.num_sources,
@@ -1761,7 +1808,7 @@ async def answer(request: Request, body: AnswerRequest, response: Response) -> A
         llm_model=request.app.state.llm_model,
         requested_model=body.model if body.model != "default" else None,
         max_searches_per_request=max_searches,
-        output_schema=body.output_schema,
+        output_schema=effective_schema,
         citation_style=body.citation_style,
     )
     response.headers["X-Search-Budget"] = f"{max_searches}/{max_searches}"
@@ -2610,9 +2657,7 @@ async def research_memory_store(
 
 
 @router.delete("/v2/research-memory/{artifact_id}")
-async def research_memory_delete(
-    request: Request, artifact_id: str
-) -> dict:
+async def research_memory_delete(request: Request, artifact_id: str) -> dict:
     """Delete a research memory artifact by ID.
 
     Args:
