@@ -5245,8 +5245,8 @@ def test_memory_ttl_configurable():
     assert get_r.status_code == 200
     data = get_r.json()
 
-    created_at = _dt.datetime.fromisoformat(data["created_at"])
-    expires_at = _dt.datetime.fromisoformat(data["expires_at"])
+    created_at = _dt.datetime.fromisoformat(data["createdAt"])
+    expires_at = _dt.datetime.fromisoformat(data["expiresAt"])
     delta = (expires_at - created_at).total_seconds()
     assert 600000 <= delta <= 610000, f"TTL delta should be ~604800s, got {delta}"
 
@@ -6335,7 +6335,7 @@ def session():
     """Create a session and clean it up after the test."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
     assert r.status_code == 200, f"Create failed: {r.text}"
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
     yield sid
     httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
 
@@ -6346,11 +6346,11 @@ def test_session_create_default_ttl():
     assert r.status_code == 200
     data = r.json()
     assert data["success"] is True
-    assert data["session_id"]
+    assert data["sessionId"]
     assert data["ttl"] == 3600
-    assert data["expires_at"]
+    assert data["expiresAt"]
     # Cleanup
-    httpx.delete(AGENT + f"/v2/session/{data['session_id']}", timeout=10)
+    httpx.delete(AGENT + f"/v2/session/{data['sessionId']}", timeout=10)
 
 
 def test_session_create_custom_ttl():
@@ -6359,7 +6359,7 @@ def test_session_create_custom_ttl():
     assert r.status_code == 200
     data = r.json()
     assert data["ttl"] == 7200
-    httpx.delete(AGENT + f"/v2/session/{data['session_id']}", timeout=10)
+    httpx.delete(AGENT + f"/v2/session/{data['sessionId']}", timeout=10)
 
 
 def test_session_create_min_ttl():
@@ -6367,7 +6367,7 @@ def test_session_create_min_ttl():
     r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 60}, timeout=10)
     assert r.status_code == 200
     assert r.json()["ttl"] == 60
-    httpx.delete(AGENT + f"/v2/session/{r.json()['session_id']}", timeout=10)
+    httpx.delete(AGENT + f"/v2/session/{r.json()['sessionId']}", timeout=10)
 
 
 def test_session_create_max_ttl():
@@ -6375,7 +6375,7 @@ def test_session_create_max_ttl():
     r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 86400}, timeout=10)
     assert r.status_code == 200
     assert r.json()["ttl"] == 86400
-    httpx.delete(AGENT + f"/v2/session/{r.json()['session_id']}", timeout=10)
+    httpx.delete(AGENT + f"/v2/session/{r.json()['sessionId']}", timeout=10)
 
 
 def test_session_reject_ttl_below_min():
@@ -6399,17 +6399,17 @@ def test_session_reject_negative_ttl():
 def test_session_get_active():
     """VAL-SES-008: Get active session returns correct fields."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     r2 = httpx.get(AGENT + f"/v2/session/{sid}", timeout=10)
     assert r2.status_code == 200
     data = r2.json()
     assert data["status"] == "active"
-    assert data["step_count"] == 0
+    assert data["stepCount"] == 0
     assert data["steps"] == []
-    assert data["artifact_length"] == 0
-    assert data["created_at"]
-    assert data["expires_at"]
+    assert data["artifactLength"] == 0
+    assert data["createdAt"]
+    assert data["expiresAt"]
 
     httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
 
@@ -6425,19 +6425,19 @@ def test_session_get_nonexistent():
 def test_session_delete_active():
     """Delete active session returns deleted:true."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     r2 = httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
     assert r2.status_code == 200
     data = r2.json()
     assert data["deleted"] is True
-    assert data["session_id"] == sid
+    assert data["sessionId"] == sid
 
 
 def test_session_delete_idempotent():
     """Second delete on same session returns deleted:false."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     r1 = httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
     assert r1.json()["deleted"] is True
@@ -6458,7 +6458,7 @@ def test_session_delete_nonexistent():
 def test_session_access_after_delete():
     """Access after delete returns 404 on get and step."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
     httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
 
     # GET should 404
@@ -6478,8 +6478,8 @@ def test_session_isolation():
     """Two sessions have independent data and IDs."""
     r1 = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
     r2 = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid_a = r1.json()["session_id"]
-    sid_b = r2.json()["session_id"]
+    sid_a = r1.json()["sessionId"]
+    sid_b = r2.json()["sessionId"]
 
     assert sid_a != sid_b, "Session IDs should be unique"
 
@@ -6492,11 +6492,11 @@ def test_session_isolation():
 
     # Session B should still have 0 steps
     r_b = httpx.get(AGENT + f"/v2/session/{sid_b}", timeout=10)
-    assert r_b.json()["step_count"] == 0
+    assert r_b.json()["stepCount"] == 0
 
     # Session A should have 1 step
     r_a = httpx.get(AGENT + f"/v2/session/{sid_a}", timeout=10)
-    assert r_a.json()["step_count"] == 1
+    assert r_a.json()["stepCount"] == 1
 
     httpx.delete(AGENT + f"/v2/session/{sid_a}", timeout=10)
     httpx.delete(AGENT + f"/v2/session/{sid_b}", timeout=10)
@@ -6505,15 +6505,15 @@ def test_session_isolation():
 def test_session_expires_at_matches_ttl():
     """VAL-SES-072: expires_at ≈ created_at + ttl."""
     r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 3600}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     r2 = httpx.get(AGENT + f"/v2/session/{sid}", timeout=10)
     data = r2.json()
 
     from datetime import datetime
 
-    created = datetime.fromisoformat(data["created_at"])
-    expires = datetime.fromisoformat(data["expires_at"])
+    created = datetime.fromisoformat(data["createdAt"])
+    expires = datetime.fromisoformat(data["expiresAt"])
     diff = (expires - created).total_seconds()
 
     assert abs(diff - 3600) < 5, f"Expected ~3600s diff, got {diff:.0f}s"
@@ -6524,7 +6524,7 @@ def test_session_expires_at_matches_ttl():
 def test_session_step_search():
     """Search step stores results as refs and returns compact summary."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     r_step = httpx.post(
         AGENT + f"/v2/session/{sid}/step",
@@ -6536,7 +6536,7 @@ def test_session_step_search():
     )
     assert r_step.status_code == 200
     step_data = r_step.json()
-    assert step_data["step_index"] == 1
+    assert step_data["stepIndex"] == 1
     assert step_data["action"] == "search"
     assert "summary" in step_data
     assert len(step_data["summary"]) < 500  # compact summary
@@ -6546,14 +6546,14 @@ def test_session_step_search():
 
     # Verify session status reflects step
     r_status = httpx.get(AGENT + f"/v2/session/{sid}", timeout=10)
-    assert r_status.json()["step_count"] == 1
+    assert r_status.json()["stepCount"] == 1
     assert len(r_status.json()["steps"]) == 1
 
     # Export should have artifact and refs
     r_export = httpx.post(AGENT + f"/v2/session/{sid}/export", timeout=10)
     export_data = r_export.json()
     assert export_data["success"] is True
-    assert export_data["artifact_length"] > 0
+    assert export_data["artifactLength"] > 0
     assert len(export_data["refs"]) >= 1
     assert len(export_data["steps"]) == 1
 
@@ -6563,7 +6563,7 @@ def test_session_step_search():
 def test_session_export_empty():
     """Export on empty session returns empty artifact and refs."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     r_export = httpx.post(AGENT + f"/v2/session/{sid}/export", timeout=10)
     data = r_export.json()
@@ -6571,7 +6571,7 @@ def test_session_export_empty():
     assert data["artifact"] == ""
     assert data["steps"] == []
     assert data["refs"] == {}
-    assert data["artifact_length"] == 0
+    assert data["artifactLength"] == 0
 
     httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
 
@@ -6587,7 +6587,7 @@ def test_session_export_nonexistent():
 def test_session_step_indices_increment():
     """Multiple steps have monotonically increasing indices."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     for i in range(1, 4):
         r_step = httpx.post(
@@ -6599,11 +6599,11 @@ def test_session_step_indices_increment():
             timeout=30,
         )
         assert r_step.status_code == 200
-        assert r_step.json()["step_index"] == i
+        assert r_step.json()["stepIndex"] == i
 
     # Verify step count and steps in status
     r_status = httpx.get(AGENT + f"/v2/session/{sid}", timeout=10)
-    assert r_status.json()["step_count"] == 3
+    assert r_status.json()["stepCount"] == 3
     assert len(r_status.json()["steps"]) == 3
 
     httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
@@ -6622,7 +6622,7 @@ def test_session_step_expired_session():
     """
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
     assert r.status_code == 200, f"Create failed: {r.status_code}: {r.text}"
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     # Delete the session to simulate expiry
     httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
@@ -6638,7 +6638,7 @@ def test_session_step_expired_session():
 def test_session_step_refresh_ttl():
     """VAL-SES-057: Step activity refreshes TTL on all keys."""
     r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 60}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     # Step 1 refreshes TTL
     r1 = httpx.post(
@@ -6662,7 +6662,7 @@ def test_session_step_refresh_ttl():
     assert r2.status_code == 200, (
         f"Step 2 should succeed after TTL refresh, got {r2.status_code}: {r2.text}"
     )
-    assert r2.json()["step_index"] == 2
+    assert r2.json()["stepIndex"] == 2
 
     httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
 
@@ -6671,8 +6671,8 @@ def test_session_step_no_lock_contention():
     """Concurrent steps to different sessions work independently."""
     r1 = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
     r2 = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid_a = r1.json()["session_id"]
-    sid_b = r2.json()["session_id"]
+    sid_a = r1.json()["sessionId"]
+    sid_b = r2.json()["sessionId"]
 
     # Run steps concurrently on different sessions
     import concurrent.futures
@@ -6695,7 +6695,7 @@ def test_session_step_no_lock_contention():
         assert r.status_code == 200, (
             f"Concurrent step failed: {r.status_code}: {r.text}"
         )
-        assert r.json()["step_index"] == 1
+        assert r.json()["stepIndex"] == 1
 
     httpx.delete(AGENT + f"/v2/session/{sid_a}", timeout=10)
     httpx.delete(AGENT + f"/v2/session/{sid_b}", timeout=10)
@@ -6704,7 +6704,7 @@ def test_session_step_no_lock_contention():
 def test_session_step_missing_action():
     """Step without action field returns 422."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     r_step = httpx.post(
         AGENT + f"/v2/session/{sid}/step",
@@ -6719,7 +6719,7 @@ def test_session_step_missing_action():
 def test_session_step_invalid_action():
     """Step with invalid action returns 422."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     r_step = httpx.post(
         AGENT + f"/v2/session/{sid}/step",
@@ -6735,8 +6735,8 @@ def test_session_keys_isolated():
     """Verify session keys in Valkey follow session:{id}:{subkey} format and don't overlap."""
     r1 = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
     r2 = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid_a = r1.json()["session_id"]
-    sid_b = r2.json()["session_id"]
+    sid_a = r1.json()["sessionId"]
+    sid_b = r2.json()["sessionId"]
 
     # Key format check: all keys include the session ID
     for suffix in ("meta", "steps", "artifact", "refs"):
@@ -6756,7 +6756,7 @@ def test_session_keys_isolated():
 def test_session_step_search_val_ses_011():
     """VAL-SES-011: Execute a search step — stores results as refs, returns ref_count and top_refs."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     step = httpx.post(
         AGENT + f"/v2/session/{sid}/step",
@@ -6765,7 +6765,7 @@ def test_session_step_search_val_ses_011():
     )
     assert step.status_code == 200, step.text
     data = step.json()
-    assert data["step_index"] == 1
+    assert data["stepIndex"] == 1
     assert data["action"] == "search"
     assert data["result"]["ref_count"] > 0
     assert len(data["result"]["top_refs"]) > 0
@@ -6780,7 +6780,7 @@ def test_session_step_search_val_ses_011():
 def test_session_step_scrape_val_ses_012():
     """VAL-SES-012: Execute a scrape step — stores content as refs with char_count."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     step = httpx.post(
         AGENT + f"/v2/session/{sid}/step",
@@ -6792,7 +6792,7 @@ def test_session_step_scrape_val_ses_012():
     )
     assert step.status_code == 200, step.text
     data = step.json()
-    assert data["step_index"] == 1
+    assert data["stepIndex"] == 1
     assert data["action"] == "scrape"
     assert data["result"]["ref_count"] > 0
     assert data["result"]["char_count"] > 0
@@ -6808,7 +6808,7 @@ def test_session_step_scrape_val_ses_012():
 def test_session_step_scrape_multiple_urls_val_ses_013():
     """VAL-SES-013: Scrape step with multiple URLs — concurrency=3, refs numbered sequentially."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     urls = [
         "http://example.com",
@@ -6834,7 +6834,7 @@ def test_session_step_scrape_multiple_urls_val_ses_013():
 def test_session_step_query_on_context_val_ses_014():
     """VAL-SES-014: Query step on accumulated context — answer references refs from prior search."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     # Step 1: search
     httpx.post(
@@ -6853,7 +6853,7 @@ def test_session_step_query_on_context_val_ses_014():
     )
     assert step2.status_code == 200, step2.text
     data = step2.json()
-    assert data["step_index"] == 2
+    assert data["stepIndex"] == 2
     assert data["action"] == "query"
     assert len(data["result"]["answer"]) > 0
 
@@ -6863,7 +6863,7 @@ def test_session_step_query_on_context_val_ses_014():
 def test_session_step_query_empty_fails_val_ses_015():
     """VAL-SES-015: Query step on empty session returns 404 error."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     step = httpx.post(
         AGENT + f"/v2/session/{sid}/step",
@@ -6885,7 +6885,7 @@ def test_session_full_lifecycle_val_ses_022():
     """VAL-SES-022: Full lifecycle — create → search → scrape → query → export → delete."""
     # Create
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
     assert r.status_code == 200
 
     # Search
@@ -6927,7 +6927,7 @@ def test_session_full_lifecycle_val_ses_022():
     assert export.status_code == 200
     export_data = export.json()
     assert len(export_data["artifact"]) > 0
-    assert export_data["artifact_length"] > 0
+    assert export_data["artifactLength"] > 0
 
     # Delete
     delete = httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
@@ -6942,7 +6942,7 @@ def test_session_full_lifecycle_val_ses_022():
 def test_session_step_indices_monotonic_val_ses_023():
     """VAL-SES-023: Step indices increment monotonically: 1, 2, 3."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     for expected_idx in range(1, 4):
         step = httpx.post(
@@ -6954,7 +6954,7 @@ def test_session_step_indices_monotonic_val_ses_023():
             timeout=30,
         )
         assert step.status_code == 200, step.text
-        assert step.json()["step_index"] == expected_idx
+        assert step.json()["stepIndex"] == expected_idx
 
     httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
 
@@ -6962,7 +6962,7 @@ def test_session_step_indices_monotonic_val_ses_023():
 def test_session_ref_id_format_val_ses_024():
     """VAL-SES-024: Ref IDs use format ref_{step_index}_{source_number} with source_number starting at 1."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     step = httpx.post(
         AGENT + f"/v2/session/{sid}/step",
@@ -6980,7 +6980,7 @@ def test_session_ref_id_format_val_ses_024():
 def test_session_artifact_after_search_val_ses_036():
     """VAL-SES-036: Artifact structure after search step contains ## Step 1: Search — {query}."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     httpx.post(
         AGENT + f"/v2/session/{sid}/step",
@@ -7005,7 +7005,7 @@ def test_session_artifact_after_search_val_ses_036():
 def test_session_artifact_after_scrape_val_ses_037():
     """VAL-SES-037: Artifact structure after scrape step contains ## Step N: Scrape with ### Source:."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     httpx.post(
         AGENT + f"/v2/session/{sid}/step",
@@ -7032,7 +7032,7 @@ def test_session_artifact_after_scrape_val_ses_037():
 def test_session_artifact_after_query_val_ses_038():
     """VAL-SES-038: Artifact after query step contains ## Step N: Query with **Q:** and **A:**."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     # Need context first
     httpx.post(
@@ -7065,7 +7065,7 @@ def test_session_artifact_after_query_val_ses_038():
 def test_session_search_with_categories_val_ses_039():
     """VAL-SES-039: Search step with categories and sources filters passes through to SearXNG."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     step = httpx.post(
         AGENT + f"/v2/session/{sid}/step",
@@ -7092,7 +7092,7 @@ def test_session_search_with_categories_val_ses_039():
 def test_session_scrape_with_options_val_ses_040():
     """VAL-SES-040: Scrape step with scrape_options passes through to scraper."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     step = httpx.post(
         AGENT + f"/v2/session/{sid}/step",
@@ -7115,7 +7115,7 @@ def test_session_scrape_with_options_val_ses_040():
 def test_session_query_model_override_val_ses_041():
     """VAL-SES-041: Query step with model override uses specified model for that LLM call."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     # Need context first
     httpx.post(
@@ -7144,7 +7144,7 @@ def test_session_query_model_override_val_ses_041():
 def test_session_scrape_partial_failures_val_ses_045():
     """VAL-SES-045: Scrape step handles partial failures — valid URLs stored, invalid skipped."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     urls = [
         "http://example.com",  # valid
@@ -7170,7 +7170,7 @@ def test_session_scrape_partial_failures_val_ses_045():
 def test_session_multiple_searches_independent_val_ses_051():
     """VAL-SES-051: Multiple search steps accumulate refs independently under distinct step indices."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     # Two search steps
     s1 = httpx.post(
@@ -7187,8 +7187,8 @@ def test_session_multiple_searches_independent_val_ses_051():
     assert s2.status_code == 200
 
     # Both steps have different indices
-    assert s1.json()["step_index"] == 1
-    assert s2.json()["step_index"] == 2
+    assert s1.json()["stepIndex"] == 1
+    assert s2.json()["stepIndex"] == 2
 
     # Refs from step 1 use ref_1_*, step 2 use ref_2_*
     for ref in s1.json()["result"]["top_refs"]:
@@ -7212,7 +7212,7 @@ def test_session_multiple_searches_independent_val_ses_051():
 def test_session_query_on_search_only_val_ses_062():
     """VAL-SES-062: Query step on session with only search results works (uses search descriptions)."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     httpx.post(
         AGENT + f"/v2/session/{sid}/step",
@@ -7234,7 +7234,7 @@ def test_session_query_on_search_only_val_ses_062():
 def test_session_query_on_scrape_only_val_ses_063():
     """VAL-SES-063: Query step on session with only scrape results works (uses scraped content)."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     httpx.post(
         AGENT + f"/v2/session/{sid}/step",
@@ -7262,7 +7262,7 @@ def test_session_query_on_scrape_only_val_ses_063():
 def test_session_query_cites_sources_val_ses_064():
     """VAL-SES-064: Query step answer cites sources with [ref_N_M] markers."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     httpx.post(
         AGENT + f"/v2/session/{sid}/step",
@@ -7286,7 +7286,7 @@ def test_session_query_cites_sources_val_ses_064():
 def test_session_export_step_order_val_ses_070():
     """VAL-SES-070: Export preserves step order (chronological, not grouped by type)."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     # Interleaved search and scrape steps
     httpx.post(
@@ -7324,7 +7324,7 @@ def test_session_export_step_order_val_ses_070():
 def test_session_resolve_valid_ref():
     """Test resolving a valid ref returns full content."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     # Add a scrape step to create refs
     step = httpx.post(
@@ -7360,7 +7360,7 @@ def test_session_resolve_valid_ref():
 def test_session_resolve_multiple_refs():
     """Test resolving multiple valid refs."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     step = httpx.post(
         AGENT + f"/v2/session/{sid}/step",
@@ -7394,7 +7394,7 @@ def test_session_resolve_multiple_refs():
 def test_session_resolve_nonexistent_ref():
     """Test resolving a non-existent ref returns empty result."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     resolve = httpx.post(
         AGENT + f"/v2/session/{sid}/resolve",
@@ -7422,7 +7422,7 @@ def test_session_resolve_nonexistent_session():
 def test_session_resolve_deleted_session():
     """Test resolving on deleted session returns 404."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
     httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
 
     resolve = httpx.post(
@@ -7436,7 +7436,7 @@ def test_session_resolve_deleted_session():
 def test_session_resolve_empty_ref_ids():
     """Test resolving with empty ref_ids returns 422."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     resolve = httpx.post(
         AGENT + f"/v2/session/{sid}/resolve",
@@ -7451,7 +7451,7 @@ def test_session_resolve_empty_ref_ids():
 def test_session_step_deepen_val():
     """Test deepen step: targets a specific ref and performs focused search+scrape."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
-    sid = r.json()["session_id"]
+    sid = r.json()["sessionId"]
 
     # Step 1: scrape to get content-backed ref
     s1 = httpx.post(
@@ -7482,12 +7482,283 @@ def test_session_step_deepen_val():
     )
     assert s2.status_code == 200, s2.text
     data = s2.json()
-    assert data["step_index"] == 2
+    assert data["stepIndex"] == 2
     assert data["action"] == "deepen"
     assert data["result"]["ref"] == target_ref
     assert len(data["result"]["new_findings"]) > 0
     assert data["result"]["inserted_at"] == target_ref
 
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+# ── Session Model Validation (m3-session-models) ──────────────────────────
+
+
+def test_session_model_validation_search_empty_query():
+    """VAL-SES-046: Pydantic model_validator rejects search with empty query string (422)."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["sessionId"]
+    step = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={"action": "search", "params": {"query": ""}},
+        timeout=10,
+    )
+    assert step.status_code == 422, f"Expected 422, got {step.status_code}: {step.text}"
+    body = step.json()
+    assert "non-empty" in str(body).lower() or "query" in str(body).lower()
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_model_validation_scrape_empty_urls():
+    """VAL-SES-047: Pydantic model_validator rejects scrape with empty URLs list (422)."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["sessionId"]
+    step = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={"action": "scrape", "params": {"urls": []}},
+        timeout=10,
+    )
+    assert step.status_code == 422, f"Expected 422, got {step.status_code}: {step.text}"
+    body = step.json()
+    assert "non-empty" in str(body).lower() or "urls" in str(body).lower()
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_model_validation_search_missing_query():
+    """VAL-SES-017: Pydantic model_validator rejects search without query param (422)."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["sessionId"]
+    step = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={"action": "search", "params": {"limit": 5}},
+        timeout=10,
+    )
+    assert step.status_code == 422, f"Expected 422, got {step.status_code}: {step.text}"
+    body = step.json()
+    assert "query" in str(body).lower()
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_model_validation_scrape_missing_urls():
+    """VAL-SES-018: Pydantic model_validator rejects scrape without urls param (422)."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["sessionId"]
+    step = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={"action": "scrape", "params": {}},
+        timeout=10,
+    )
+    assert step.status_code == 422, f"Expected 422, got {step.status_code}: {step.text}"
+    body = step.json()
+    assert "urls" in str(body).lower()
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_model_validation_query_missing_question():
+    """VAL-SES-019: Pydantic model_validator rejects query without question param (422)."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["sessionId"]
+    step = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={"action": "query", "params": {"model": "gpt-4o"}},
+        timeout=10,
+    )
+    assert step.status_code == 422, f"Expected 422, got {step.status_code}: {step.text}"
+    body = step.json()
+    assert "question" in str(body).lower()
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_model_validation_deepen_missing_ref():
+    """Pydantic model_validator rejects deepen without ref param (422)."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["sessionId"]
+    step = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "deepen",
+            "params": {"depth_prompt": "Tell me more"},
+        },
+        timeout=10,
+    )
+    assert step.status_code == 422, f"Expected 422, got {step.status_code}: {step.text}"
+    body = step.json()
+    assert "ref" in str(body).lower()
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_model_validation_deepen_missing_depth_prompt():
+    """Pydantic model_validator rejects deepen without depth_prompt param (422)."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["sessionId"]
+    step = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "deepen",
+            "params": {"ref": "ref_1_1"},
+        },
+        timeout=10,
+    )
+    assert step.status_code == 422, f"Expected 422, got {step.status_code}: {step.text}"
+    body = step.json()
+    assert "depth_prompt" in str(body).lower()
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_model_validation_step_empty_body():
+    """VAL-SES-066: Missing body on step returns 422 (Pydantic validation)."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["sessionId"]
+    step = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        headers={"Content-Type": "application/json"},
+        content=b"",
+        timeout=10,
+    )
+    assert step.status_code in (400, 422), f"Expected 400/422, got {step.status_code}"
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_model_validation_step_non_json_body():
+    """VAL-SES-067: Non-JSON body on step returns 422 or 400."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["sessionId"]
+    step = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        headers={"Content-Type": "text/plain"},
+        content=b"this is not json",
+        timeout=10,
+    )
+    assert step.status_code in (400, 422), f"Expected 400/422, got {step.status_code}"
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_model_camelcase_create_response():
+    """SessionCreateResponse uses camelCase JSON keys: sessionId, expiresAt, ttl."""
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 3600}, timeout=10)
+    assert r.status_code == 200
+    data = r.json()
+    assert "sessionId" in data, f"Missing sessionId, got keys: {list(data.keys())}"
+    assert "expiresAt" in data, f"Missing expiresAt, got keys: {list(data.keys())}"
+    assert "ttl" in data
+    assert data["ttl"] == 3600
+    httpx.delete(AGENT + f"/v2/session/{data['sessionId']}", timeout=10)
+
+
+def test_session_model_camelcase_delete_response():
+    """VAL-SES-050: SessionDeleteResponse uses camelCase JSON: sessionId, deleted."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["sessionId"]
+    d = httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+    assert d.status_code == 200
+    data = d.json()
+    assert "sessionId" in data
+    assert "deleted" in data
+    assert data["deleted"] is True
+    assert data["sessionId"] == sid
+
+
+def test_session_model_camelcase_status_response():
+    """SessionStatusResponse uses camelCase: stepCount, artifactLength, createdAt, expiresAt."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["sessionId"]
+    s = httpx.get(AGENT + f"/v2/session/{sid}", timeout=10)
+    assert s.status_code == 200
+    data = s.json()
+    assert "stepCount" in data
+    assert "artifactLength" in data
+    assert "createdAt" in data
+    assert "expiresAt" in data
+    assert data["stepCount"] == 0
+    assert data["artifactLength"] == 0
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_model_camelcase_step_response():
+    """SessionStepResponse uses camelCase: stepIndex (not step_index)."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["sessionId"]
+    step = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={"action": "search", "params": {"query": "test query"}},
+        timeout=30,
+    )
+    assert step.status_code == 200, step.text
+    data = step.json()
+    assert "stepIndex" in data, f"Missing stepIndex, got keys: {list(data.keys())}"
+    # step_index should NOT be present (camelCase only)
+    assert "step_index" not in data, "Found snake_case step_index in response"
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_model_camelcase_export_response():
+    """SessionExportResponse uses camelCase: artifactLength, sessionId."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["sessionId"]
+    exp = httpx.post(AGENT + f"/v2/session/{sid}/export", timeout=10)
+    assert exp.status_code == 200
+    data = exp.json()
+    assert "artifactLength" in data
+    assert "sessionId" in data
+    assert data["artifactLength"] == 0
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_model_validation_ttl_rejects_59():
+    """SessionCreateRequest TTL validation rejects 59 (below minimum 60)."""
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 59}, timeout=10)
+    assert r.status_code == 422, f"Expected 422, got {r.status_code}"
+
+
+def test_session_model_validation_ttl_rejects_86401():
+    """SessionCreateRequest TTL validation rejects 86401 (above maximum 86400)."""
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 86401}, timeout=10)
+    assert r.status_code == 422, f"Expected 422, got {r.status_code}"
+
+
+def test_session_model_validation_ttl_rejects_negative():
+    """SessionCreateRequest TTL validation rejects -1 (negative)."""
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": -1}, timeout=10)
+    assert r.status_code == 422, f"Expected 422, got {r.status_code}"
+
+
+def test_session_model_validation_action_rejects_fly():
+    """VAL-SES-016: SessionStepRequest rejects action 'fly' with 422."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["sessionId"]
+    step = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={"action": "fly", "params": {"query": "test"}},
+        timeout=10,
+    )
+    assert step.status_code == 422, f"Expected 422, got {step.status_code}"
+    assert "fly" in step.text.lower()
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_model_validation_action_rejects_empty():
+    """VAL-SES-020: SessionStepRequest rejects empty action string with 422."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["sessionId"]
+    step = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={"action": "", "params": {}},
+        timeout=10,
+    )
+    assert step.status_code == 422, f"Expected 422, got {step.status_code}"
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_session_model_validation_action_missing():
+    """VAL-SES-055: SessionStepRequest rejects missing action field with 422."""
+    r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
+    sid = r.json()["sessionId"]
+    step = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={"params": {"query": "test"}},
+        timeout=10,
+    )
+    assert step.status_code == 422, f"Expected 422, got {step.status_code}"
     httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
 
 

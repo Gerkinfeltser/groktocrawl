@@ -1213,6 +1213,8 @@ class CitationsResolveResponse(BaseModel):
 class SessionCreateRequest(BaseModel):
     """Request to create a new research session."""
 
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
     ttl: int | None = Field(
         default=None,
         ge=60,
@@ -1223,6 +1225,8 @@ class SessionCreateRequest(BaseModel):
 
 class SessionCreateResponse(BaseModel):
     """Response from session creation."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     success: bool = True
     session_id: str = ""
@@ -1245,6 +1249,8 @@ class SessionStepRequest(BaseModel):
           follow-up question), ``max_sources`` (optional, default 3).
     """
 
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
     action: str = Field(
         ...,
         description="Step action: search, scrape, query, or deepen",
@@ -1264,9 +1270,51 @@ class SessionStepRequest(BaseModel):
             )
         return value
 
+    @model_validator(mode="after")
+    def validate_required_params(self) -> "SessionStepRequest":
+        """Validate that required params are present for each action type.
+
+        VAL-SES-017: search requires ``query`` in params.
+        VAL-SES-018: scrape requires ``urls`` in params.
+        VAL-SES-019: query requires ``question`` in params.
+        VAL-SES-046: search with empty query string is rejected.
+        VAL-SES-047: scrape with empty URLs list is rejected.
+        """
+        params = self.params or {}
+        if self.action == "search":
+            query = params.get("query")
+            if query is None:
+                raise ValueError("search action requires a 'query' parameter")
+            if isinstance(query, str) and not query.strip():
+                raise ValueError("search action requires a non-empty 'query' parameter")
+        elif self.action == "scrape":
+            urls = params.get("urls")
+            if urls is None:
+                raise ValueError("scrape action requires a 'urls' parameter")
+            if isinstance(urls, list) and len(urls) == 0:
+                raise ValueError("scrape action requires a non-empty 'urls' list")
+        elif self.action == "query":
+            question = params.get("question")
+            if question is None:
+                raise ValueError("query action requires a 'question' parameter")
+            if isinstance(question, str) and not question.strip():
+                raise ValueError(
+                    "query action requires a non-empty 'question' parameter"
+                )
+        elif self.action == "deepen":
+            ref = params.get("ref")
+            depth_prompt = params.get("depth_prompt")
+            if ref is None:
+                raise ValueError("deepen action requires a 'ref' parameter")
+            if depth_prompt is None:
+                raise ValueError("deepen action requires a 'depth_prompt' parameter")
+        return self
+
 
 class SessionStepResponse(BaseModel):
     """Response from a session step execution."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     success: bool = True
     step_index: int = 0
@@ -1277,6 +1325,8 @@ class SessionStepResponse(BaseModel):
 
 class SessionExportResponse(BaseModel):
     """Response from session export."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     success: bool = True
     session_id: str = ""
@@ -1289,6 +1339,8 @@ class SessionExportResponse(BaseModel):
 class SessionStatusResponse(BaseModel):
     """Response from GET /v2/session/{id} — session status and history."""
 
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
     success: bool = True
     session_id: str = ""
     status: str = "active"
@@ -1299,8 +1351,14 @@ class SessionStatusResponse(BaseModel):
     artifact_length: int = 0
 
 
+# Alias for the GET session response (used by the session endpoints feature)
+SessionGetResponse = SessionStatusResponse
+
+
 class SessionDeleteResponse(BaseModel):
     """Response from DELETE /v2/session/{id}."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     success: bool = True
     session_id: str = ""
@@ -1313,6 +1371,8 @@ class SessionResolveRequest(BaseModel):
     Takes a list of ref IDs (e.g., ``["ref_1_1", "ref_2_3"]``) and
     returns the full content for each found ref.
     """
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     ref_ids: list[str] = Field(
         default_factory=list,
@@ -1328,6 +1388,8 @@ class SessionResolveResponse(BaseModel):
     Returns full source content for each requested ref ID.
     Missing refs are silently omitted from the ``refs`` dict.
     """
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     success: bool = True
     session_id: str = ""
