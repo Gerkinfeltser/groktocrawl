@@ -1248,8 +1248,8 @@ class SessionStepRequest(BaseModel):
           list of URLs), ``scrape_options`` (optional).
         - ``query``: Run LLM over accumulated session context.  Params:
           ``question`` (required), ``model`` (optional).
-        - ``deepen``: Drill deeper into a cited source.  Params: ``ref``
-          (required, citation ref from session), ``depth_prompt`` (required,
+        - ``deepen``: Drill deeper into a cited source.  Params: ``ref_id``
+          (required, citation ref from session), ``sub_topic`` (required,
           follow-up question), ``max_sources`` (optional, default 3).
     """
 
@@ -1306,12 +1306,20 @@ class SessionStepRequest(BaseModel):
                     "query action requires a non-empty 'question' parameter"
                 )
         elif self.action == "deepen":
-            ref = params.get("ref")
-            depth_prompt = params.get("depth_prompt")
-            if ref is None:
-                raise ValueError("deepen action requires a 'ref' parameter")
-            if depth_prompt is None:
-                raise ValueError("deepen action requires a 'depth_prompt' parameter")
+            ref_id = params.get("ref_id")
+            sub_topic = params.get("sub_topic")
+            if ref_id is None:
+                raise ValueError("deepen action requires a 'ref_id' parameter")
+            if not isinstance(ref_id, str) or not ref_id.strip():
+                raise ValueError(
+                    "deepen action requires a non-empty 'ref_id' parameter"
+                )
+            if sub_topic is None:
+                raise ValueError("deepen action requires a 'sub_topic' parameter")
+            if not isinstance(sub_topic, str) or not sub_topic.strip():
+                raise ValueError(
+                    "deepen action requires a non-empty 'sub_topic' parameter"
+                )
         return self
 
 
@@ -1764,16 +1772,16 @@ class DeepenRequest(BaseModel):
     ``SessionStepRequest.params`` for the ``deepen`` session action.
 
     Attributes:
-        ref: Citation reference from the session (e.g., ``ref_2_3``).
-        depth_prompt: Follow-up question or investigation angle.
+        ref_id: Citation reference from the session (e.g., ``ref_2_3``).
+        sub_topic: Follow-up question or investigation angle.
         max_sources: Maximum new sources to discover (default 3).
     """
 
-    ref: str = Field(
+    ref_id: str = Field(
         ...,
         description="Citation reference from the session (e.g., ref_2_3)",
     )
-    depth_prompt: str = Field(
+    sub_topic: str = Field(
         ...,
         max_length=10000,
         description="Follow-up question or investigation angle",

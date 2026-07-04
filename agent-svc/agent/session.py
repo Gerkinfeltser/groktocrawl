@@ -503,7 +503,7 @@ class SessionManager:
         """Execute a deepen step: drill deeper into a cited source.
 
         1. Finds the cited source in the session's accumulated content.
-        2. Generates a targeted search query based on depth_prompt + source.
+        2. Generates a targeted search query based on sub_topic + source.
         3. Searches for new sources (skipping already-scraped URLs).
         4. Scrapes new sources.
         5. Runs LLM to synthesise findings.
@@ -511,8 +511,8 @@ class SessionManager:
 
         Args:
             session_id: The session to modify.
-            params: Must contain ``ref`` (citation ref from session, e.g.,
-                ``ref_2_3``) and ``depth_prompt`` (follow-up question).
+            params: Must contain ``ref_id`` (citation ref from session, e.g.,
+                ``ref_2_3``) and ``sub_topic`` (follow-up question).
                 Optional ``max_sources`` (default 3, max 10).
 
         Returns:
@@ -520,28 +520,28 @@ class SessionManager:
             ``new_sources``, ``inserted_at``, and ``summary``.
 
         Raises:
-            ValueError: If ``ref`` or ``depth_prompt`` is missing, the
+            ValueError: If ``ref_id`` or ``sub_topic`` is missing, the
                 referenced source is not found, or the session doesn't exist.
         """
-        ref = params.get("ref", "")
-        depth_prompt = params.get("depth_prompt", "")
+        ref_id = params.get("ref_id", "")
+        sub_topic = params.get("sub_topic", "")
         max_sources = params.get("max_sources", 3)
 
-        if not ref:
+        if not ref_id:
             raise ValueError(
-                "deepen action requires a 'ref' parameter (citation reference)"
+                "deepen action requires a 'ref_id' parameter (citation reference)"
             )
-        if not depth_prompt:
-            raise ValueError("deepen action requires a 'depth_prompt' parameter")
+        if not sub_topic:
+            raise ValueError("deepen action requires a 'sub_topic' parameter")
 
         # Clamp max_sources
         max_sources = max(1, min(max_sources, 10))
 
         # 1. Find the cited source in the session's refs
-        ref_data = self.store.get_ref(session_id, ref)
+        ref_data = self.store.get_ref(session_id, ref_id)
         if ref_data is None:
             raise ValueError(
-                f"Citation reference {ref!r} not found in session {session_id}. "
+                f"Citation reference {ref_id!r} not found in session {session_id}. "
                 f"Available refs: {list(self.store.get_refs(session_id).keys())}"
             )
 
@@ -550,7 +550,7 @@ class SessionManager:
         source_markdown = ref_data.get("markdown", "")
         if not source_markdown:
             raise ValueError(
-                f"Reference {ref!r} has no scraped content. "
+                f"Reference {ref_id!r} has no scraped content. "
                 f"Scrape the URL ({source_url}) before deepening."
             )
 
@@ -562,16 +562,16 @@ class SessionManager:
             f"generate 2-3 highly specific web search queries to find additional "
             f"information that deepens the investigation.\n\n"
             f"SOURCE ({source_title or source_url}):\n{source_context}\n\n"
-            f"FOLLOW-UP QUESTION: {depth_prompt}\n\n"
+            f"FOLLOW-UP QUESTION: {sub_topic}\n\n"
             f"Return ONLY the search queries, one per line. No other text."
         )
 
         searxng = SearXNGClient(searxng_url)
         try:
             # 3. Search for new sources
-            # First, use the depth_prompt directly for the primary search
+            # First, use the sub_topic directly for the primary search
             primary_results, _health = await searxng.search(
-                depth_prompt, limit=max_sources
+                sub_topic, limit=max_sources
             )
 
             # Collect existing URLs to skip duplicates
@@ -667,9 +667,9 @@ class SessionManager:
             new_context = "\n\n---\n\n".join(new_context_parts)
 
             synthesis_prompt = (
-                f"ORIGINAL SOURCE ({ref}):\n{source_context}\n\n"
+                f"ORIGINAL SOURCE ({ref_id}):\n{source_context}\n\n"
                 f"NEW SOURCES (deep-dive results):\n{new_context}\n\n"
-                f"DEPTH PROMPT: {depth_prompt}\n\n"
+                f"DEPTH PROMPT: {sub_topic}\n\n"
                 f"Synthesise the new findings. Focus on what NEW information the "
                 f"deep-dive sources add beyond the original source. Be specific and "
                 f"cite sources by URL. Format in clean markdown."
@@ -691,7 +691,7 @@ class SessionManager:
         else:
             new_findings = (
                 f"No new sources could be discovered or scraped for the "
-                f"deep-dive on {ref!r} with prompt: {depth_prompt}"
+                f"deep-dive on {ref_id!r} with prompt: {sub_topic}"
             )
 
         # Store findings
@@ -700,11 +700,11 @@ class SessionManager:
             {
                 "action": "deepen",
                 "params": {
-                    "ref": ref,
-                    "depth_prompt": depth_prompt,
+                    "ref_id": ref_id,
+                    "sub_topic": sub_topic,
                     "max_sources": max_sources,
                 },
-                "summary": f"Deepen: {ref!r} — {depth_prompt[:80]}...",
+                "summary": f"Deepen: {ref_id!r} — {sub_topic[:80]}...",
             },
         )
         if step_index is None:
@@ -729,8 +729,8 @@ class SessionManager:
 
         # Append deepen findings to artifact
         section = (
-            f"\n\n## Step {step_index}: Deepen — {ref}\n\n"
-            f"**Depth prompt:** {depth_prompt}\n\n"
+            f"\n\n## Step {step_index}: Deepen — {ref_id}\n\n"
+            f"**Sub-topic:** {sub_topic}\n\n"
             f"{new_findings}\n\n"
             f"*Deeper sources:*\n"
         )
@@ -739,7 +739,7 @@ class SessionManager:
         section += "\n"
         self.store.append_artifact(session_id, section)
 
-        inserted_at = ref  # Findings are inserted after the cited source
+        inserted_at = ref_id  # Findings are inserted after the cited source
 
         # Build new_sources list for the response
         new_sources_list = [
@@ -753,6 +753,6 @@ class SessionManager:
             "new_findings": new_findings,
             "new_sources": new_sources_list,
             "inserted_at": inserted_at,
-            "ref": ref,
-            "summary": f"Deepen on {ref!r}: {len(scraped)} new sources, {len(new_findings)} chars of findings",
+            "ref_id": ref_id,
+            "summary": f"Deepen on {ref_id!r}: {len(scraped)} new sources, {len(new_findings)} chars of findings",
         }

@@ -7494,8 +7494,8 @@ def test_session_step_deepen_val():
         json={
             "action": "deepen",
             "params": {
-                "ref": target_ref,
-                "depth_prompt": "What additional information can be found about this domain?",
+                "ref_id": target_ref,
+                "sub_topic": "What additional information can be found about this domain?",
                 "max_sources": 3,
             },
         },
@@ -7505,10 +7505,503 @@ def test_session_step_deepen_val():
     data = s2.json()
     assert data["stepIndex"] == 2
     assert data["action"] == "deepen"
-    assert data["result"]["ref"] == target_ref
+    assert data["result"]["ref_id"] == target_ref
     assert len(data["result"]["new_findings"]) > 0
     assert data["result"]["inserted_at"] == target_ref
 
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+# ── Deepen Action Tests (m4-deepen-action) ─────────────────────────────────
+
+
+def test_deepen_valid_ref_after_search_val_dpn_001():
+    """VAL-DPN-001: Deepen on valid ref in session with prior steps succeeds.
+    Create a session, execute a search step, scrape a result, then deepen on a
+    specific ref from the search step. Verify deepen returns step_index, action,
+    and new_ref_ids.
+    """
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 600}, timeout=10)
+    sid = r.json()["sessionId"]
+    # Step 1: search
+    s1 = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "search",
+            "params": {"query": "Python web frameworks", "limit": 3},
+        },
+        timeout=60,
+    )
+    assert s1.status_code == 200, s1.text
+    refs = s1.json()["result"].get("top_refs", [])
+    assert len(refs) > 0, "Need at least one search result"
+    target_ref = refs[0]["ref_id"]
+    # Step 2: deepen
+    s2 = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "deepen",
+            "params": {
+                "ref_id": target_ref,
+                "sub_topic": "Django vs FastAPI comparison",
+            },
+        },
+        timeout=120,
+    )
+    assert s2.status_code == 200, s2.text
+    data = s2.json()
+    assert data["stepIndex"] == 2
+    assert data["action"] == "deepen"
+    assert data["result"]["ref_id"] == target_ref
+    assert "new_findings" in data["result"]
+    # Check new refs use step-prefixed indices
+    new_sources = data["result"].get("new_sources", [])
+    for ns in new_sources:
+        assert ns["ref_id"].startswith(f"ref_{data['stepIndex']}_"), (
+            f"New ref {ns['ref_id']} should start with ref_{data['stepIndex']}_"
+        )
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_deepen_nonexistent_ref_val_dpn_002():
+    """VAL-DPN-002: Deepen on non-existent ref returns error.
+    Target a ref_id that does not exist in the session and verify error response.
+    """
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 600}, timeout=10)
+    sid = r.json()["sessionId"]
+    # Add a search step so session exists but target a non-existent ref
+    httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={"action": "search", "params": {"query": "Python", "limit": 1}},
+        timeout=30,
+    )
+    s2 = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "deepen",
+            "params": {"ref_id": "ref_999_999", "sub_topic": "test"},
+        },
+        timeout=10,
+    )
+    data = s2.json()
+    assert not data.get("success") or "error" in data or "detail" in data, (
+        f"Expected error for non-existent ref, got {data}"
+    )
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_deepen_cross_session_isolation_val_dpn_003():
+    """VAL-DPN-003: Deepen on ref from another session returns error.
+    Create two sessions. Attempt to deepen on a ref from session A while in
+    session B. Should fail.
+    """
+    r1 = httpx.post(AGENT + "/v2/session/create", json={"ttl": 600}, timeout=10)
+    r2 = httpx.post(AGENT + "/v2/session/create", json={"ttl": 600}, timeout=10)
+    s1_id = r1.json()["sessionId"]
+    s2_id = r2.json()["sessionId"]
+    # Add search to session 1
+    s1 = httpx.post(
+        AGENT + f"/v2/session/{s1_id}/step",
+        json={"action": "search", "params": {"query": "Rust programming", "limit": 1}},
+        timeout=30,
+    )
+    refs = s1.json()["result"].get("top_refs", [])
+    assert len(refs) > 0
+    ref_from_s1 = refs[0]["ref_id"]
+    # Try to deepen on session 2 using ref from session 1
+    s2 = httpx.post(
+        AGENT + f"/v2/session/{s2_id}/step",
+        json={
+            "action": "deepen",
+            "params": {"ref_id": ref_from_s1, "sub_topic": "test"},
+        },
+        timeout=10,
+    )
+    data = s2.json()
+    # Session 2 has no prior steps, so ref won't be found (that's expected)
+    assert not data.get("success") or "error" in data or "detail" in data, (
+        f"Expected error for cross-session ref, got {data}"
+    )
+    httpx.delete(AGENT + f"/v2/session/{s1_id}", timeout=10)
+    httpx.delete(AGENT + f"/v2/session/{s2_id}", timeout=10)
+
+
+def test_deepen_artifact_location_val_dpn_004():
+    """VAL-DPN-004: Deepen results inserted at correct location in artifact.
+    After deepen, the session artifact should contain the deepen findings in a
+    section near the referenced source.
+    """
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 600}, timeout=10)
+    sid = r.json()["sessionId"]
+    # Search
+    s1 = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "search",
+            "params": {"query": "Go programming language", "limit": 3},
+        },
+        timeout=60,
+    )
+    refs = s1.json()["result"].get("top_refs", [])
+    target_ref = refs[0]["ref_id"]
+    # Deepen
+    httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "deepen",
+            "params": {"ref_id": target_ref, "sub_topic": "Go concurrency patterns"},
+        },
+        timeout=120,
+    )
+    # Export and verify artifact structure
+    export = httpx.post(
+        AGENT + f"/v2/session/{sid}/export",
+        json={},
+        timeout=10,
+    )
+    artifact = export.json()["artifact"]
+    # The deepen section should appear after the search section in the artifact
+    search_pos = artifact.find("## Step 1: Search")
+    deepen_pos = artifact.find("## Step 2: Deepen")
+    assert search_pos >= 0, "Search section not found in artifact"
+    assert deepen_pos > search_pos, (
+        f"Deepen section should appear after search section. "
+        f"search_pos={search_pos}, deepen_pos={deepen_pos}"
+    )
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_deepen_new_refs_with_indices_val_dpn_005():
+    """VAL-DPN-005: Deepen adds new refs with appropriate indices.
+    After a deepen action, new references should be created with ref_ids
+    following the pattern ref_{step_index}_{source_index}.
+    """
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 600}, timeout=10)
+    sid = r.json()["sessionId"]
+    httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "search",
+            "params": {"query": "TypeScript decorators", "limit": 3},
+        },
+        timeout=60,
+    )
+    s2 = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "deepen",
+            "params": {
+                "ref_id": "ref_1_1",
+                "sub_topic": "TypeScript 5 decorators ECMA",
+            },
+        },
+        timeout=120,
+    )
+    data = s2.json()
+    step_index = data["stepIndex"]
+    new_sources = data["result"].get("new_sources", [])
+    for ns in new_sources:
+        expected_prefix = f"ref_{step_index}_"
+        assert ns["ref_id"].startswith(expected_prefix), (
+            f"Ref {ns['ref_id']} should start with {expected_prefix}"
+        )
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_deepen_no_results_graceful_val_dpn_006():
+    """VAL-DPN-006: Deepen with sub_topic yielding no results completes gracefully.
+    Deepen should handle empty search results without error.
+    """
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 600}, timeout=10)
+    sid = r.json()["sessionId"]
+    httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "search",
+            "params": {"query": "Rust programming language", "limit": 1},
+        },
+        timeout=60,
+    )
+    s2 = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "deepen",
+            "params": {
+                "ref_id": "ref_1_1",
+                "sub_topic": "xyznonexistenttopic12345whatever",
+            },
+        },
+        timeout=120,
+    )
+    data = s2.json()
+    # Should still succeed - just with empty/new findings message
+    assert data.get("stepIndex") is not None, (
+        f"Deepen should complete even with no results, got {data}"
+    )
+    assert data["action"] == "deepen"
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_deepen_duplicate_url_skip_val_dpn_007():
+    """VAL-DPN-007: Deepen skips duplicate scrape of already-seen URL.
+    If a session already has a ref for a URL, deepen should not re-scrape it.
+    """
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 600}, timeout=10)
+    sid = r.json()["sessionId"]
+    # Scrape a known URL first
+    s1 = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={"action": "scrape", "params": {"urls": ["http://example.com"]}},
+        timeout=120,
+    )
+    refs = s1.json()["result"]["refs"]
+    target_ref = refs[0]["ref_id"]
+    # Now deepen - the search might return example.com again, should be skipped
+    s2 = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "deepen",
+            "params": {"ref_id": target_ref, "sub_topic": "example domain information"},
+        },
+        timeout=120,
+    )
+    data = s2.json()
+    assert data.get("stepIndex") is not None
+    # Verify no duplicate URLs in export refs
+    export = httpx.post(AGENT + f"/v2/session/{sid}/export", json={}, timeout=10)
+    refs_data = export.json()["refs"]
+    urls = [v["url"] for v in refs_data.values()]
+    assert len(urls) == len(set(urls)), f"Duplicate URLs found: {urls}"
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_deepen_interleaved_indices_consistent_val_dpn_008():
+    """VAL-DPN-008: Ref indices consistent after multiple interleaved steps.
+    After search (step 1), deepen (step 2), search (step 3), deepen (step 4),
+    ref indices should be correct for each step.
+    """
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 600}, timeout=10)
+    sid = r.json()["sessionId"]
+    # Step 1: search
+    httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={"action": "search", "params": {"query": "Kubernetes basics", "limit": 3}},
+        timeout=60,
+    )
+    # Step 2: deepen
+    httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "deepen",
+            "params": {"ref_id": "ref_1_1", "sub_topic": "Kubernetes operators"},
+        },
+        timeout=120,
+    )
+    # Step 3: search
+    httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={"action": "search", "params": {"query": "Docker compose", "limit": 2}},
+        timeout=60,
+    )
+    # Step 4: deepen
+    httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "deepen",
+            "params": {"ref_id": "ref_3_1", "sub_topic": "Docker networking"},
+        },
+        timeout=120,
+    )
+    # Export and verify indices
+    export = httpx.post(AGENT + f"/v2/session/{sid}/export", json={}, timeout=10)
+    refs_data = export.json()["refs"]
+    # Group by step
+    from collections import defaultdict
+
+    by_step = defaultdict(list)
+    for rid in refs_data:
+        parts = rid.split("_")
+        if len(parts) == 3:
+            step = int(parts[1])
+            idx = int(parts[2])
+            by_step[step].append(idx)
+    # Verify each step's refs start at 1 and are sequential
+    for step, indices in sorted(by_step.items()):
+        assert min(indices) == 1, f"Step {step} refs should start at 1, got {indices}"
+        assert indices == sorted(indices), f"Step {step} refs not sequential: {indices}"
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_deepen_empty_session_error_val_dpn_009():
+    """VAL-DPN-009: Deepen on empty session (no prior steps) returns error."""
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 600}, timeout=10)
+    sid = r.json()["sessionId"]
+    s = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "deepen",
+            "params": {"ref_id": "ref_1_1", "sub_topic": "empty session"},
+        },
+        timeout=10,
+    )
+    data = s.json()
+    assert not data.get("success") or "error" in data or "detail" in data, (
+        f"Expected error for deepen on empty session, got {data}"
+    )
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_deepen_missing_ref_id_val_dpn_010():
+    """VAL-DPN-010: Deepen with missing ref_id parameter returns validation error."""
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 600}, timeout=10)
+    sid = r.json()["sessionId"]
+    s = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "deepen",
+            "params": {"sub_topic": "missing ref_id"},
+        },
+        timeout=10,
+    )
+    assert s.status_code == 422, (
+        f"Expected 422 for missing ref_id, got {s.status_code}: {s.text}"
+    )
+    body = s.json()
+    assert "ref_id" in str(body).lower(), f"Error should mention ref_id: {body}"
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_deepen_persists_through_export_val_dpn_011():
+    """VAL-DPN-011: Deepen persists through session export.
+    After deepen, export the session and verify deepen refs appear in export refs.
+    """
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 600}, timeout=10)
+    sid = r.json()["sessionId"]
+    httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "search",
+            "params": {"query": "Kubernetes operators", "limit": 3},
+        },
+        timeout=60,
+    )
+    httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "deepen",
+            "params": {"ref_id": "ref_1_1", "sub_topic": "operator SDK comparison"},
+        },
+        timeout=120,
+    )
+    export = httpx.post(AGENT + f"/v2/session/{sid}/export", json={}, timeout=10)
+    refs = export.json()["refs"]
+    deepen_refs = {k: v for k, v in refs.items() if k.startswith("ref_2_")}
+    for rid, rdata in deepen_refs.items():
+        assert rdata.get("url"), f"Ref {rid} missing URL"
+        assert rdata.get("title") is not None, f"Ref {rid} missing title"
+    assert len(deepen_refs) > 0, "Expected at least one deepen ref in export"
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_deepen_isolated_to_target_ref_val_dpn_012():
+    """VAL-DPN-012: Deepen only affects targeted ref (isolated).
+    After two search steps, deepening ref_1_1 should only add refs for step 2,
+    not re-process refs from step 1's other sources.
+    """
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 600}, timeout=10)
+    sid = r.json()["sessionId"]
+    httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "search",
+            "params": {"query": "Rust web frameworks 2025", "limit": 5},
+        },
+        timeout=60,
+    )
+    # Get step 1 ref count
+    export1 = httpx.post(AGENT + f"/v2/session/{sid}/export", json={}, timeout=10)
+    step1_refs = len(
+        [k for k in export1.json().get("refs", {}) if k.startswith("ref_1_")]
+    )
+    # Deepen on ref_1_1
+    httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "deepen",
+            "params": {"ref_id": "ref_1_1", "sub_topic": "Actix Web performance"},
+        },
+        timeout=120,
+    )
+    # Verify step 1 refs unchanged
+    export2 = httpx.post(AGENT + f"/v2/session/{sid}/export", json={}, timeout=10)
+    step1_refs_after = len(
+        [k for k in export2.json().get("refs", {}) if k.startswith("ref_1_")]
+    )
+    assert step1_refs == step1_refs_after, (
+        f"Step 1 refs changed from {step1_refs} to {step1_refs_after}"
+    )
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_deepen_works_after_export_val_dpn_013():
+    """VAL-DPN-013: Deepen works after session export (export doesn't consume)."""
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 600}, timeout=10)
+    sid = r.json()["sessionId"]
+    httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "search",
+            "params": {"query": "GraphQL API design", "limit": 3},
+        },
+        timeout=60,
+    )
+    # Export (should be idempotent)
+    httpx.post(AGENT + f"/v2/session/{sid}/export", json={}, timeout=10)
+    # Deepen after export — should still work
+    s3 = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "deepen",
+            "params": {
+                "ref_id": "ref_1_1",
+                "sub_topic": "GraphQL subscription patterns",
+            },
+        },
+        timeout=120,
+    )
+    data = s3.json()
+    assert data.get("stepIndex") is not None, (
+        f"Deepen after export should work, got {data}"
+    )
+    assert data.get("stepIndex") == 2
+    httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
+
+
+def test_deepen_missing_sub_topic_val_dpn_015():
+    """VAL-DPN-015: Deepen with missing sub_topic returns error."""
+    r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 600}, timeout=10)
+    sid = r.json()["sessionId"]
+    httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "search",
+            "params": {"query": "API rate limiting strategies", "limit": 3},
+        },
+        timeout=60,
+    )
+    s2 = httpx.post(
+        AGENT + f"/v2/session/{sid}/step",
+        json={
+            "action": "deepen",
+            "params": {"ref_id": "ref_1_1"},
+        },
+        timeout=10,
+    )
+    assert s2.status_code == 422, (
+        f"Expected 422 for missing sub_topic, got {s2.status_code}: {s2.text}"
+    )
+    body = s2.json()
+    assert "sub_topic" in str(body).lower(), f"Error should mention sub_topic: {body}"
     httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
 
 
@@ -7590,39 +8083,39 @@ def test_session_model_validation_query_missing_question():
     httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
 
 
-def test_session_model_validation_deepen_missing_ref():
-    """Pydantic model_validator rejects deepen without ref param (422)."""
+def test_session_model_validation_deepen_missing_ref_id():
+    """Pydantic model_validator rejects deepen without ref_id param (422)."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
     sid = r.json()["sessionId"]
     step = httpx.post(
         AGENT + f"/v2/session/{sid}/step",
         json={
             "action": "deepen",
-            "params": {"depth_prompt": "Tell me more"},
+            "params": {"sub_topic": "Tell me more"},
         },
         timeout=10,
     )
     assert step.status_code == 422, f"Expected 422, got {step.status_code}: {step.text}"
     body = step.json()
-    assert "ref" in str(body).lower()
+    assert "ref_id" in str(body).lower()
     httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
 
 
-def test_session_model_validation_deepen_missing_depth_prompt():
-    """Pydantic model_validator rejects deepen without depth_prompt param (422)."""
+def test_session_model_validation_deepen_missing_sub_topic():
+    """Pydantic model_validator rejects deepen without sub_topic param (422)."""
     r = httpx.post(AGENT + "/v2/session/create", json={}, timeout=10)
     sid = r.json()["sessionId"]
     step = httpx.post(
         AGENT + f"/v2/session/{sid}/step",
         json={
             "action": "deepen",
-            "params": {"ref": "ref_1_1"},
+            "params": {"ref_id": "ref_1_1"},
         },
         timeout=10,
     )
     assert step.status_code == 422, f"Expected 422, got {step.status_code}: {step.text}"
     body = step.json()
-    assert "depth_prompt" in str(body).lower()
+    assert "sub_topic" in str(body).lower()
     httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
 
 
@@ -9569,6 +10062,184 @@ def test_plan_execute_with_modifications_list_form():
         job_id = r_exec.json()["id"]
         r_status = httpx.get(f"{AGENT}/v2/agent/{job_id}", timeout=10)
         assert r_status.status_code == 200
+
+
+def test_plan_execute_no_modifications():
+    """VAL-PLN-006: Execute with valid plan_id and no modifications.
+
+    Generates a plan, then executes it with the plan_id only (no
+    modifications field at all). The execution should create a job and
+    the plan should be consumed after execution.
+    """
+    # Step 1: Generate plan
+    r = httpx.post(
+        AGENT + "/v2/agent",
+        json={
+            "prompt": "Compare Linux and Windows for server operating systems",
+            "mode": "plan",
+        },
+        timeout=60,
+    )
+    if r.status_code == 429:
+        import pytest
+
+        pytest.skip("Rate limited — cannot generate plan")
+    assert r.status_code == 200, f"Plan generation failed: {r.status_code} {r.text}"
+    plan_id = r.json()["plan_id"]
+
+    # Step 2: Execute with NO modifications
+    r_exec = httpx.post(
+        AGENT + "/v2/agent/execute",
+        json={"plan_id": plan_id},
+        timeout=10,
+    )
+    assert r_exec.status_code in (200, 404, 410), (
+        f"Execute failed: {r_exec.status_code}: {r_exec.text}"
+    )
+    if r_exec.status_code == 200 and "id" in (r_exec.json() or {}):
+        job_id = r_exec.json()["id"]
+        r_status = httpx.get(f"{AGENT}/v2/agent/{job_id}", timeout=10)
+        assert r_status.status_code == 200
+        payload = r_status.json()
+        assert payload.get("status") in ("processing", "completed", "failed")
+
+    # Step 3: Plan should be consumed
+    r_get = httpx.get(f"{AGENT}/v2/agent/plan/{plan_id}", timeout=10)
+    assert r_get.status_code in (404, 410), (
+        f"Plan should be consumed after execution, got {r_get.status_code}"
+    )
+
+
+def test_plan_execute_narrow_modification():
+    """VAL-PLN-007: Execute with narrow modification reduces scope.
+
+    Generates a plan, then executes with a narrow modification that
+    focuses on a specific dimension.  The execution creates a job
+    and the plan is consumed after execution.
+    """
+    # Step 1: Generate plan
+    r = httpx.post(
+        AGENT + "/v2/agent",
+        json={
+            "prompt": "Compare AWS, GCP, and Azure for enterprise deployment",
+            "mode": "plan",
+        },
+        timeout=60,
+    )
+    if r.status_code == 429:
+        import pytest
+
+        pytest.skip("Rate limited — cannot generate plan")
+    assert r.status_code == 200, f"Plan generation failed: {r.status_code} {r.text}"
+    plan_id = r.json()["plan_id"]
+
+    # Step 2: Execute with narrow modification
+    r_exec = httpx.post(
+        AGENT + "/v2/agent/execute",
+        json={
+            "plan_id": plan_id,
+            "modifications": [
+                {
+                    "type": "narrow",
+                    "params": {"focus": "focus only on security and compliance"},
+                },
+            ],
+        },
+        timeout=10,
+    )
+    assert r_exec.status_code in (200, 404, 410), (
+        f"Execute with narrow failed: {r_exec.status_code}: {r_exec.text}"
+    )
+    if r_exec.status_code == 200 and "id" in (r_exec.json() or {}):
+        job_id = r_exec.json()["id"]
+        r_status = httpx.get(f"{AGENT}/v2/agent/{job_id}", timeout=10)
+        assert r_status.status_code == 200
+        payload = r_status.json()
+        assert payload.get("status") in ("processing", "completed", "failed")
+
+    # Step 3: Plan should be consumed
+    r_get = httpx.get(f"{AGENT}/v2/agent/plan/{plan_id}", timeout=10)
+    assert r_get.status_code in (404, 410), (
+        f"Plan should be consumed after narrow execution, got {r_get.status_code}"
+    )
+
+
+def test_plan_execute_add_dimension_modification():
+    """VAL-PLN-008: Execute with add_dimension modification.
+
+    Generates a plan, then executes with an add_dimension modification
+    that adds a new analysis dimension.  The execution creates a job
+    and the plan is consumed after execution.
+    """
+    # Step 1: Generate plan
+    r = httpx.post(
+        AGENT + "/v2/agent",
+        json={
+            "prompt": "Compare PostgreSQL and MySQL for web applications",
+            "mode": "plan",
+        },
+        timeout=60,
+    )
+    if r.status_code == 429:
+        import pytest
+
+        pytest.skip("Rate limited — cannot generate plan")
+    assert r.status_code == 200, f"Plan generation failed: {r.status_code} {r.text}"
+    plan_id = r.json()["plan_id"]
+
+    # Step 2: Execute with add_dimension modification
+    r_exec = httpx.post(
+        AGENT + "/v2/agent/execute",
+        json={
+            "plan_id": plan_id,
+            "modifications": [
+                {
+                    "type": "add_dimension",
+                    "params": {"dimension": "cloud hosted vs self-hosted costs"},
+                },
+            ],
+        },
+        timeout=10,
+    )
+    assert r_exec.status_code in (200, 404, 410), (
+        f"Execute with add_dimension failed: {r_exec.status_code}: {r_exec.text}"
+    )
+    if r_exec.status_code == 200 and "id" in (r_exec.json() or {}):
+        job_id = r_exec.json()["id"]
+        r_status = httpx.get(f"{AGENT}/v2/agent/{job_id}", timeout=10)
+        assert r_status.status_code == 200
+        payload = r_status.json()
+        assert payload.get("status") in ("processing", "completed", "failed")
+
+    # Step 3: Plan should be consumed
+    r_get = httpx.get(f"{AGENT}/v2/agent/plan/{plan_id}", timeout=10)
+    assert r_get.status_code in (404, 410), (
+        f"Plan should be consumed after add_dimension execution, got {r_get.status_code}"
+    )
+
+
+def test_plan_execute_expired_plan_404():
+    """VAL-PLN-012: Executing with an expired/non-existent plan returns 404.
+
+    Creates a plan with a very short TTL via direct Valkey manipulation
+    (or uses a non-existent ID).  Verifies that executing such a plan
+    returns 404.
+    """
+    # Use a non-existent UUID to simulate an expired/missing plan
+    r = httpx.post(
+        AGENT + "/v2/agent/execute",
+        json={"plan_id": "99999999-9999-9999-9999-999999999999"},
+        timeout=10,
+    )
+    assert r.status_code in (404, 410), (
+        f"Expected 404/410 for expired/non-existent plan, got {r.status_code}: {r.text}"
+    )
+    d = r.json()
+    assert d.get("success") is False, f"Expected error response, got: {d}"
+    assert (
+        "not found" in d.get("error", "").lower()
+        or "expired" in d.get("error", "").lower()
+    ), f"Error should mention not found or expired: {d}"
 
 
 def test_plan_execute_full_end_to_end():
