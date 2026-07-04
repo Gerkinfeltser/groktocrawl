@@ -51,9 +51,12 @@ class TestProcessAgentAsync:
                 scraper_url="http://scraper:8001",
             )
 
-        mock_store.complete_job.assert_called_once_with(
-            "test-job-1", {"result": "research result", "sources": ["https://a.com"]}
-        )
+        mock_store.complete_job.assert_called_once()
+        call_args = mock_store.complete_job.call_args
+        assert call_args[0][0] == "test-job-1"
+        payload = call_args[0][1]
+        assert payload["result"] == "research result"
+        assert payload["sources"] == ["https://a.com"]
         mock_deliver_webhook.assert_called_once()
         # Check that metrics were recorded
         assert mock_metrics.counter.call_count >= 2

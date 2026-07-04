@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Callable, Coroutine
 from typing import Any
@@ -79,14 +80,111 @@ async def _process_agent_async(
     webhook_config: dict[str, Any] | None = None,
     requested_model: str | None = None,
     include_images: bool = False,
+    citation_style: Any = None,
+    force_fresh: bool = False,
+    user_id: str | None = None,
 ) -> None:
     settings = _get_worker_settings()
-    store = JobStore(
+    redis_url = (
         f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
     )
+    store = JobStore(redis_url)
+    from .models import CitationStyle
+
+    cs = (
+        citation_style
+        if isinstance(citation_style, CitationStyle)
+        else CitationStyle.inline
+    )
+
+    # ── Research Memory scope ─────────────────────────────────────
+    memory_scope = os.environ.get("RESEARCH_MEMORY_SCOPE", "global")
+    if memory_scope == "per_user" and user_id is None:
+        user_id = "anonymous"
+
+    # ── Research Memory — check cache before pipeline ──────────────
+    stale_cache_hit: dict | None = None
+    if not force_fresh:
+        try:
+            from .research_memory import ResearchMemory
+
+            memory = ResearchMemory(
+                redis_url=redis_url,
+                semantic_url=settings.semantic_url,
+            )
+            cache_result = await memory.query(
+                prompt=prompt,
+                user_id=user_id if memory_scope == "per_user" else None,
+            )
+            if cache_result["hit"]:
+                freshness = cache_result.get("freshness", "stale")
+                if freshness == "fresh" or freshness == "aging":
+                    # Cache hit is fresh or aging — return cached result directly
+                    logger.info(
+                        "Research memory %s hit for agent %s — returning cached result",
+                        freshness,
+                        job_id,
+                    )
+                    entry = cache_result["artifact"]
+                    # Apply citation style to cached artifact if needed
+                    sources = entry.get("sources", [])
+                    result_text = entry.get("artifact", "")
+                    from .research import _apply_citation_style
+
+                    result_text, _ = _apply_citation_style(result_text, sources, cs)
+
+                    cached_payload: dict[str, Any] = {
+                        "result": result_text,
+                        "sources": [s.get("url", "") for s in sources],
+                        "source_details": sources,
+                        "from_cache": True,
+                        "freshness": freshness,
+                        "similarity": cache_result.get("similarity", 0),
+                        "memory_id": cache_result.get("memory_id", ""),
+                    }
+                    # Apply compact citation transformation
+                    if cs == CitationStyle.compact:
+                        compact_sources = []
+                        for i, src in enumerate(sources, start=1):
+                            compact_sources.append(
+                                {
+                                    "index": i,
+                                    "url": src.get("url", ""),
+                                }
+                            )
+                        cached_payload["sources_compact"] = compact_sources
+                        cached_payload["source_details"] = []
+                    store.complete_job(job_id, cached_payload)
+                    await deliver_webhook(
+                        webhook_config, "completed", job_id, cached_payload
+                    )
+                    return
+                else:
+                    # Stale hit — run normal pipeline but note cached version
+                    logger.info(
+                        "Research memory %s hit for agent %s — running fresh research "
+                        "(cached version exists)",
+                        freshness,
+                        job_id,
+                    )
+                    stale_cache_hit = cache_result
+            else:
+                logger.debug("Research memory miss for agent %s", job_id)
+        except Exception:
+            logger.warning(
+                "Research memory lookup failed for agent %s — proceeding with "
+                "normal pipeline",
+                job_id,
+                exc_info=True,
+            )
+    else:
+        logger.info(
+            "force_fresh=True for agent %s — bypassing research memory cache",
+            job_id,
+        )
 
     async def work_fn() -> dict[str, Any]:
-        return await run_research(
+        result = await run_research(
             prompt=prompt,
             urls=urls,
             schema=schema_,
@@ -97,7 +195,90 @@ async def _process_agent_async(
             llm_model=llm_model,
             requested_model=requested_model,
             include_images=include_images,
+            citation_style=cs,
         )
+        # Apply citation style to transform bare [N] markers to [N](url)
+        # for compact style, or leave them unchanged for inline style.
+        source_details = result.get("source_details", [])
+        from .research import _apply_citation_style
+
+        result_text, _ = _apply_citation_style(result["result"], source_details, cs)
+        result["result"] = result_text
+
+        # Save rich source_details for memory storage BEFORE compactifying
+        # the API response. Cache-hit paths expect sources as list[dict].
+        rich_source_details = source_details or result.get("source_details", [])
+
+        # When citation_style is compact, replace full source_details with
+        # a compact citations mapping (index → {url}) to reduce
+        # response payload size.
+        if cs == CitationStyle.compact:
+            compact_sources: list[dict[str, str | int]] = []
+            for i, src in enumerate(source_details, start=1):
+                compact_sources.append(
+                    {
+                        "index": i,
+                        "url": src.get("url", ""),
+                    }
+                )
+            result["sources_compact"] = compact_sources
+            # Drop the full source_details from the API response to save payload size
+            result["source_details"] = []
+
+        # ── Store fresh result in research memory ──────────────────
+        try:
+            from .research_memory import ResearchMemory
+
+            memory = ResearchMemory(
+                redis_url=redis_url,
+                semantic_url=settings.semantic_url,
+            )
+            answer = result.get("result", "")
+            # Use rich_source_details (preserved before compactification) for memory
+            store_sources = rich_source_details or result.get("sources", [])
+            if not store_sources:
+                store_sources = result.get("sources", [])
+            metadata: dict[str, Any] = {
+                "model": llm_model,
+                "citation_style": cs.value,
+            }
+            if requested_model and requested_model != "default":
+                metadata["requested_model"] = requested_model
+            if hasattr(result, "get"):
+                metadata["latency_ms"] = result.get("latency_ms", 0)
+
+            memory_user_id = user_id if memory_scope == "per_user" else None
+            artifact_id = await memory.store(
+                prompt=prompt,
+                artifact=answer,
+                sources=store_sources,
+                model=llm_model,
+                user_id=memory_user_id,
+                metadata=metadata,
+            )
+            logger.info(
+                "Stored research memory artifact %s for agent %s (scope=%s)",
+                artifact_id,
+                job_id,
+                memory_scope,
+            )
+            result["research_memory_id"] = artifact_id
+        except Exception:
+            logger.warning(
+                "Failed to store research memory for agent %s (service may be down)",
+                job_id,
+                exc_info=True,
+            )
+
+        # Note stale cache existence if applicable
+        if stale_cache_hit:
+            result["cached_version_exists"] = True
+            result["cached_version_age_hours"] = stale_cache_hit.get("age_hours", 0)
+            result["cached_version_freshness"] = stale_cache_hit.get(
+                "freshness", "stale"
+            )
+
+        return result
 
     await _run_job_with_observability(job_id, "agent", store, webhook_config, work_fn)
 
@@ -559,3 +740,189 @@ async def _index_batch_async(pages: list[dict]) -> None:
         logger.debug(
             "Failed to batch-index %d pages (vector index unavailable)", len(pages)
         )
+
+
+async def _process_plan_execution_async(
+    job_id: str,
+    prompt: str,
+    plan: dict[str, Any],
+    modifications: dict[str, Any] | None,
+    llm_base_url: str,
+    llm_api_key: str,
+    llm_model: str,
+    searxng_url: str,
+    scraper_url: str,
+    webhook_config: dict[str, Any] | None = None,
+) -> None:
+    """Process a plan execution job asynchronously (sync/polling path).
+
+    Follows the plan phases: search → scrape → synthesize in sequence,
+    guided by the plan structure and optional modifications.
+
+    Args:
+        job_id: The job UUID for status polling.
+        prompt: The original user research prompt.
+        plan: The plan dict with ``phases``, ``estimated_sources``, ``dimensions``.
+        modifications: Optional unified modifications dict.
+        llm_base_url: LLM API base URL.
+        llm_api_key: LLM API key.
+        llm_model: LLM model name.
+        searxng_url: SearXNG base URL.
+        scraper_url: Scraper service base URL.
+        webhook_config: Optional webhook configuration.
+    """
+    settings = _get_worker_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+    store = JobStore(redis_url)
+
+    async def work_fn() -> dict[str, Any]:
+        from .llm import LLMClient
+        from .research import _scrape_urls
+        from .scraper_client import ScraperClient
+        from .searxng_client import SearXNGClient
+
+        llm = LLMClient(
+            base_url=llm_base_url,
+            api_key=llm_api_key,
+            model=llm_model,
+        )
+        searxng = SearXNGClient(searxng_url)
+        scraper = ScraperClient(scraper_url)
+
+        all_sources: list[dict] = []
+        accumulated_context_parts: list[str] = []
+        seen_urls: set[str] = set()
+        full_synthesis = ""
+
+        try:
+            phases = plan.get("phases", [])
+            for phase_idx, phase in enumerate(phases):
+                # Check for cancellation between phases
+                job_meta = store.get_job(job_id)
+                if job_meta and job_meta.get("status") == "cancelled":
+                    logger.info(
+                        "Plan execution %s cancelled at phase %d/%d",
+                        job_id,
+                        phase_idx + 1,
+                        len(phases),
+                    )
+                    break
+
+                action = phase.get("action", "search")
+                description = phase.get("description", "")
+
+                if action == "search":
+                    query = description or prompt
+                    if modifications and modifications.get("narrow"):
+                        query = f"{modifications.get('narrow')} {query}"
+                    # Apply modify_query modifications for this specific phase
+                    if modifications and modifications.get("modify_queries"):
+                        for mq in modifications["modify_queries"]:
+                            if mq.get("phase_index") == phase_idx and mq.get(
+                                "new_query"
+                            ):
+                                query = mq["new_query"]
+                                break
+
+                    try:
+                        results, _health = await searxng.search(query, limit=10)
+                    except Exception:
+                        results = []
+
+                    new_urls = []
+                    for r in results:
+                        url = r.get("url", "")
+                        if url and url not in seen_urls:
+                            seen_urls.add(url)
+                            new_urls.append(url)
+                            all_sources.append(
+                                {
+                                    "url": url,
+                                    "title": r.get("title", ""),
+                                    "relevance": r.get("description", ""),
+                                }
+                            )
+
+                    if new_urls:
+                        scraped_docs, scraped_details = await _scrape_urls(
+                            new_urls[:5],
+                            scraper,
+                            min_sources=1,
+                            max_attempts=min(5, len(new_urls)),
+                        )
+                        for doc, _detail in zip(
+                            scraped_docs, scraped_details, strict=False
+                        ):
+                            accumulated_context_parts.append(doc)
+
+                elif action == "synthesize":
+                    context = (
+                        "\n\n---\n\n".join(accumulated_context_parts)
+                        if accumulated_context_parts
+                        else ""
+                    )
+                    synthesis_prompt = (
+                        description or f"Synthesise findings for: {prompt}"
+                    )
+
+                    dimensions = list(
+                        plan.get("comparison_dimensions", plan.get("dimensions", []))
+                    )
+                    if modifications:
+                        if modifications.get("add_dimension"):
+                            for d in modifications.get("add_dimension", []):
+                                if d not in dimensions:
+                                    dimensions.append(d)
+                        if modifications.get("remove_dimension"):
+                            dimensions = [
+                                d
+                                for d in dimensions
+                                if d
+                                not in (modifications.get("remove_dimension") or [])
+                            ]
+
+                    if dimensions:
+                        dims_str = ", ".join(dimensions)
+                        synthesis_prompt = (
+                            f"{synthesis_prompt}\n\n"
+                            f"CRITICAL: Address each of these analysis dimensions: {dims_str}. "
+                            f"For each dimension, provide specific evidence from the sources below."
+                        )
+
+                    synthesis_prompt = (
+                        f"{synthesis_prompt}\n\n"
+                        f"Base your answer ONLY on the source content provided below. "
+                        f"Cite sources by their URL. Be thorough and precise."
+                    )
+
+                    full_synthesis = await llm.generate(
+                        system_prompt=(
+                            "You are GroktoCrawl, a research synthesis agent. "
+                            "Synthesise information from the provided sources into a "
+                            "comprehensive, well-structured answer. Be thorough, precise, "
+                            "and cite specific sources."
+                        ),
+                        user_prompt=synthesis_prompt,
+                        context=context or None,
+                    )
+                    if full_synthesis:
+                        accumulated_context_parts.append(full_synthesis)
+
+            return {
+                "result": full_synthesis,
+                "sources": [s.get("url", "") for s in all_sources],
+                "source_details": all_sources,
+                "phases_completed": len(phases),
+                "total_sources": len(all_sources),
+            }
+
+        finally:
+            await llm.close()
+            await searxng.close()
+            await scraper.close()
+
+    await _run_job_with_observability(
+        job_id, "plan_execute", store, webhook_config, work_fn
+    )

@@ -34,8 +34,16 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         context: str | None = None,
+        schema: dict | None = None,
     ) -> AsyncGenerator[dict[str, str], None]:
         """Generate a streaming response from the LLM (SSE).
+
+        When ``schema`` is provided, delegates to :meth:`generate` for a
+        non-streaming call (structured output requires the full JSON to be
+        valid before it can be returned).  Yields only a ``"done"`` event
+        (or ``"error"``).
+
+        When ``schema`` is ``None``, streams tokens as usual.
 
         Yields dicts with keys:
           - {"type": "token", "content": str} — a single token
@@ -46,7 +54,24 @@ class LLMClient:
             system_prompt: System-level instructions.
             user_prompt: The user's task/question.
             context: Optional scraped context to include.
+            schema: Optional JSON Schema for structured output.  When
+                provided, the entire generation is performed non-streaming
+                and returned as a single ``"done"`` event.
         """
+        # Schema mode: delegate to generate() non-streaming
+        if schema:
+            content = await self.generate(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                context=context,
+                schema=schema,
+            )
+            if content.startswith("Error:"):
+                yield {"type": "error", "content": content}
+            else:
+                yield {"type": "done", "full_content": content}
+            return
+
         messages = [{"role": "system", "content": system_prompt}]
 
         if context:
@@ -169,9 +194,13 @@ class LLMClient:
             body["enable_thinking"] = True
 
         # If schema is provided, request structured JSON output
-        if schema:
+        # Uses json_object mode (widely supported across providers) with
+        # schema injected into system prompt.  json_schema strict mode is
+        # provider-specific (DeepSeek, Anthropic, etc. may not support it).
+        # Empty schema {} is treated as no-schema — do not send response_format
+        if schema and any(schema):
             body["response_format"] = {"type": "json_object"}
-            # Inject schema into the system prompt
+            # Also inject schema into the system prompt as a fallback hint
             messages[0]["content"] += (
                 f"\n\nYou MUST respond with valid JSON matching this schema:\n"
                 f"{json.dumps(schema, indent=2)}"

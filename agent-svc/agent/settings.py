@@ -32,6 +32,10 @@ class AgentSettings(BaseModel):
     crawl_idle_timeout_seconds: int = Field(
         default=300, alias="CRAWL_IDLE_TIMEOUT_SECONDS"
     )
+    research_memory_ttl: int = Field(default=604800, alias="RESEARCH_MEMORY_TTL")
+    research_memory_max_artifact_bytes: int = Field(
+        default=5_242_880, alias="RESEARCH_MEMORY_MAX_ARTIFACT_BYTES"
+    )
 
 
 @functools.cache

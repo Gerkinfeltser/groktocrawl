@@ -343,6 +343,7 @@ async def run_research(
     requested_model: str | None = None,
     max_searches_per_request: int = 5,
     include_images: bool = False,
+    citation_style: Any = None,
 ) -> dict:
     """Execute the research loop: plan → search → scrape → think → answer.
 
@@ -482,6 +483,7 @@ async def run_research_stream(
     requested_model: str | None = None,
     max_searches_per_request: int = 5,
     include_images: bool = False,
+    citation_style: Any = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Streaming version of run_research. Yields SSE-suitable dicts.
 
@@ -616,6 +618,7 @@ async def run_research_stream(
                         "I was unable to find or scrape any relevant web pages."
                     ),
                     "sources": [],
+                    "source_details": [],
                     "latency_ms": elapsed,
                 }
                 return
@@ -641,6 +644,7 @@ async def run_research_stream(
                         "I was unable to find or scrape any relevant web pages."
                     ),
                     "sources": [],
+                    "source_details": [],
                     "latency_ms": elapsed,
                 }
                 return
@@ -705,6 +709,7 @@ async def run_research_stream(
                 "type": "done",
                 "result": answer,
                 "sources": source_list,
+                "source_details": all_source_details,
                 "latency_ms": elapsed,
             }
         else:
@@ -712,6 +717,7 @@ async def run_research_stream(
                 "type": "done",
                 "result": full_answer,
                 "sources": source_list,
+                "source_details": all_source_details,
                 "latency_ms": elapsed,
             }
 
@@ -1205,6 +1211,67 @@ async def _detect_gaps(combined_context: str, llm: LLMClient) -> list[str]:
         return []
 
 
+# ── Citation style helpers ─────────────────────────────────────
+
+
+def _build_answer_user_prompt(query: str, citation_style: Any) -> str:
+    """Build the user prompt for the answer pipeline, adjusting citation
+    instructions based on the requested citation style."""
+    from .models import CitationStyle
+
+    if citation_style == CitationStyle.compact:
+        cite_instr = "Cite sources using [1](url), [2](url), etc. — include the URL directly in the citation marker."
+    else:
+        cite_instr = "Cite sources using [1], [2], etc. corresponding to the source numbers above."
+
+    return (
+        f"Answer the following question using ONLY the sources provided above.\n\n"
+        f"Question: {query}\n\n"
+        f"{cite_instr}"
+    )
+
+
+def _apply_citation_style(
+    answer: str,
+    source_map: list[dict[str, str]],
+    citation_style: Any,
+) -> tuple[str, list[dict]]:
+    """Apply citation style post-processing to the LLM's answer text.
+
+    Returns (modified_answer, citations_list).
+    """
+    import re
+
+    from .models import CitationStyle
+
+    citations: list[dict] = []
+    seen_indices: set[int] = set()
+
+    if citation_style == CitationStyle.compact:
+        # Replace [N] with [N](url) — self-contained link
+        # Use (?!\() to avoid matching already-linked [N](url) markers
+        def _compact_replacer(match: re.Match) -> str:
+            idx = int(match.group(1))
+            if 1 <= idx <= len(source_map):
+                seen_indices.add(idx)
+                url = source_map[idx - 1]["url"]
+                return f"[{idx}]({url})"
+            return match.group(0)
+
+        answer = re.sub(r"\[(\d+)\](?!\()", _compact_replacer, answer)
+        for idx in sorted(seen_indices):
+            citations.append({"index": idx, "url": source_map[idx - 1]["url"]})
+
+    else:  # inline
+        for match in re.finditer(r"\[(\d+)\]", answer):
+            idx = int(match.group(1))
+            if idx not in seen_indices and 1 <= idx <= len(source_map):
+                seen_indices.add(idx)
+                citations.append({"index": idx, "url": source_map[idx - 1]["url"]})
+
+    return answer, citations
+
+
 ANSWER_SYSTEM_PROMPT = """You are GroktoCrawl, a helpful Q&A agent. Your job is to answer
 the user's question using ONLY the web search results provided below.
 
@@ -1417,6 +1484,8 @@ async def run_answer(
     llm_model: str = "gpt-4o-mini",
     requested_model: str | None = None,
     max_searches_per_request: int = 5,
+    output_schema: dict | None = None,
+    citation_style: Any = None,
 ) -> dict:
     """Run a grounded Q&A pipeline: search → scrape → LLM → citations.
 
@@ -1424,6 +1493,14 @@ async def run_answer(
     search_type, latency_ms.
     """
     import time
+
+    from .models import CitationStyle
+
+    cs = (
+        citation_style
+        if isinstance(citation_style, CitationStyle)
+        else CitationStyle.inline
+    )
 
     start = time.monotonic()
 
@@ -1463,28 +1540,41 @@ async def run_answer(
                 "latency_ms": elapsed,
             }
 
-        # Call LLM
-        user_prompt = (
-            f"Answer the following question using ONLY the sources provided above.\n\n"
-            f"Question: {query}\n\n"
-            f"Cite sources using [1], [2], etc. corresponding to the source numbers above."
-        )
-        answer = await llm.generate(
-            system_prompt=ANSWER_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            context=context,
-        )
+        # Call LLM — adjust user prompt based on citation style and schema
+        if output_schema:
+            user_prompt = (
+                f"Answer the following question using ONLY the sources provided above.\n\n"
+                f"Question: {query}\n\n"
+                f"Cite sources using [1], [2], etc. corresponding to the source numbers above."
+            )
+            answer = await llm.generate(
+                system_prompt=ANSWER_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                context=context,
+                schema=output_schema,
+            )
+        else:
+            user_prompt = _build_answer_user_prompt(query, cs)
+            answer = await llm.generate(
+                system_prompt=ANSWER_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                context=context,
+            )
 
-        # Parse citations [N] from the answer
-        citations: list[dict] = []
-        seen_indices: set[int] = set()
-        import re
+        # Apply citation style post-processing
+        if not output_schema:
+            answer, citations = _apply_citation_style(answer, source_map, cs)
+        else:
+            citations: list[dict] = []  # type: ignore[no-redef]
+            # For structured output, collect source URLs but don't apply citation styles
+            seen_indices: set[int] = set()
+            import re
 
-        for match in re.finditer(r"\[(\d+)\]", answer):
-            idx = int(match.group(1))
-            if idx not in seen_indices and 1 <= idx <= len(source_map):
-                seen_indices.add(idx)
-                citations.append({"index": idx, "url": source_map[idx - 1]["url"]})
+            for match in re.finditer(r"\[(\d+)\]", answer):
+                idx = int(match.group(1))
+                if idx not in seen_indices and 1 <= idx <= len(source_map):
+                    seen_indices.add(idx)
+                    citations.append({"index": idx, "url": source_map[idx - 1]["url"]})
 
         elapsed = int((time.monotonic() - start) * 1000)
 
@@ -1514,6 +1604,8 @@ async def run_answer_stream(
     llm_model: str = "gpt-4o-mini",
     requested_model: str | None = None,
     max_searches_per_request: int = 5,
+    output_schema: dict | None = None,
+    citation_style: Any = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Streaming version of run_answer. Yields SSE-suitable dicts.
 
@@ -1524,6 +1616,10 @@ async def run_answer_stream(
       {"type": "error", "content": "..."} — error
     """
     import time
+
+    from .models import CitationStyle as _CS
+
+    cs = citation_style if isinstance(citation_style, _CS) else _CS.inline
 
     start = time.monotonic()
 
@@ -1639,37 +1735,49 @@ async def run_answer_stream(
         # Yield sources before streaming tokens
         yield {"type": "sources", "sources": source_map}
 
-        # Step 4: Stream LLM response
-        user_prompt = (
-            f"Answer the following question using ONLY the sources provided above.\n\n"
-            f"Question: {query}\n\n"
-            f"Cite sources using [1], [2], etc. corresponding to the source numbers above."
-        )
-        full_answer = ""
-        async for event in llm.generate_stream(
-            system_prompt=ANSWER_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            context=context,
-        ):
-            if event["type"] == "token":
-                full_answer += event["content"]
-                yield {"type": "token", "content": event["content"]}
-            elif event["type"] == "error":
-                yield {"type": "error", "content": event["content"]}
-                return
-            elif event["type"] == "done":
-                full_answer = event["full_content"]
+        # Step 4: Stream LLM response (or schema-based single call)
+        if output_schema:
+            user_prompt = (
+                f"Answer the following question using ONLY the sources provided above.\n\n"
+                f"Question: {query}\n\n"
+                f"Cite sources using [1], [2], etc. corresponding to the source numbers above."
+            )
+            full_answer = await llm.generate(
+                system_prompt=ANSWER_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                context=context,
+                schema=output_schema,
+            )
+        else:
+            user_prompt = _build_answer_user_prompt(query, cs)
+            full_answer = ""
+            async for event in llm.generate_stream(
+                system_prompt=ANSWER_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                context=context,
+            ):
+                if event["type"] == "token":
+                    full_answer += event["content"]
+                    yield {"type": "token", "content": event["content"]}
+                elif event["type"] == "error":
+                    yield {"type": "error", "content": event["content"]}
+                    return
+                elif event["type"] == "done":
+                    full_answer = event["full_content"]
 
-        # Step 5: Parse citations
-        import re
+        # Step 5: Apply citation style post-processing
+        if not output_schema:
+            full_answer, citations = _apply_citation_style(full_answer, source_map, cs)
+        else:
+            import re
 
-        citations: list[dict] = []
-        seen_indices: set[int] = set()
-        for match in re.finditer(r"\[(\d+)\]", full_answer):
-            idx = int(match.group(1))
-            if idx not in seen_indices and 1 <= idx <= len(source_map):
-                seen_indices.add(idx)
-                citations.append({"index": idx, "url": source_map[idx - 1]["url"]})
+            citations: list[dict] = []  # type: ignore[no-redef]
+            seen_indices: set[int] = set()
+            for match in re.finditer(r"\[(\d+)\]", full_answer):
+                idx = int(match.group(1))
+                if idx not in seen_indices and 1 <= idx <= len(source_map):
+                    seen_indices.add(idx)
+                    citations.append({"index": idx, "url": source_map[idx - 1]["url"]})
 
         elapsed = int((time.monotonic() - start) * 1000)
         yield {

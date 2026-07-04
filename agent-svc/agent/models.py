@@ -56,6 +56,20 @@ class VerbosityLevel(str, Enum):
     full = "full"  # Complete page text including structural markup
 
 
+class CitationStyle(str, Enum):
+    """Citation formatting styles for agent and answer responses.
+
+    Attributes:
+        inline: Bare ``[N]`` markers with a separate citations list in the
+            response body (current behaviour, Firecrawl v2 default).
+        compact: Self-contained ``[N](url)`` markers embedded directly in
+            the markdown answer text.  No separate citations list needed.
+    """
+
+    inline = "inline"
+    compact = "compact"
+
+
 class SectionCategory(str, Enum):
     header = "header"
     navigation = "navigation"
@@ -438,7 +452,10 @@ class ScrapeResponse(BaseModel):
 
 class AgentRequest(BaseModel):
     prompt: str = Field(
-        ..., max_length=100000, description="What the agent should research"
+        ...,
+        min_length=1,
+        max_length=100000,
+        description="What the agent should research",
     )
     urls: list[str] | None = Field(
         None, description="Optional seed URLs to constrain research"
@@ -446,7 +463,14 @@ class AgentRequest(BaseModel):
     schema_: dict[str, Any] | None = Field(
         None, alias="schema", description="JSON Schema for structured output"
     )
+    output_schema: dict[str, Any] | None = Field(
+        None, description="JSON Schema for structured output (alias for schema)"
+    )
     model: str = Field(default="default", description="Model hint")
+    mode: str | None = Field(
+        default=None,
+        description="Agent mode: None (default agent pipeline), 'plan' (plan-only, no execution)",
+    )
     max_credits: int | None = None
     webhook: dict[str, Any] | None = None
     strict_constrain_to_urls: bool = False
@@ -454,8 +478,40 @@ class AgentRequest(BaseModel):
     include_images: bool = Field(
         default=False, description="Collect images from scraped sources"
     )
+    citation_style: CitationStyle = Field(
+        default=CitationStyle.inline,
+        description="Citation formatting style: inline or compact. inline uses bare [N] markers with a separate citations list; compact embeds [N](url) directly in the answer text.",
+    )
+    force_fresh: bool = Field(
+        default=False,
+        description="When True, bypass the research memory cache and run fresh research pipeline",
+    )
 
     model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator("output_schema")
+    @classmethod
+    def validate_output_schema(cls, value: Any) -> dict[str, Any] | None:
+        """Reject non-dict output_schema values (e.g., arrays, strings) with 422."""
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"output_schema must be a JSON Schema object (dict), got {type(value).__name__}"
+            )
+        return value
+
+    @field_validator("schema_")
+    @classmethod
+    def validate_schema_(cls, value: Any) -> dict[str, Any] | None:
+        """Reject non-dict schema alias values with 422."""
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"schema must be a JSON Schema object (dict), got {type(value).__name__}"
+            )
+        return value
 
 
 class AgentCreateResponse(BaseModel):
@@ -1051,6 +1107,44 @@ class AnswerRequest(BaseModel):
     )
     model: str = Field(default="default", description="Per-request LLM override")
     stream: bool = Field(default=False, description="SSE streaming response")
+    schema_: dict[str, Any] | None = Field(
+        None,
+        alias="schema",
+        description="JSON Schema for structured output (alias for output_schema)",
+    )
+    output_schema: dict[str, Any] | None = Field(
+        None, description="JSON Schema for structured output from the answer"
+    )
+    citation_style: CitationStyle = Field(
+        default=CitationStyle.inline,
+        description="Citation formatting style: inline or compact. inline uses bare [N] markers with a separate citations list; compact embeds [N](url) directly in the answer text.",
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator("output_schema")
+    @classmethod
+    def validate_output_schema(cls, value: Any) -> dict[str, Any] | None:
+        """Reject non-dict output_schema values (e.g., arrays, strings) with 422."""
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"output_schema must be a JSON Schema object (dict), got {type(value).__name__}"
+            )
+        return value
+
+    @field_validator("schema_")
+    @classmethod
+    def validate_schema_(cls, value: Any) -> dict[str, Any] | None:
+        """Reject non-dict schema alias values with 422."""
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"schema must be a JSON Schema object (dict), got {type(value).__name__}"
+            )
+        return value
 
 
 class AnswerResponse(BaseModel):
@@ -1060,6 +1154,260 @@ class AnswerResponse(BaseModel):
     citations: list[Citation] = Field(default_factory=list)
     search_type: str = "auto"
     latency_ms: int = 0
+
+
+# ── Citations Resolve ──────────────────────────────────────────
+
+
+class CitationsResolveRequest(BaseModel):
+    """Request to resolve inline citation markers to full URLs.
+
+    Takes markdown text with ``[N]`` markers and a source list, and
+    returns the text with resolved citations according to the requested
+    style.
+    """
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        max_length=500_000,
+        description="Markdown text with [N] citation markers to resolve",
+    )
+    sources: list[Source] = Field(
+        ...,
+        min_length=1,
+        max_length=500,
+        description="Source list where index matches [N] markers (1-based)",
+    )
+    style: CitationStyle = Field(
+        default=CitationStyle.inline,
+        description="Target citation style for the resolved output",
+    )
+
+
+class ResolvedCitation(BaseModel):
+    """A single resolved citation with both marker and full URL."""
+
+    index: int
+    url: str
+    title: str = ""
+    marker_text: str = ""  # The original [N] text in the source
+    resolved_text: str = ""  # The replacement text (e.g., [1](url) for compact)
+
+
+class CitationsResolveResponse(BaseModel):
+    """Response from the citations resolve endpoint."""
+
+    success: bool = True
+    resolved_text: str = Field(
+        default="",
+        description="The input text with all [N] markers resolved per the requested style",
+    )
+    citations: list[ResolvedCitation] = Field(
+        default_factory=list,
+        description="Mapping of each resolved citation marker to its URL and title",
+    )
+    style: CitationStyle = CitationStyle.inline
+    citation_count: int = 0
+
+
+# ── Session Protocol ───────────────────────────────────────────
+
+
+class SessionCreateRequest(BaseModel):
+    """Request to create a new research session."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    ttl: int | None = Field(
+        default=None,
+        ge=60,
+        le=86400,
+        description="Session TTL in seconds (60-86400). Default: 3600 (1 hour).",
+    )
+
+
+class SessionCreateResponse(BaseModel):
+    """Response from session creation."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    success: bool = True
+    session_id: str = ""
+    expires_at: str = ""
+    ttl: int = 3600
+
+
+class SessionStepRequest(BaseModel):
+    """Execute an action step within a research session.
+
+    Supported actions:
+        - ``search``: Search via SearXNG.  Params: ``query`` (required),
+          ``limit``, ``sources``, ``categories``.
+        - ``scrape``: Scrape specific URLs.  Params: ``urls`` (required,
+          list of URLs), ``scrape_options`` (optional).
+        - ``query``: Run LLM over accumulated session context.  Params:
+          ``question`` (required), ``model`` (optional).
+        - ``deepen``: Drill deeper into a cited source.  Params: ``ref_id``
+          (required, citation ref from session), ``sub_topic`` (required,
+          follow-up question), ``max_sources`` (optional, default 3).
+    """
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    action: str = Field(
+        ...,
+        description="Step action: search, scrape, query, or deepen",
+    )
+    params: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Action-specific parameters",
+    )
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, value: str) -> str:
+        allowed = {"search", "scrape", "query", "deepen"}
+        if value not in allowed:
+            raise ValueError(
+                f"Unknown action: {value!r}. Supported: {', '.join(sorted(allowed))}"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def validate_required_params(self) -> "SessionStepRequest":
+        """Validate that required params are present for each action type.
+
+        VAL-SES-017: search requires ``query`` in params.
+        VAL-SES-018: scrape requires ``urls`` in params.
+        VAL-SES-019: query requires ``question`` in params.
+        VAL-SES-046: search with empty query string is rejected.
+        VAL-SES-047: scrape with empty URLs list is rejected.
+        """
+        params = self.params or {}
+        if self.action == "search":
+            query = params.get("query")
+            if query is None:
+                raise ValueError("search action requires a 'query' parameter")
+            if isinstance(query, str) and not query.strip():
+                raise ValueError("search action requires a non-empty 'query' parameter")
+        elif self.action == "scrape":
+            urls = params.get("urls")
+            if urls is None:
+                raise ValueError("scrape action requires a 'urls' parameter")
+            if isinstance(urls, list) and len(urls) == 0:
+                raise ValueError("scrape action requires a non-empty 'urls' list")
+        elif self.action == "query":
+            question = params.get("question")
+            if question is None:
+                raise ValueError("query action requires a 'question' parameter")
+            if isinstance(question, str) and not question.strip():
+                raise ValueError(
+                    "query action requires a non-empty 'question' parameter"
+                )
+        elif self.action == "deepen":
+            ref_id = params.get("ref_id")
+            sub_topic = params.get("sub_topic")
+            if ref_id is None:
+                raise ValueError("deepen action requires a 'ref_id' parameter")
+            if not isinstance(ref_id, str) or not ref_id.strip():
+                raise ValueError(
+                    "deepen action requires a non-empty 'ref_id' parameter"
+                )
+            if sub_topic is None:
+                raise ValueError("deepen action requires a 'sub_topic' parameter")
+            if not isinstance(sub_topic, str) or not sub_topic.strip():
+                raise ValueError(
+                    "deepen action requires a non-empty 'sub_topic' parameter"
+                )
+        return self
+
+
+class SessionStepResponse(BaseModel):
+    """Response from a session step execution."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    success: bool = True
+    step_index: int = 0
+    action: str = ""
+    summary: str = ""
+    result: dict[str, Any] = Field(default_factory=dict)
+
+
+class SessionExportResponse(BaseModel):
+    """Response from session export."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    success: bool = True
+    session_id: str = ""
+    artifact: str = ""
+    steps: list[dict[str, Any]] = Field(default_factory=list)
+    refs: dict[str, dict[str, str]] = Field(default_factory=dict)
+    artifact_length: int = 0
+
+
+class SessionStatusResponse(BaseModel):
+    """Response from GET /v2/session/{id} — session status and history."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    success: bool = True
+    session_id: str = ""
+    status: str = "active"
+    created_at: str = ""
+    expires_at: str = ""
+    step_count: int = 0
+    steps: list[dict[str, Any]] = Field(default_factory=list)
+    artifact_length: int = 0
+
+
+# Alias for the GET session response (used by the session endpoints feature)
+SessionGetResponse = SessionStatusResponse
+
+
+class SessionDeleteResponse(BaseModel):
+    """Response from DELETE /v2/session/{id}."""
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    success: bool = True
+    session_id: str = ""
+    deleted: bool = False
+
+
+class SessionResolveRequest(BaseModel):
+    """Request to resolve reference IDs to full source content.
+
+    Takes a list of ref IDs (e.g., ``["ref_1_1", "ref_2_3"]``) and
+    returns the full content for each found ref.
+    """
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    ref_ids: list[str] = Field(
+        default_factory=list,
+        min_length=1,
+        max_length=100,
+        description="Ref IDs to resolve (e.g., ['ref_1_1', 'ref_2_3'])",
+    )
+
+
+class SessionResolveResponse(BaseModel):
+    """Response from POST /v2/session/{id}/resolve.
+
+    Returns full source content for each requested ref ID.
+    Missing refs are silently omitted from the ``refs`` dict.
+    """
+
+    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
+
+    success: bool = True
+    session_id: str = ""
+    refs: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    resolved: int = 0
+    missing: list[str] = Field(default_factory=list)
 
 
 class ActivityItem(BaseModel):
@@ -1205,3 +1553,442 @@ class BatchScrapeErrorsResponse(BaseModel):
 
     success: bool = True
     errors: list[CrawlErrorItem] = Field(default_factory=list)
+
+
+# ── Plan-Consent (Phase 3) ─────────────────────────────────────
+
+
+class PlanRequest(BaseModel):
+    """Request to generate a structured research plan.
+
+    Attributes:
+        prompt: The user's natural-language research question.
+        model: Optional per-request LLM override.  When ``"default"``
+            or omitted, the environment-configured model is used.
+        urls: Optional seed URLs to scope the research plan around.
+        stream: When True, stream plan generation via SSE events.
+    """
+
+    prompt: str = Field(
+        ...,
+        min_length=1,
+        max_length=100000,
+        description="Natural-language research question to plan for",
+    )
+    model: str | None = Field(
+        default=None,
+        description="Optional per-request LLM model override",
+    )
+    urls: list[str] | None = Field(
+        default=None,
+        description="Optional seed URLs to scope the research plan around",
+    )
+    stream: bool = Field(
+        default=False,
+        description="When True, stream plan generation via SSE events",
+    )
+
+
+class PlanResponse(BaseModel):
+    """Response from POST /v2/agent/plan or POST /v2/agent {mode: plan}.
+
+    Returns the generated plan ID, full plan object, and metadata so the
+    client can display it for review and modification before executing.
+    """
+
+    success: bool = True
+    plan_id: str = ""
+    plan: dict = Field(default_factory=dict)
+    created_at: str = ""
+    expires_at: str = ""
+
+
+class PlanModification(BaseModel):
+    """A single modification to apply to a plan before execution.
+
+    Supported types:
+        - ``narrow``: Reduce scope (fewer sources, narrower focus).
+          Params: ``focus`` (str, required).
+        - ``add_dimension``: Add a comparison dimension.
+          Params: ``dimension`` (str, required).
+        - ``modify_query``: Change a search query in the plan.
+          Params: ``phase_index`` (int, 0-based), ``new_query`` (str, required).
+    """
+
+    type: str = Field(
+        ...,
+        description="Modification type: narrow, add_dimension, or modify_query",
+    )
+    params: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Type-specific parameters",
+    )
+
+    @field_validator("type")
+    @classmethod
+    def validate_type(cls, value: str) -> str:
+        allowed = frozenset({"narrow", "add_dimension", "modify_query"})
+        if value not in allowed:
+            raise ValueError(
+                f"Invalid modification type '{value}'. "
+                f"Allowed: {', '.join(sorted(allowed))}"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def validate_required_params(self) -> "PlanModification":
+        """Validate that required params are present for each modification type."""
+        params = self.params or {}
+        if self.type == "narrow":
+            if not params.get("focus"):
+                raise ValueError("narrow modification requires 'focus' in params")
+        elif self.type == "add_dimension":
+            if not params.get("dimension"):
+                raise ValueError(
+                    "add_dimension modification requires 'dimension' in params"
+                )
+        elif self.type == "modify_query":
+            if "phase_index" not in params:
+                raise ValueError(
+                    "modify_query modification requires 'phase_index' in params"
+                )
+            if not params.get("new_query"):
+                raise ValueError(
+                    "modify_query modification requires 'new_query' in params"
+                )
+        return self
+
+
+class PlanModifications(BaseModel):
+    """Optional modifications to apply to a plan before execution (dict form).
+
+    This is the legacy dict form — use ``PlanModification`` list form for
+    new code.  Both are accepted by the execute endpoint.
+
+    Attributes:
+        narrow: Optional focus string to narrow the research scope.
+            Injected into the first search phase as additional context.
+        add_dimension: Additional analysis dimensions to append.
+        remove_dimension: Dimensions to exclude from the analysis.
+    """
+
+    narrow: str | None = Field(
+        default=None,
+        max_length=5000,
+        description="Narrow the research focus with this additional context",
+    )
+    add_dimension: list[str] | None = Field(
+        default=None,
+        description="Additional analysis dimensions to include",
+    )
+    remove_dimension: list[str] | None = Field(
+        default=None,
+        description="Dimensions to exclude from the analysis",
+    )
+
+
+class ExecutePlanRequest(BaseModel):
+    """Request to execute a previously-generated research plan.
+
+    Loads the plan from Valkey, applies any modifications, and creates
+    a job for the research pipeline.  Plans are one-shot: consumed on
+    first successful execution.
+
+    Supports two modification formats:
+        - List form (preferred): ``[{type: "narrow"/"add_dimension"/"modify_query",
+          params: {...}}]``
+        - Dict form (legacy): ``{narrow: "...", add_dimension: [...], ...}``
+
+    Attributes:
+        plan_id: The plan ID returned by POST /v2/agent/plan or
+            POST /v2/agent with mode:plan.
+        modifications: Optional adjustments to narrow scope or change
+            analysis dimensions before execution.
+    """
+
+    plan_id: str = Field(..., description="Plan ID from plan generation")
+    modifications: Any = Field(
+        default=None,
+        description="Optional plan modifications before execution",
+    )
+    stream: bool = Field(
+        default=False,
+        description="When True, stream execution results via SSE events",
+    )
+    webhook: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional webhook URL and configuration for completion/failure notifications",
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="after")
+    def normalize_modifications(self) -> "ExecutePlanRequest":
+        """Normalize modifications into a validated internal form.
+
+        - ``None`` → ``None`` (no modifications)
+        - Dict form (``{narrow: ..., add_dimension: ...}``) → validated
+          ``PlanModifications``
+        - List form (``[{type: ..., params: ...}, ...]``) → validated
+          list of ``PlanModification``
+        - Empty list ``[]`` → ``None``
+        """
+        raw = self.modifications
+        if raw is None:
+            return self
+
+        if isinstance(raw, list):
+            if len(raw) == 0:
+                # Empty list → treat as no modifications
+                self.modifications = None
+                return self
+            # Validate each item as a PlanModification
+            validated: list[PlanModification] = []
+            for item in raw:
+                if not isinstance(item, dict):
+                    raise ValueError(
+                        f"Each modification must be an object, got {type(item).__name__}"
+                    )
+                validated.append(PlanModification(**item))
+            self.modifications = validated
+            return self
+
+        if isinstance(raw, dict):
+            # Try to interpret as dict form (PlanModifications)
+            if "type" in raw:
+                # Looks like a single PlanModification in dict form
+                mod = PlanModification(**raw)
+                self.modifications = [mod]
+                return self
+            # Otherwise treat as legacy PlanModifications form
+            mods = PlanModifications(**raw)
+            self.modifications = mods
+            return self
+
+        raise ValueError(
+            f"modifications must be a dict, list, or null, got {type(raw).__name__}"
+        )
+
+
+# ── Depth Injection (Phase 3) ──────────────────────────────────
+
+
+class DeepenRequest(BaseModel):
+    """Request to drill deeper into a cited source within a research session.
+
+    Used as a standalone request to the deepen endpoint or embedded in
+    ``SessionStepRequest.params`` for the ``deepen`` session action.
+
+    Attributes:
+        ref_id: Citation reference from the session (e.g., ``ref_2_3``).
+        sub_topic: Follow-up question or investigation angle.
+        max_sources: Maximum new sources to discover (default 3).
+    """
+
+    ref_id: str = Field(
+        ...,
+        description="Citation reference from the session (e.g., ref_2_3)",
+    )
+    sub_topic: str = Field(
+        ...,
+        max_length=10000,
+        description="Follow-up question or investigation angle",
+    )
+    max_sources: int | None = Field(
+        default=None,
+        ge=1,
+        le=10,
+        description="Maximum new sources to discover (default 3)",
+    )
+
+
+class DeepenResponse(BaseModel):
+    """Response from a deepen action.
+
+    Attributes:
+        new_findings: LLM-synthesised findings from the deep-dive.
+        new_sources: List of newly discovered source dicts with
+            ``url`` and ``title``.
+        inserted_at: Citation reference where findings were inserted
+            into the session artifact.
+    """
+
+    success: bool = True
+    new_findings: str = ""
+    new_sources: list[dict] = Field(default_factory=list)
+    inserted_at: str = ""
+
+
+# ── Research Memory (Phase 4) ──────────────────────────────────
+
+
+class ResearchMemoryQueryRequest(BaseModel):
+    """Request to search the research memory for a semantically similar
+    cached artifact.
+
+    Attributes:
+        question: The research question to search for.  Embedded via
+            BAAI/bge-m3 and matched against stored artifacts by cosine
+            similarity.
+        max_age_hours: Maximum age in hours of artifacts to consider.
+            Default 72 (3 days).  Older artifacts are skipped.
+    """
+
+    question: str = Field(
+        ...,
+        max_length=100000,
+        description="Research question to search for in memory",
+    )
+    max_age_hours: int | None = Field(
+        default=None,
+        ge=1,
+        le=720,
+        description="Maximum age in hours of artifacts to consider (default 72)",
+    )
+
+
+class ResearchMemoryQueryResponse(BaseModel):
+    """Response from a research memory query.
+
+    Attributes:
+        hit: Whether a semantically similar artifact was found.
+        artifact: The full artifact dict if ``hit`` is True, with keys
+            ``query``, ``artifact``, ``sources``, ``model``,
+            ``created_at``, ``expires_at``, and ``user_id``.
+        similarity: Cosine similarity score of the best match
+            (``None`` on miss).
+        freshness: Freshness classification: ``"fresh"``, ``"aging"``,
+            or ``"stale"`` (``None`` on miss).
+        memory_id: The UUID of the matched entry (``None`` on miss).
+    """
+
+    hit: bool = False
+    artifact: dict | None = None
+    similarity: float | None = None
+    freshness: str | None = None
+    memory_id: str | None = None
+
+
+class ResearchMemoryStoreRequest(BaseModel):
+    """Request to store a research artifact in memory.
+
+    Attributes:
+        question: The original research question (used for semantic
+            indexing).
+        answer: The LLM-synthesised answer (markdown).
+        sources: List of source dicts, each with at minimum ``url``
+            and ``title``.
+        metadata: Optional dict with extra context (model used,
+            user context, etc.).
+    """
+
+    question: str = Field(
+        ...,
+        max_length=100000,
+        description="Original research question",
+    )
+    answer: str = Field(
+        ...,
+        max_length=500000,
+        description="LLM-synthesised answer",
+    )
+    sources: list[dict] = Field(
+        ...,
+        description="Source documents with url and title",
+    )
+    metadata: dict | None = Field(
+        default=None,
+        description="Optional extra context",
+    )
+
+
+class ResearchMemoryStoreResponse(BaseModel):
+    """Response from storing a research artifact in memory.
+
+    Attributes:
+        artifact_id: UUID v4 identifier for the stored artifact.
+    """
+
+    artifact_id: str = ""
+
+
+# ── Research Memory Batch Operations ────────────────────────────
+
+
+class MemoryBatchQueryRequest(BaseModel):
+    """Batch query request: look up multiple queries against memory.
+
+    Each query is independently embedded and searched against Qdrant.
+    Results are returned in the same order as queries.
+    """
+
+    queries: list[str] = Field(
+        default_factory=list,
+        max_length=100,
+        description="List of query strings to look up",
+    )
+
+
+class MemoryBatchQueryEntry(BaseModel):
+    """A single batch query result entry."""
+
+    hit: bool = False
+    similarity: float | None = None
+    freshness: str | None = None
+    memory_id: str | None = None
+    query: str | None = None
+    artifact: str | None = None
+    sources: list[dict] | None = None
+    error: str | None = None
+
+
+class MemoryBatchQueryResponse(BaseModel):
+    """Batch query response containing per-query results."""
+
+    success: bool = True
+    results: list[MemoryBatchQueryEntry] = Field(default_factory=list)
+
+
+class MemoryBatchStoreEntry(BaseModel):
+    """A single entry in a batch store request."""
+
+    query: str = Field(..., min_length=1, description="Research question")
+    artifact: str = Field(..., min_length=1, description="LLM-synthesised answer")
+    sources: list[dict] = Field(
+        ...,
+        min_length=1,
+        description="Source documents with url and title",
+    )
+    model: str = Field(default="", description="LLM model name")
+
+
+class MemoryBatchStoreRequest(BaseModel):
+    """Batch store request: store multiple artifacts independently.
+
+    Each entry is stored independently.  Partial success is allowed —
+    if one entry fails (e.g. embedding failure), the others still
+    succeed with per-entry status.
+    """
+
+    entries: list[MemoryBatchStoreEntry] = Field(
+        default_factory=list,
+        max_length=100,
+        description="List of artifacts to store",
+    )
+
+
+class MemoryBatchStoreResult(BaseModel):
+    """Per-entry result from a batch store operation."""
+
+    success: bool = False
+    memory_id: str | None = None
+    error: str | None = None
+
+
+class MemoryBatchStoreResponse(BaseModel):
+    """Batch store response with per-entry status."""
+
+    success: bool = True
+    stored_count: int = 0
+    failed_count: int = 0
+    results: list[MemoryBatchStoreResult] = Field(default_factory=list)

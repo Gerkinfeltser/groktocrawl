@@ -97,8 +97,51 @@ class TestLLMClientGenerate:
             )
             assert result == '{"key": "value"}'
             body = mock_post.call_args[1]["json"]
-            assert body["response_format"] == {"type": "json_object"}
-            assert "json" in body["messages"][0]["content"].lower()
+            # json_object mode (not json_schema) for provider compatibility
+            assert body["response_format"]["type"] == "json_object"
+            # Schema injected into system prompt as fallback
+            assert (
+                "You MUST respond with valid JSON matching this schema"
+                in body["messages"][0]["content"]
+            )
+
+    @pytest.mark.asyncio
+    async def test_empty_schema_treated_as_no_schema(self, llm):
+        """Empty schema {} should NOT send response_format to the LLM."""
+        with patch.object(
+            llm._client,
+            "post",
+            return_value=_make_response(
+                json_data={"choices": [{"message": {"content": "Prose answer"}}]}
+            ),
+        ) as mock_post:
+            result = await llm.generate(
+                system_prompt="Be helpful.",
+                user_prompt="Say hi.",
+                schema={},
+            )
+            assert result == "Prose answer"
+            body = mock_post.call_args[1]["json"]
+            assert "response_format" not in body
+            # Schema injection should NOT appear in system prompt
+            assert (
+                "You MUST respond with valid JSON" not in body["messages"][0]["content"]
+            )
+
+    @pytest.mark.asyncio
+    async def test_no_response_format_when_schema_none(self, llm):
+        """When schema is None, no response_format should be sent."""
+        with patch.object(
+            llm._client,
+            "post",
+            return_value=_make_response(
+                json_data={"choices": [{"message": {"content": "Hello"}}]}
+            ),
+        ) as mock_post:
+            result = await llm.generate(system_prompt="x", user_prompt="y")
+            assert result == "Hello"
+            body = mock_post.call_args[1]["json"]
+            assert "response_format" not in body
 
     @pytest.mark.asyncio
     async def test_sets_authorization_header(self, llm):
@@ -308,3 +351,73 @@ class TestLLMClientGenerateStream:
             body = mock_client.stream.call_args[1]["json"]
             user_msg = body["messages"][1]["content"]
             assert "Some context here." in user_msg
+
+    @pytest.mark.asyncio
+    async def test_schema_mode_delegates_to_generate(self, llm):
+        """When schema is provided, generate_stream calls generate() non-streaming."""
+        schema = {"type": "object", "properties": {"result": {"type": "string"}}}
+        with patch.object(
+            llm._client,
+            "post",
+            return_value=_make_response(
+                json_data={
+                    "choices": [{"message": {"content": '{"result": "structured"}'}}]
+                }
+            ),
+        ):
+            events = []
+            async for event in llm.generate_stream(
+                system_prompt="Extract.",
+                user_prompt="Get data.",
+                schema=schema,
+            ):
+                events.append(event)
+
+            assert len(events) == 1
+            assert events[0]["type"] == "done"
+            assert events[0]["full_content"] == '{"result": "structured"}'
+
+    @pytest.mark.asyncio
+    async def test_schema_mode_error_propagates(self, llm):
+        """When schema + generate() fails, generate_stream yields error."""
+        schema = {"type": "object", "properties": {"result": {"type": "string"}}}
+        with patch.object(
+            llm._client,
+            "post",
+            return_value=_make_response(status_code=500, text="Server error"),
+        ):
+            events = []
+            async for event in llm.generate_stream(
+                system_prompt="Extract.",
+                user_prompt="Get data.",
+                schema=schema,
+            ):
+                events.append(event)
+
+            assert len(events) == 1
+            assert events[0]["type"] == "error"
+            assert "500" in events[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_empty_schema_streams_normally(self, llm):
+        """Empty schema {} should NOT trigger schema mode — stream as usual."""
+        mock_client_cls, _mock_client = self._setup_stream_mock(
+            [
+                'data: {"choices":[{"delta":{"content":"normal"}}]}',
+                "data: [DONE]",
+            ]
+        )
+
+        with patch("httpx.AsyncClient", mock_client_cls):
+            tokens = []
+            async for event in llm.generate_stream(
+                system_prompt="x",
+                user_prompt="y",
+                schema={},
+            ):
+                tokens.append(event)
+
+            # Should stream normally (not delegate to generate)
+            assert tokens[0]["type"] == "token"
+            assert tokens[0]["content"] == "normal"
+            assert tokens[1]["type"] == "done"

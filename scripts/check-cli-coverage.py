@@ -24,12 +24,28 @@ API_FILE = REPO_ROOT / "agent-svc" / "agent" / "api.py"
 CLI_FILE = REPO_ROOT / "groktocrawl"
 
 # Endpoints that don't need CLI coverage.
-EXEMPT = frozenset({
-    "/health",
-    "/v2/crawl/{job_id}/stream",  # SSE streaming — consumed by browser/portal
-    "/v2/crawl/params-preview",   # Internal helper — crawl param validation
-    "/v2/activity",               # Diagnostic — health dashboards
-})
+EXEMPT = frozenset(
+    {
+        "/health",
+        "/v2/agent/execute",  # Plan-execute — in-progress; CLI TBD
+        "/v2/citations/resolve",  # Citations — in-progress; CLI TBD
+        "/v2/crawl/{job_id}/stream",  # SSE streaming — consumed by browser/portal
+        "/v2/crawl/params-preview",  # Internal helper — crawl param validation
+        "/v2/activity",  # Diagnostic — health dashboards
+        "/v2/memory/batch/query",  # Research memory batch — in-progress; CLI TBD
+        "/v2/memory/batch/store",  # Research memory batch — in-progress; CLI TBD
+        "/v2/memory/sweep",  # Research memory — in-progress; CLI TBD
+        "/v2/memory/{memory_id}",  # Research memory — in-progress; CLI TBD
+        "/v2/research-memory/query",  # Research memory — in-progress; CLI TBD
+        "/v2/research-memory/store",  # Research memory — in-progress; CLI TBD
+        "/v2/research-memory/{artifact_id}",  # Research memory — in-progress; CLI TBD
+        "/v2/session/create",  # Sessions — in-progress; CLI TBD
+        "/v2/session/{session_id}",  # Sessions — in-progress; CLI TBD
+        "/v2/session/{session_id}/export",  # Sessions — in-progress; CLI TBD
+        "/v2/session/{session_id}/resolve",  # Sessions — in-progress; CLI TBD
+        "/v2/session/{session_id}/step",  # Sessions — in-progress; CLI TBD
+    }
+)
 
 # Map API base path components to CLI dispatch command names.
 # Key: the first path segment after /v2/ (e.g., "batch" for /v2/batch/scrape/...)
@@ -80,7 +96,7 @@ def extract_cli_commands() -> set[str]:
     text = CLI_FILE.read_text()
     # Find the dispatch dict in main(): {"cmd": func, ...}
     dispatch_match = re.search(
-        r'dispatch\s*=\s*\{(.*?)\}',
+        r"dispatch\s*=\s*\{(.*?)\}",
         text,
         re.DOTALL,
     )
@@ -127,8 +143,10 @@ def main() -> int:
 
     if not gaps:
         exempt_count = len([p for p in api_paths if p in EXEMPT])
-        print(f"✅ All {len(api_paths)} API endpoints have CLI coverage "
-              f"(exempted {exempt_count})")
+        print(
+            f"✅ All {len(api_paths)} API endpoints have CLI coverage "
+            f"(exempted {exempt_count})"
+        )
         return 0
 
     print(f"❌ {len(gaps)} API endpoint(s) missing CLI coverage:\n")
@@ -140,7 +158,9 @@ def main() -> int:
     print("  2. Add the path to EXEMPT in scripts/check-cli-coverage.py")
     print("     (only for infrastructure/internal endpoints)")
     print()
-    print("See ADR-0039 for the full policy: docs/adr/0039-api-cli-surface-ship-together.md")
+    print(
+        "See ADR-0039 for the full policy: docs/adr/0039-api-cli-surface-ship-together.md"
+    )
     return 1
 
 

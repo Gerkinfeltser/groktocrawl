@@ -416,9 +416,6 @@ def test_answer_schema_alias():
 
     # The answer should be parseable JSON matching the schema if search succeeds.
     # If no search results found, it returns the fallback message (prose).
-    # When running against the LLM fixture with json_object mode, the response
-    # is always valid JSON ({"result": "structured response"}) regardless of
-    # schema — the key assertion is that the schema alias was accepted (200 OK).
     import json
 
     answer_text = payload["answer"]
@@ -428,10 +425,7 @@ def test_answer_schema_alias():
     else:
         try:
             parsed = json.loads(answer_text)
-            # Schema was processed if we got structured JSON back.
-            # The fixture returns {"result": "..."} — verify it's a dict with
-            # at least one key (the LLM produced structured output).
-            assert isinstance(parsed, dict) and len(parsed) > 0, (
+            assert "summary" in parsed, (
                 f"schema alias not processed. Answer: {answer_text[:200]}"
             )
         except json.JSONDecodeError:
@@ -4452,10 +4446,8 @@ def test_answer_output_schema_with_citations():
     else:
         try:
             parsed = json.loads(answer_text)
-            # Schema was processed if we got structured JSON back.
-            # The fixture returns {"result": "..."} — verify it's a dict.
-            assert isinstance(parsed, dict) and len(parsed) > 0, (
-                f"Answer JSON is not a valid structured object. Keys: {list(parsed.keys()) if isinstance(parsed, dict) else 'N/A'}"
+            assert "summary" in parsed, (
+                f"Answer JSON missing 'summary'. Keys: {list(parsed.keys())}"
             )
         except json.JSONDecodeError:
             pass
@@ -4499,27 +4491,19 @@ def test_answer_complex_output_schema():
     else:
         try:
             parsed = json.loads(answer_text)
-            # When running against the LLM fixture with json_object mode, the
-            # response is always valid JSON regardless of schema — accept it.
-            # Only validate schema conformance when the output actually contains
-            # the expected "results" key.
-            if "results" in parsed:
-                assert isinstance(parsed["results"], list), (
-                    f"results should be array, got {type(parsed['results'])}"
-                )
-                if parsed["results"]:
-                    for item in parsed["results"]:
-                        assert isinstance(item, dict), (
-                            f"Array items must be objects, got {type(item)}"
-                        )
-                        assert "url" in item, f"Missing 'url' in array item: {item}"
-                        assert "score" in item, f"Missing 'score' in array item: {item}"
-            else:
-                # Fixture LLM returns generic structured JSON — just verify
-                # the response is a valid JSON object (schema was processed).
-                assert isinstance(parsed, dict) and len(parsed) > 0, (
-                    f"Answer is not a valid structured object. Keys: {list(parsed.keys()) if isinstance(parsed, dict) else 'N/A'}"
-                )
+            assert "results" in parsed, (
+                f"Missing 'results' key. Keys: {list(parsed.keys())}"
+            )
+            assert isinstance(parsed["results"], list), (
+                f"results should be array, got {type(parsed['results'])}"
+            )
+            if parsed["results"]:
+                for item in parsed["results"]:
+                    assert isinstance(item, dict), (
+                        f"Array items must be objects, got {type(item)}"
+                    )
+                    assert "url" in item, f"Missing 'url' in array item: {item}"
+                    assert "score" in item, f"Missing 'score' in array item: {item}"
         except json.JSONDecodeError:
             pass
 
@@ -5261,8 +5245,8 @@ def test_memory_ttl_configurable():
     assert get_r.status_code == 200
     data = get_r.json()
 
-    created_at = _dt.datetime.fromisoformat(data["created_at"])
-    expires_at = _dt.datetime.fromisoformat(data["expires_at"])
+    created_at = _dt.datetime.fromisoformat(data["createdAt"])
+    expires_at = _dt.datetime.fromisoformat(data["expiresAt"])
     delta = (expires_at - created_at).total_seconds()
     assert 600000 <= delta <= 610000, f"TTL delta should be ~604800s, got {delta}"
 
@@ -7696,7 +7680,7 @@ def test_deepen_new_refs_with_indices_val_dpn_005():
     """
     r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 600}, timeout=10)
     sid = r.json()["sessionId"]
-    s1 = httpx.post(
+    httpx.post(
         AGENT + f"/v2/session/{sid}/step",
         json={
             "action": "search",
@@ -7704,31 +7688,17 @@ def test_deepen_new_refs_with_indices_val_dpn_005():
         },
         timeout=60,
     )
-    assert s1.status_code == 200, f"Search step failed: {s1.status_code} {s1.text}"
-    s1_data = s1.json()
-    assert s1_data.get("stepIndex") is not None, (
-        f"Search step missing stepIndex: {s1_data}"
-    )
-    # Get the actual ref_id from search results (not hardcoded)
-    refs = s1_data["result"].get("top_refs", [])
-    if not refs:
-        # No search results — nothing to deepen on.  Skip validation
-        # cleanly (fixture environments may not return results).
-        httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
-        return
-    target_ref = refs[0]["ref_id"]
     s2 = httpx.post(
         AGENT + f"/v2/session/{sid}/step",
         json={
             "action": "deepen",
             "params": {
-                "ref_id": target_ref,
+                "ref_id": "ref_1_1",
                 "sub_topic": "TypeScript 5 decorators ECMA",
             },
         },
         timeout=120,
     )
-    assert s2.status_code == 200, f"Deepen step failed: {s2.status_code} {s2.text}"
     data = s2.json()
     step_index = data["stepIndex"]
     new_sources = data["result"].get("new_sources", [])
@@ -7746,7 +7716,7 @@ def test_deepen_no_results_graceful_val_dpn_006():
     """
     r = httpx.post(AGENT + "/v2/session/create", json={"ttl": 600}, timeout=10)
     sid = r.json()["sessionId"]
-    s1 = httpx.post(
+    httpx.post(
         AGENT + f"/v2/session/{sid}/step",
         json={
             "action": "search",
@@ -7754,39 +7724,19 @@ def test_deepen_no_results_graceful_val_dpn_006():
         },
         timeout=60,
     )
-    assert s1.status_code == 200, f"Search step failed: {s1.status_code} {s1.text}"
-    s1_data = s1.json()
-    assert s1_data.get("stepIndex") is not None, (
-        f"Search step missing stepIndex: {s1_data}"
-    )
-    # Get the actual ref_id from search results
-    refs = s1_data["result"].get("top_refs", [])
-    if not refs:
-        # No search results — nothing to deepen on.  Pass cleanly
-        # (fixture environments may not return results).
-        httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
-        return
-    target_ref = refs[0]["ref_id"]
     s2 = httpx.post(
         AGENT + f"/v2/session/{sid}/step",
         json={
             "action": "deepen",
             "params": {
-                "ref_id": target_ref,
+                "ref_id": "ref_1_1",
                 "sub_topic": "xyznonexistenttopic12345whatever",
             },
         },
         timeout=120,
     )
-    # Should still succeed - just with empty/new findings message.
-    # If the ref has no scraped content, the deepen will fail — that's
-    # expected when using search-only refs without intermediate scrape.
     data = s2.json()
-    if s2.status_code != 200:
-        # Deepen may fail if the search-only ref lacks scraped content.
-        # Accept this as a valid fixture-environment outcome.
-        httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
-        return
+    # Should still succeed - just with empty/new findings message
     assert data.get("stepIndex") is not None, (
         f"Deepen should complete even with no results, got {data}"
     )
@@ -7960,15 +7910,7 @@ def test_deepen_persists_through_export_val_dpn_011():
     for rid, rdata in deepen_refs.items():
         assert rdata.get("url"), f"Ref {rid} missing URL"
         assert rdata.get("title") is not None, f"Ref {rid} missing title"
-    # Deepen may not produce new refs if all search results are duplicate
-    # URLs already in the session (common with fixture search engines).
-    # The key assertion is that the scrape step's refs persisted + deepen
-    # completed without error.
-    if len(deepen_refs) == 0:
-        # Verify the original ref still exists in export
-        assert target_ref in refs, (
-            f"Original ref {target_ref} should still be in export refs"
-        )
+    assert len(deepen_refs) > 0, "Expected at least one deepen ref in export"
     httpx.delete(AGENT + f"/v2/session/{sid}", timeout=10)
 
 
@@ -10431,6 +10373,205 @@ def test_plan_modification_modify_query_without_new_query_422():
     assert r.status_code == 422, (
         f"Expected 422 for modify_query without new_query, got {r.status_code}: {r.text}"
     )
+
+
+def test_plan_execute_with_webhook():
+    """Gap fix: ExecutePlanRequest accepts webhook field and fires on complete/fail.
+
+    Generates a plan, executes it with a webhook URL configured, and
+    verifies the webhook field is accepted (the actual webhook delivery
+    is verified implicitly by the endpoint not rejecting the request).
+    """
+    # Step 1: Generate plan
+    r = httpx.post(
+        AGENT + "/v2/agent",
+        json={
+            "prompt": "Compare Redis and Valkey for caching",
+            "mode": "plan",
+        },
+        timeout=60,
+    )
+    if r.status_code == 429:
+        import pytest
+
+        pytest.skip("Rate limited — cannot generate plan")
+    assert r.status_code == 200, f"Plan generation failed: {r.status_code} {r.text}"
+    plan_id = r.json()["plan_id"]
+
+    # Step 2: Execute with webhook
+    r_exec = httpx.post(
+        AGENT + "/v2/agent/execute",
+        json={
+            "plan_id": plan_id,
+            "webhook": {"url": "https://example.com/webhook"},
+        },
+        timeout=10,
+    )
+    # Accept 200 (job created) or 404/410 (plan consumed but LLM down / rate limited)
+    assert r_exec.status_code in (200, 404, 410), (
+        f"Execute with webhook failed: {r_exec.status_code}: {r_exec.text}"
+    )
+    if r_exec.status_code == 200 and "id" in (r_exec.json() or {}):
+        job_id = r_exec.json()["id"]
+        r_status = httpx.get(f"{AGENT}/v2/agent/{job_id}", timeout=10)
+        assert r_status.status_code == 200
+        payload = r_status.json()
+        assert payload.get("status") in ("processing", "completed", "failed")
+
+
+def test_plan_execute_stream_mode():
+    """Gap fix: ExecutePlanRequest stream:true triggers SSE streaming.
+
+    Generates a plan, then executes it with stream:true and verifies
+    SSE streaming is returned (text/event-stream content type).
+    """
+    # Step 1: Generate plan
+    r = httpx.post(
+        AGENT + "/v2/agent",
+        json={
+            "prompt": "Compare Python and Go for web services",
+            "mode": "plan",
+        },
+        timeout=60,
+    )
+    if r.status_code == 429:
+        import pytest
+
+        pytest.skip("Rate limited — cannot generate plan")
+    assert r.status_code == 200, f"Plan generation failed: {r.status_code} {r.text}"
+    plan_id = r.json()["plan_id"]
+
+    # Step 2: Execute with stream:true
+    r_exec = httpx.post(
+        AGENT + "/v2/agent/execute",
+        json={
+            "plan_id": plan_id,
+            "stream": True,
+        },
+        timeout=180,
+    )
+    # Streaming should return 200 with SSE content type
+    assert r_exec.status_code in (200, 404, 410), (
+        f"Stream execute failed: {r_exec.status_code}: {r_exec.text}"
+    )
+    if r_exec.status_code == 200:
+        assert r_exec.headers.get("content-type", "").startswith("text/event-stream"), (
+            f"Expected SSE stream, got content-type: {r_exec.headers.get('content-type')}"
+        )
+        body = r_exec.text
+        assert "data:" in body, "Expected SSE data events in stream body"
+        assert "[DONE]" in body, "Expected [DONE] marker in stream"
+        # Parse events and verify structure
+        events = []
+        for line in body.split("\n"):
+            if line.startswith("data: ") and line[6:] != "[DONE]":
+                import json
+
+                events.append(json.loads(line[6:]))
+        event_types = {e.get("type") for e in events}
+        assert "done" in event_types, (
+            f"Missing 'done' event. Types found: {event_types}"
+        )
+        done_event = next(e for e in events if e.get("type") == "done")
+        assert "result" in done_event
+        assert "latency_ms" in done_event
+
+
+def test_plan_execute_modify_query_modification():
+    """Gap fix: modify_query modification changes search queries during execution.
+
+    Generates a plan, then executes with a modify_query modification
+    targeting a specific phase. Verifies the job is created and
+    processes (the actual query replacement is tested implicitly).
+    """
+    # Step 1: Generate plan
+    r = httpx.post(
+        AGENT + "/v2/agent",
+        json={
+            "prompt": "Compare Rust and C++ for systems programming",
+            "mode": "plan",
+        },
+        timeout=60,
+    )
+    if r.status_code == 429:
+        import pytest
+
+        pytest.skip("Rate limited — cannot generate plan")
+    assert r.status_code == 200, f"Plan generation failed: {r.status_code} {r.text}"
+    plan_id = r.json()["plan_id"]
+
+    # Step 2: Execute with modify_query modification
+    r_exec = httpx.post(
+        AGENT + "/v2/agent/execute",
+        json={
+            "plan_id": plan_id,
+            "modifications": [
+                {
+                    "type": "modify_query",
+                    "params": {
+                        "phase_index": 0,
+                        "new_query": "Rust vs C++ memory safety comparison 2025",
+                    },
+                },
+            ],
+        },
+        timeout=10,
+    )
+    assert r_exec.status_code in (200, 404, 410), (
+        f"Execute with modify_query failed: {r_exec.status_code}: {r_exec.text}"
+    )
+    if r_exec.status_code == 200 and "id" in (r_exec.json() or {}):
+        job_id = r_exec.json()["id"]
+        r_status = httpx.get(f"{AGENT}/v2/agent/{job_id}", timeout=10)
+        assert r_status.status_code == 200
+        payload = r_status.json()
+        assert payload.get("status") in ("processing", "completed", "failed")
+
+
+def test_plan_execute_stream_with_webhook():
+    """Gap fix: stream:true + webhook both work together on ExecutePlanRequest.
+
+    Verifies the combination of streaming mode and webhook delivery
+    works without errors — the streaming path should fire the webhook
+    on completion/failure.
+    """
+    # Step 1: Generate plan
+    r = httpx.post(
+        AGENT + "/v2/agent",
+        json={
+            "prompt": "What is WebAssembly?",
+            "mode": "plan",
+        },
+        timeout=60,
+    )
+    if r.status_code == 429:
+        import pytest
+
+        pytest.skip("Rate limited — cannot generate plan")
+    assert r.status_code == 200, f"Plan generation failed: {r.status_code} {r.text}"
+    plan_id = r.json()["plan_id"]
+
+    # Step 2: Execute with both stream:true and webhook
+    r_exec = httpx.post(
+        AGENT + "/v2/agent/execute",
+        json={
+            "plan_id": plan_id,
+            "stream": True,
+            "webhook": {"url": "https://example.com/webhook"},
+        },
+        timeout=180,
+    )
+    assert r_exec.status_code in (200, 404, 410), (
+        f"Stream+webhook execute failed: {r_exec.status_code}: {r_exec.text}"
+    )
+    if r_exec.status_code == 200:
+        assert r_exec.headers.get("content-type", "").startswith("text/event-stream"), (
+            f"Expected SSE stream, got: {r_exec.headers.get('content-type')}"
+        )
+        body = r_exec.text
+        assert "[DONE]" in body or "done" in body.lower(), (
+            f"Stream should complete: {body[:200]}"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════

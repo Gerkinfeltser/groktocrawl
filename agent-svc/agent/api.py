@@ -4,6 +4,7 @@ Targets Firecrawl v2 API compatibility where possible.
 """
 
 import logging
+import os
 from datetime import UTC
 from typing import Any
 
@@ -12,6 +13,7 @@ from fastapi import APIRouter, Request, Response
 
 from .exceptions import (
     BrowserError,
+    ConflictError,
     InvalidRequestError,
     NotFoundError,
     ScrapeError,
@@ -36,6 +38,9 @@ from .models import (
     BrowserExecuteResponse,
     BrowserListResponse,
     Citation,
+    CitationsResolveRequest,
+    CitationsResolveResponse,
+    CitationStyle,
     CrawlActiveItem,
     CrawlActiveResponse,
     CrawlCreateResponse,
@@ -45,6 +50,7 @@ from .models import (
     CrawlStatusResponse,
     EnrichRequest,
     EnrichResponse,
+    ExecutePlanRequest,
     ExtractCreateResponse,
     ExtractRequest,
     ExtractStatusResponse,
@@ -57,6 +63,12 @@ from .models import (
     LLMsTextStatusResponse,
     MapRequest,
     MapResponse,
+    MemoryBatchQueryEntry,
+    MemoryBatchQueryRequest,
+    MemoryBatchQueryResponse,
+    MemoryBatchStoreRequest,
+    MemoryBatchStoreResponse,
+    MemoryBatchStoreResult,
     MonitorCreateRequest,
     MonitorDeleteResponse,
     MonitorListResponse,
@@ -65,12 +77,30 @@ from .models import (
     ParamsPreviewRequest,
     ParamsPreviewResponse,
     ParseResponse,
+    PlanModification,
+    PlanModifications,
+    PlanRequest,
+    PlanResponse,
+    ResearchMemoryQueryRequest,
+    ResearchMemoryQueryResponse,
+    ResearchMemoryStoreRequest,
+    ResearchMemoryStoreResponse,
+    ResolvedCitation,
     ScrapeData,
     ScrapeRequest,
     ScrapeResponse,
     SearchRequest,
     SearchResponse,
     SearchResult,
+    SessionCreateRequest,
+    SessionCreateResponse,
+    SessionDeleteResponse,
+    SessionExportResponse,
+    SessionResolveRequest,
+    SessionResolveResponse,
+    SessionStatusResponse,
+    SessionStepRequest,
+    SessionStepResponse,
     Source,
 )
 from .monitor import (
@@ -99,6 +129,52 @@ def _get_client_ip(request: Request) -> str:
     if request.client:
         return request.client.host
     return "unknown"
+
+
+def _resolve_output_schema(
+    output_schema: dict[str, Any] | None,
+    schema_alias: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Resolve the effective output schema from request fields.
+
+    - ``output_schema`` takes priority over ``schema`` alias.
+    - Empty dicts (``{}``) are treated as ``None`` (no schema).
+    - ``None`` means "not set" — falls back to ``schema`` alias.
+    - Returns ``None`` when no valid schema is provided.
+    """
+    effective = output_schema if output_schema is not None else schema_alias
+    if effective is not None and not any(effective):
+        return None
+    return effective
+
+
+def _derive_user_id(request: Request) -> str | None:
+    """Derive a user identifier from the request for cache scoping.
+
+    When RESEARCH_MEMORY_SCOPE=per_user, the user_id is derived from
+    the ``X-API-Key`` or ``Authorization: Bearer`` header.  When no
+    API key is present, the client IP is used as a fallback.
+
+    Returns ``None`` for global scope (no per-user isolation).
+    """
+    import hashlib
+    import os as _os
+
+    scope = _os.environ.get("RESEARCH_MEMORY_SCOPE", "global")
+    if scope != "per_user":
+        return None
+
+    # Try API key first
+    api_key = (
+        request.headers.get("X-API-Key", "")
+        or request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    )
+    if api_key:
+        # Hash the key for privacy — we only need a stable identifier
+        return hashlib.sha256(api_key.encode()).hexdigest()[:16]
+
+    # Fall back to client IP
+    return _get_client_ip(request)
 
 
 @router.get("/v2/activity", response_model=ActivityResponse)
@@ -155,7 +231,7 @@ async def scrape(request: Request, body: ScrapeRequest) -> ScrapeResponse:
     raise ScrapeError(detail=result.get("error", "Scrape failed"))
 
 
-@router.post("/v2/agent", response_model=AgentCreateResponse)
+@router.post("/v2/agent")
 async def create_agent(request: Request, body: AgentRequest, response: Response) -> Any:
     # ── Per-client rate limit check ────────────────────────────
     client_ip = _get_client_ip(request)
@@ -181,7 +257,111 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
         {"status": "allowed"}
     )
 
-    # Streaming path — run inline, return SSE
+    # ── Mode: plan — generate a research plan (streaming via _handle_plan_mode) ──
+    if body.mode == "plan":
+        response.headers["X-Search-Rate-Remaining"] = (
+            f"{rate_remaining}/{rate_limiter.limit}"
+        )
+        return await _handle_plan_mode(request, body, response)
+
+    # ── Research Memory: check cache before LLM health check ──
+    # If cache hit and streaming, we can return immediately without LLM.
+    user_id = _derive_user_id(request)
+    cache_hit_data: dict | None = None
+    if not body.force_fresh:
+        try:
+            from .research_memory import ResearchMemory
+            from .settings import load_settings
+
+            settings = load_settings()
+            redis_url = (
+                f"redis://{settings.valkey_host}:{settings.valkey_port}"
+                f"/{settings.valkey_db}"
+            )
+            memory = ResearchMemory(
+                redis_url=redis_url,
+                semantic_url=settings.semantic_url,
+            )
+            memory_scope = os.environ.get("RESEARCH_MEMORY_SCOPE", "global")
+            cache_result = await memory.query(
+                prompt=body.prompt,
+                user_id=user_id if memory_scope == "per_user" else None,
+            )
+            if cache_result["hit"]:
+                freshness = cache_result.get("freshness", "stale")
+                if freshness == "fresh" or freshness == "aging":
+                    cache_hit_data = cache_result
+            # stale — fall through to normal pipeline
+        except Exception:
+            logger.warning(
+                "Streaming agent cache lookup failed — proceeding with normal pipeline",
+                exc_info=True,
+            )
+
+    # ── Cache HIT + streaming: return cached artifact as SSE ─────
+    if cache_hit_data is not None and body.stream:
+        from fastapi.responses import StreamingResponse
+
+        async def cache_hit_stream() -> Any:
+            import json
+            import time as _time
+
+            stream_start = _time.monotonic()
+            entry = cache_hit_data["artifact"]
+            artifact_text = entry.get("artifact", "")
+            sources = entry.get("sources", [])
+
+            # Apply citation style
+            from .research import _apply_citation_style
+
+            transformed_text, _ = _apply_citation_style(
+                artifact_text, sources, body.citation_style
+            )
+
+            # Schema mode (schema or output_schema): skip token replay,
+            # emit only done event (matches non-cached schema streaming behavior)
+            has_schema = bool(body.output_schema or body.schema_)
+            if not has_schema:
+                # Replay artifact as token events
+                chunk_size = 8
+                for i in range(0, len(transformed_text), chunk_size):
+                    chunk = transformed_text[i : i + chunk_size]
+                    yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
+
+            latency_ms = int((_time.monotonic() - stream_start) * 1000)
+            done_payload: dict = {
+                "type": "done",
+                "result": transformed_text,
+                "sources": [s.get("url", "") for s in sources],
+                "latency_ms": latency_ms,
+                "from_cache": True,
+                "memory_id": cache_hit_data.get("memory_id", ""),
+                "freshness": cache_hit_data.get("freshness", "fresh"),
+                "similarity": cache_hit_data.get("similarity", 0),
+                "citation_style": body.citation_style.value,
+            }
+            if body.citation_style == CitationStyle.compact:
+                compact_srcs = []
+                for i, src in enumerate(sources, start=1):
+                    compact_srcs.append({"index": i, "url": src.get("url", "")})
+                done_payload["sources_compact"] = compact_srcs
+                done_payload["source_details"] = []
+            else:
+                done_payload["source_details"] = sources
+            yield f"data: {json.dumps(done_payload)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        headers = {
+            "X-Search-Budget": f"{max_searches}/{max_searches}",
+            "X-Search-Rate-Remaining": f"{rate_remaining}/{rate_limiter.limit}",
+        }
+        return StreamingResponse(
+            cache_hit_stream(),
+            media_type="text/event-stream",
+            headers=headers,
+        )
+
+    # Streaming path — run inline, return SSE (cache miss or force_fresh)
     if body.stream:
         # Pre-flight LLM health check — fail fast before opening the stream
         from .llm import LLMClient
@@ -210,12 +390,14 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
         from fastapi.responses import StreamingResponse
 
         async def event_stream() -> Any:
+            import json
+
             from .research import run_research_stream
 
             async for event in run_research_stream(
                 prompt=body.prompt,
                 urls=body.urls,
-                schema=body.schema_,
+                schema=body.output_schema or body.schema_,
                 searxng_url=request.app.state.searxng_url,
                 scraper_url=request.app.state.scraper_url,
                 llm_base_url=request.app.state.llm_base_url,
@@ -224,9 +406,8 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
                 requested_model=body.model if body.model != "default" else None,
                 max_searches_per_request=max_searches,
                 include_images=body.include_images,
+                citation_style=body.citation_style,
             ):
-                import json
-
                 if event["type"] == "sources_pending":
                     yield f"data: {json.dumps({'type': 'sources_pending', 'sources': event['sources']})}\n\n"
                 elif event["type"] == "source_scraped":
@@ -236,7 +417,39 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
                 elif event["type"] == "token":
                     yield f"data: {json.dumps({'type': 'token', 'content': event['content']})}\n\n"
                 elif event["type"] == "done":
-                    yield f"data: {json.dumps({'type': 'done', 'result': event['result'], 'sources': event['sources'], 'latency_ms': event['latency_ms']})}\n\n"
+                    import json as _json
+
+                    # Apply citation_style to transform result text markers
+                    source_details = event.get("source_details", [])
+                    cs = body.citation_style
+                    from .research import _apply_citation_style
+
+                    transformed_result, _ = _apply_citation_style(
+                        event["result"], source_details, cs
+                    )
+
+                    done_payload: dict = {
+                        "type": "done",
+                        "result": transformed_result,
+                        "sources": event["sources"],
+                        "latency_ms": event["latency_ms"],
+                    }
+                    # Apply citation_style transformation (VAL-CC-008, VAL-CC-009)
+                    done_payload["citation_style"] = cs.value
+                    if cs == CitationStyle.compact:
+                        compact_sources = []
+                        for i, src in enumerate(source_details, start=1):
+                            compact_sources.append(
+                                {
+                                    "index": i,
+                                    "url": src.get("url", ""),
+                                }
+                            )
+                        done_payload["sources_compact"] = compact_sources
+                        done_payload["source_details"] = []
+                    else:
+                        done_payload["source_details"] = source_details
+                    yield f"data: {_json.dumps(done_payload)}\n\n"
                 elif event["type"] == "error":
                     yield f"data: {json.dumps({'type': 'error', 'content': event['content']})}\n\n"
                 elif event["type"] == "status":
@@ -266,12 +479,13 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
 
     from .worker import _process_agent_async
 
+    user_id = _derive_user_id(request)
     request.app.state.task_tracker.create_background_task(
         _process_agent_async(
             job_id=job_id,
             prompt=body.prompt,
             urls=body.urls,
-            schema_=body.schema_,
+            schema_=body.output_schema or body.schema_,
             llm_base_url=request.app.state.llm_base_url,
             llm_api_key=request.app.state.llm_api_key,
             llm_model=request.app.state.llm_model,
@@ -280,6 +494,9 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
             webhook_config=body.webhook,
             requested_model=body.model,
             include_images=body.include_images,
+            citation_style=body.citation_style,
+            force_fresh=body.force_fresh,
+            user_id=user_id,
         )
     )
 
@@ -313,6 +530,570 @@ async def cancel_agent(request: Request, job_id: str) -> AgentCancelResponse:
             detail="Job not found or already completed", details={"job_id": job_id}
         )
     return AgentCancelResponse(success=True)
+
+
+# ── Plan mode helper (shared by /v2/agent {mode:plan} and /v2/agent/plan) ──
+
+
+async def _handle_plan_mode(request: Request, body: Any, response: Response) -> Any:
+    """Generate a structured research plan from an AgentRequest or PlanRequest.
+
+    Called from ``create_agent`` when ``mode: "plan"`` and from
+    ``/v2/agent/plan``.  Supports dual-path: streaming SSE or synchronous
+    response.
+    """
+    from fastapi.responses import StreamingResponse
+
+    from .llm import LLMClient
+    from .planner import PlanStore, ResearchPlanner
+    from .settings import load_settings
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    effective_model = (
+        body.model
+        if body.model and body.model != "default"
+        else request.app.state.llm_model
+    )
+    prompt = body.prompt
+    urls = getattr(body, "urls", None)
+    stream = getattr(body, "stream", False)
+
+    llm = LLMClient(
+        base_url=request.app.state.llm_base_url,
+        api_key=request.app.state.llm_api_key,
+        model=effective_model,
+    )
+    planner = ResearchPlanner()
+
+    # ── Streaming path ───────────────────────────────────────
+    if stream:
+        # Pre-flight LLM health check
+        if not await llm.check_health():
+            await llm.close()
+            from fastapi import HTTPException
+
+            raise HTTPException(
+                status_code=503,
+                detail="LLM backend is not available. Cannot generate plan.",
+            )
+
+        async def event_stream() -> Any:
+            import json
+
+            try:
+                async for event_type, data in planner.plan_stream(
+                    prompt=prompt,
+                    llm_client=llm,
+                    urls=urls,
+                ):
+                    if event_type == "token":
+                        yield f"data: {json.dumps({'type': 'token', 'content': data})}\n\n"
+                    elif event_type == "plan":
+                        store = PlanStore(redis_url=redis_url)
+                        plan_id = store.create(prompt=prompt, plan=data)
+                        yield f"data: {json.dumps({'type': 'plan', 'plan_id': plan_id, 'plan': data})}\n\n"
+                        yield f"data: {json.dumps({'type': 'done', 'plan_id': plan_id, 'plan': data})}\n\n"
+                    elif event_type == "error":
+                        yield f"data: {json.dumps({'type': 'error', 'content': data})}\n\n"
+            except Exception as e:
+                logger.error("Plan stream failed: %s", e)
+                yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+            finally:
+                await llm.close()
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    # ── Sync path ────────────────────────────────────────────
+    try:
+        plan = await planner.plan(prompt=prompt, llm_client=llm, urls=urls)
+    finally:
+        await llm.close()
+
+    store = PlanStore(redis_url=redis_url)
+    plan_id = store.create(prompt=prompt, plan=plan)
+    doc = store.get(plan_id) or {}
+    return PlanResponse(
+        plan_id=plan_id,
+        plan=plan,
+        created_at=doc.get("created_at", ""),
+        expires_at=doc.get("expires_at", ""),
+    )
+
+
+# ── Plan-Consent (Phase 3) ─────────────────────────────────────
+
+
+@router.post("/v2/agent/plan", response_model=PlanResponse)
+async def create_plan(
+    request: Request, body: PlanRequest, response: Response
+) -> PlanResponse:
+    """Generate a structured research plan for a given prompt.
+
+    Calls the LLM to decompose the prompt into ordered phases (search,
+    scrape, synthesize), estimates how many sources the research will
+    need, and identifies analysis dimensions.
+
+    The plan is persisted in Valkey with a 1-hour TTL.  The client can
+    review the plan, modify it, and then execute it via
+    ``POST /v2/agent/execute``.
+
+    Args:
+        body: Contains ``prompt``, optional ``model`` override, optional
+            ``urls`` (seed URLs), and optional ``stream`` (SSE mode).
+
+    Returns:
+        ``PlanResponse`` with ``plan_id``, full ``plan`` dict
+        (``phases``, ``estimated_sources``, ``comparison_dimensions``),
+        ``created_at``, and ``expires_at``.
+    """
+    return await _handle_plan_mode(request, body, response)
+
+
+@router.get("/v2/agent/plan/{plan_id}")
+async def get_plan(request: Request, plan_id: str) -> dict[str, Any]:
+    """Retrieve a previously-generated research plan by ID.
+
+    Returns the full plan document including ``plan_id``, ``prompt``,
+    ``plan`` (phases, estimated_sources, comparison_dimensions),
+    ``created_at``, and ``expires_at``.
+
+    Returns 404 if the plan was not found, expired, or already consumed.
+    """
+    from .planner import PlanStore
+    from .settings import load_settings
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    store = PlanStore(redis_url=redis_url)
+    doc = store.get(plan_id)
+    if doc is None:
+        raise NotFoundError(
+            detail="Plan not found or expired",
+            details={"plan_id": plan_id},
+        )
+    return {"success": True, **doc}
+
+
+@router.post("/v2/agent/execute")
+async def execute_plan(
+    request: Request, body: ExecutePlanRequest, response: Response
+) -> Any:
+    """Execute a previously-generated research plan with optional modifications.
+
+    Loads the plan from Valkey, applies any modifications (narrow scope,
+    add/remove dimensions), and either streams results as SSE or creates
+    a job for async polling.
+
+    Plans are ONE-SHOT: consumed (deleted) on first successful execution
+    attempt.  Re-executing the same plan_id returns 404.
+
+    Supports two modification formats:
+        - List form: ``[{type: "narrow", params: {focus: "..."}}, ...]``
+        - Dict form (legacy): ``{narrow: "...", add_dimension: [...], ...}``
+
+    Args:
+        body: Contains ``plan_id`` and optional ``modifications``.
+
+    Returns:
+        - When streaming: ``StreamingResponse`` (text/event-stream)
+        - Sync path: ``AgentCreateResponse`` with job ID for polling
+    """
+    from .planner import PlanStore
+    from .settings import load_settings
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    plan_store = PlanStore(redis_url=redis_url)
+    doc = plan_store.consume(body.plan_id)
+    if doc is None:
+        raise NotFoundError(
+            detail="Plan not found, expired, or already executed",
+            details={"plan_id": body.plan_id},
+        )
+
+    plan = doc["plan"]
+    prompt = doc["prompt"]
+
+    # Normalize modifications into a unified dict form (backward compatible)
+    mods: dict[str, Any] | None = _normalize_modifications(body.modifications)
+
+    # Apply modifications in-memory (do NOT mutate the stored plan)
+    if mods:
+        plan = _apply_plan_modifications(plan, mods, prompt)
+
+    # ── Sync path: create job, process in background ──────────
+    if not body.stream:
+        store: JobStore = request.app.state.job_store
+        job_id = store.create_job(
+            kind="plan_execute",
+            payload={
+                "plan_id": body.plan_id,
+                "prompt": prompt,
+                "plan": plan,
+                "modifications": mods,
+            },
+        )
+        from .worker import _process_plan_execution_async
+
+        request.app.state.task_tracker.create_background_task(
+            _process_plan_execution_async(
+                job_id=job_id,
+                prompt=prompt,
+                plan=plan,
+                modifications=mods,
+                llm_base_url=request.app.state.llm_base_url,
+                llm_api_key=request.app.state.llm_api_key,
+                llm_model=request.app.state.llm_model,
+                searxng_url=request.app.state.searxng_url,
+                scraper_url=request.app.state.scraper_url,
+                webhook_config=body.webhook,
+            )
+        )
+        return AgentCreateResponse(id=job_id)
+
+    # ── Streaming path: run inline, return SSE ────────────────
+    from fastapi.responses import StreamingResponse
+
+    async def event_stream() -> Any:
+        import json
+        import time as _time
+
+        from .llm import LLMClient
+        from .research import _scrape_urls
+        from .scraper_client import ScraperClient
+        from .searxng_client import SearXNGClient
+
+        start = _time.monotonic()
+
+        effective_model = request.app.state.llm_model
+        llm = LLMClient(
+            base_url=request.app.state.llm_base_url,
+            api_key=request.app.state.llm_api_key,
+            model=effective_model,
+        )
+        searxng = SearXNGClient(request.app.state.searxng_url)
+        scraper = ScraperClient(request.app.state.scraper_url)
+
+        all_sources: list[dict] = []
+        accumulated_context_parts: list[str] = []
+        seen_urls: set[str] = set()
+
+        try:
+            phases = plan.get("phases", [])
+            full_synthesis = ""
+            for phase_idx, phase in enumerate(phases):
+                action = phase.get("action", "search")
+                description = phase.get("description", "")
+
+                yield f"data: {json.dumps({'type': 'phase', 'phase_index': phase_idx + 1, 'action': action, 'description': description, 'total_phases': len(phases)})}\n\n"
+
+                if action == "search":
+                    # Build query: combine prompt + phase description + narrow hint
+                    query = description or prompt
+                    if mods and mods.get("narrow"):
+                        query = f"{mods.get('narrow')} {query}"
+                    # Apply modify_query modifications for this specific phase
+                    if mods and mods.get("modify_queries"):
+                        for mq in mods["modify_queries"]:
+                            if mq.get("phase_index") == phase_idx and mq.get(
+                                "new_query"
+                            ):
+                                query = mq["new_query"]
+                                break
+
+                    try:
+                        results, _health = await searxng.search(query, limit=10)
+                    except Exception:
+                        results = []
+
+                    new_urls = []
+                    for r in results:
+                        url = r.get("url", "")
+                        if url and url not in seen_urls:
+                            seen_urls.add(url)
+                            new_urls.append(url)
+                            all_sources.append(
+                                {
+                                    "url": url,
+                                    "title": r.get("title", ""),
+                                    "relevance": r.get("description", ""),
+                                }
+                            )
+
+                    yield f"data: {json.dumps({'type': 'search', 'query': query, 'result_count': len(new_urls), 'new_urls': new_urls[:10]})}\n\n"
+
+                    # Scrape discovered URLs
+                    if new_urls:
+                        scraped_docs, scraped_details = await _scrape_urls(
+                            new_urls[:5],
+                            scraper,
+                            min_sources=1,
+                            max_attempts=min(5, len(new_urls)),
+                        )
+                        for doc, _detail in zip(
+                            scraped_docs, scraped_details, strict=False
+                        ):
+                            accumulated_context_parts.append(doc)
+                            yield f"data: {json.dumps({'type': 'scrape', 'url': _detail.get('url', ''), 'chars': len(doc)})}\n\n"
+
+                elif action == "scrape":
+                    # Phase description may contain URLs or URL hints
+                    pass
+
+                elif action == "synthesize":
+                    context = (
+                        "\n\n---\n\n".join(accumulated_context_parts)
+                        if accumulated_context_parts
+                        else ""
+                    )
+                    synthesis_prompt = (
+                        description or f"Synthesise findings for: {prompt}"
+                    )
+
+                    # Include dimensions in the synthesis prompt
+                    dimensions = list(
+                        plan.get("comparison_dimensions", plan.get("dimensions", []))
+                    )
+                    if mods:
+                        if mods.get("add_dimension"):
+                            for d in mods.get("add_dimension", []):
+                                if d not in dimensions:
+                                    dimensions.append(d)
+                        if mods.get("remove_dimension"):
+                            dimensions = [
+                                d
+                                for d in dimensions
+                                if d not in (mods.get("remove_dimension") or [])
+                            ]
+
+                    if dimensions:
+                        dims_str = ", ".join(dimensions)
+                        synthesis_prompt = (
+                            f"{synthesis_prompt}\n\n"
+                            f"CRITICAL: Address each of these analysis dimensions: {dims_str}. "
+                            f"For each dimension, provide specific evidence from the sources below."
+                        )
+
+                    synthesis_prompt = (
+                        f"{synthesis_prompt}\n\n"
+                        f"Base your answer ONLY on the source content provided below. "
+                        f"Cite sources by their URL. Be thorough and precise."
+                    )
+
+                    full_synthesis = ""
+                    async for chunk in llm.generate_stream(
+                        system_prompt=(
+                            "You are GroktoCrawl, a research synthesis agent. "
+                            "Synthesise information from the provided sources into a "
+                            "comprehensive, well-structured answer. Be thorough, precise, "
+                            "and cite specific sources."
+                        ),
+                        user_prompt=synthesis_prompt,
+                        context=context or None,
+                    ):
+                        if chunk["type"] == "token":
+                            full_synthesis += chunk["content"]
+                            yield f"data: {json.dumps({'type': 'token', 'content': chunk['content']})}\n\n"
+                        elif chunk["type"] == "error":
+                            yield f"data: {json.dumps({'type': 'error', 'content': chunk['content']})}\n\n"
+
+                    if full_synthesis:
+                        accumulated_context_parts.append(full_synthesis)
+
+            # Final done event
+            latency_ms = int((_time.monotonic() - start) * 1000)
+            result_data = {
+                "result": full_synthesis,
+                "sources": all_sources,
+                "latency_ms": latency_ms,
+            }
+            yield f"data: {json.dumps({'type': 'done', **result_data})}\n\n"
+
+            # Fire webhook on completion (fire-and-forget, don't block stream)
+            if body.webhook:
+                from .webhook import deliver_webhook
+
+                await deliver_webhook(
+                    body.webhook,
+                    "completed",
+                    body.plan_id,
+                    result_data,
+                )
+
+        except Exception as e:
+            logger.error("Plan execution failed: %s", e)
+            yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+
+            # Fire webhook on failure
+            if body.webhook:
+                from .webhook import deliver_webhook
+
+                await deliver_webhook(
+                    body.webhook,
+                    "failed",
+                    body.plan_id,
+                    {"error": str(e)},
+                    success=False,
+                    error=str(e),
+                )
+        finally:
+            await llm.close()
+            await searxng.close()
+            await scraper.close()
+
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+def _normalize_modifications(raw: Any) -> dict[str, Any] | None:
+    """Normalize modifications from list or dict form into a unified dict.
+
+    - List form: ``[{type: "narrow", params: {focus: "..."}}, ...]`` →
+      ``{narrow: "...", add_dimension: [...]}``
+    - Dict form / PlanModifications: passthrough
+    - None / empty: returns None
+
+    Args:
+        raw: Raw modifications from the request body (after model validation).
+
+    Returns:
+        A unified dict with optional ``narrow`` (str), ``add_dimension``
+        (list[str]), and ``remove_dimension`` (list[str]) keys, or ``None``.
+    """
+    if raw is None:
+        return None
+
+    # Already normalized dict form (PlanModifications)
+    if isinstance(raw, PlanModifications):
+        result: dict[str, Any] = {}
+        if raw.narrow:
+            result["narrow"] = raw.narrow
+        if raw.add_dimension:
+            result["add_dimension"] = raw.add_dimension
+        if raw.remove_dimension:
+            result["remove_dimension"] = raw.remove_dimension
+        return result or None
+
+    if isinstance(raw, dict) and "type" not in raw:
+        # Legacy dict form
+        return raw or None
+
+    # List form: convert each PlanModification into unified dict
+    items = raw if isinstance(raw, list) else [raw]
+    if isinstance(items, (PlanModifications, dict)):
+        return _normalize_modifications(items)
+
+    result = {}
+    for mod in items:
+        if isinstance(mod, PlanModification):
+            mod_type = mod.type
+            mod_params = mod.params
+        elif isinstance(mod, dict):
+            mod_type = mod.get("type", "")
+            mod_params = mod.get("params", {})
+        else:
+            continue
+
+        if mod_type == "narrow":
+            result["narrow"] = mod_params.get("focus", mod_params.get("narrow", ""))
+        elif mod_type == "add_dimension":
+            dim = mod_params.get("dimension", mod_params.get("name", ""))
+            if dim:
+                result.setdefault("add_dimension", []).append(dim)
+        elif mod_type == "modify_query":
+            # Store modify_query params for future use
+            result.setdefault("modify_queries", []).append(mod_params)
+        elif mod_type == "remove_dimension":
+            dim = mod_params.get("dimension", mod_params.get("name", ""))
+            if dim:
+                result.setdefault("remove_dimension", []).append(dim)
+
+    return result or None
+
+
+def _apply_plan_modifications(
+    plan: dict,
+    modifications: dict[str, Any],
+    prompt: str,
+) -> dict:
+    """Apply user modifications to a plan in-memory.
+
+    Returns a deep copy of the plan with modifications applied.
+    Does NOT mutate the original dict or persist changes to Valkey.
+
+    Args:
+        plan: The original plan dict with ``phases``, ``dimensions``, etc.
+        modifications: A unified dict with optional ``narrow`` (str),
+            ``add_dimension`` (list[str]), ``remove_dimension`` (list[str]),
+            and ``modify_queries`` (list[dict]).
+        prompt: The original research prompt (used when narrowing).
+
+    Returns:
+        A modified plan dict.
+    """
+    import copy
+
+    plan = copy.deepcopy(plan)
+
+    # Narrow — inject focus into the first search phase
+    narrow = modifications.get("narrow")
+    if narrow:
+        phases = plan.get("phases", [])
+        for phase in phases:
+            if phase.get("action") == "search":
+                phase["description"] = (
+                    f"[FOCUS: {narrow}] {phase.get('description', '')}"
+                )
+                break
+        else:
+            # No search phase exists — prepend one
+            phases.insert(
+                0,
+                {
+                    "action": "search",
+                    "description": f"[FOCUS: {narrow}] Search for: {prompt}",
+                },
+            )
+
+    # Apply modify_query changes
+    modify_queries = modifications.get("modify_queries", [])
+    for mq in modify_queries:
+        phase_index = mq.get("phase_index")
+        new_query = mq.get("new_query")
+        if phase_index is not None and new_query:
+            phases = plan.get("phases", [])
+            if 0 <= phase_index < len(phases):
+                phases[phase_index]["description"] = new_query
+
+    # Add dimensions (supports both "dimensions" and "comparison_dimensions" keys)
+    dims_key: str = (
+        "comparison_dimensions" if "comparison_dimensions" in plan else "dimensions"
+    )
+    add_dims = modifications.get("add_dimension")
+    if add_dims:
+        existing = plan.setdefault(dims_key, [])
+        for d in add_dims:
+            if d not in existing:
+                existing.append(d)
+
+    # Remove dimensions
+    remove_dims = modifications.get("remove_dimension")
+    if remove_dims:
+        plan[dims_key] = [d for d in plan.get(dims_key, []) if d not in remove_dims]
+
+    return plan
 
 
 @router.post("/v2/crawl", response_model=CrawlCreateResponse)
@@ -1062,7 +1843,11 @@ async def search(request: Request, body: SearchRequest) -> SearchResponse:
                 llm_model=request.app.state.llm_model,
             )
             search_results = deep_result["results"]
-            deep_data: dict[str, list] = {"web": search_results, "images": [], "news": []}
+            deep_data: dict[str, list] = {
+                "web": search_results,
+                "images": [],
+                "news": [],
+            }
             return SearchResponse(
                 data=deep_data, query_variations=deep_result.get("query_variations", [])
             )
@@ -1361,6 +2146,9 @@ async def answer(request: Request, body: AnswerRequest, response: Response) -> A
     if body.stream:
         from fastapi.responses import StreamingResponse
 
+        # Resolve effective schema: output_schema takes priority, empty dict treated as None
+        effective_schema = _resolve_output_schema(body.output_schema, body.schema_)
+
         async def event_stream() -> Any:
             from .research import run_answer_stream
 
@@ -1377,6 +2165,8 @@ async def answer(request: Request, body: AnswerRequest, response: Response) -> A
                 llm_model=request.app.state.llm_model,
                 requested_model=body.model if body.model != "default" else None,
                 max_searches_per_request=max_searches,
+                output_schema=effective_schema,
+                citation_style=body.citation_style,
             ):
                 if event["type"] == "sources_pending":
                     import json
@@ -1411,6 +2201,8 @@ async def answer(request: Request, body: AnswerRequest, response: Response) -> A
     # Sync path
     from .research import run_answer
 
+    effective_schema = _resolve_output_schema(body.output_schema, body.schema_)
+
     result = await run_answer(
         query=body.query,
         num_sources=body.num_sources,
@@ -1424,6 +2216,8 @@ async def answer(request: Request, body: AnswerRequest, response: Response) -> A
         llm_model=request.app.state.llm_model,
         requested_model=body.model if body.model != "default" else None,
         max_searches_per_request=max_searches,
+        output_schema=effective_schema,
+        citation_style=body.citation_style,
     )
     response.headers["X-Search-Budget"] = f"{max_searches}/{max_searches}"
     response.headers["X-Search-Rate-Remaining"] = (
@@ -1436,6 +2230,266 @@ async def answer(request: Request, body: AnswerRequest, response: Response) -> A
         citations=[Citation(**c) for c in result["citations"]],
         search_type=result["search_type"],
         latency_ms=result["latency_ms"],
+    )
+
+
+@router.post("/v2/citations/resolve", response_model=CitationsResolveResponse)
+async def resolve_citations(request: Request, body: CitationsResolveRequest):
+    """Resolve inline citation markers to full citations.
+
+    Takes markdown text with ``[N]`` markers and a source list.  Returns
+    the text with citations resolved according to the requested style.
+
+    Citation styles:
+        - ``inline``: Keep ``[N]`` markers as-is (returns original text).
+        - ``compact``: Replace ``[N]`` with ``[N](url)`` self-contained links.
+    """
+    # ── Per-client rate limit check (VAL-CR-018) ────────────
+    client_ip = _get_client_ip(request)
+    rate_limiter = request.app.state.rate_limiter
+    allowed, _rate_remaining = await rate_limiter.check(f"{client_ip}:search")
+    if not allowed:
+        from .exceptions import RateLimitedError
+        from .metrics import METRICS
+
+        METRICS.counter("search_calls_total", "Total search calls", ["status"]).inc(
+            {"status": "rate_limited"}
+        )
+        raise RateLimitedError(
+            detail=f"Per-client rate limit exceeded ({rate_limiter.limit}/{rate_limiter.window}s)"
+        )
+
+    import re
+
+    resolved: list[ResolvedCitation] = []
+    seen_indices: set[int] = set()
+    text = body.text
+    style = body.style
+
+    # Build lookup: index (1-based) → source
+    src_map: dict[int, Source] = {}
+    for i, src in enumerate(body.sources, start=1):
+        src_map[i] = src
+
+    if style == CitationStyle.compact:
+        # Replace [N] with [N](url) — self-contained link
+        # Use (?!\() to avoid matching already-linked [N](url) markers
+        def _compact_replacer(match: re.Match) -> str:
+            idx = int(match.group(1))
+            if idx in src_map and idx not in seen_indices:
+                seen_indices.add(idx)
+                src = src_map[idx]
+                resolved.append(
+                    ResolvedCitation(
+                        index=idx,
+                        url=src.url,
+                        title=src.title,
+                        marker_text=match.group(0),
+                        resolved_text=f"[{idx}]({src.url})",
+                    )
+                )
+                return f"[{idx}]({src.url})"
+            return match.group(0)
+
+        text = re.sub(r"\[(\d+)\](?!\()", _compact_replacer, text)
+    else:  # inline — return as-is but build citation list
+        for match in re.finditer(r"\[(\d+)\]", text):
+            idx = int(match.group(1))
+            if idx in src_map and idx not in seen_indices:
+                seen_indices.add(idx)
+                src = src_map[idx]
+                resolved.append(
+                    ResolvedCitation(
+                        index=idx,
+                        url=src.url,
+                        title=src.title,
+                        marker_text=match.group(0),
+                        resolved_text=match.group(0),
+                    )
+                )
+
+    return CitationsResolveResponse(
+        resolved_text=text,
+        citations=resolved,
+        style=style,
+        citation_count=len(resolved),
+    )
+
+
+# ── Session Protocol ──────────────────────────────────────────
+
+
+def _get_redis_url(request: Request) -> str:
+    """Build a Redis/Valkey URL from the app settings."""
+    from .settings import load_settings
+
+    settings = load_settings()
+    return f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+
+
+@router.post("/v2/session/create", response_model=SessionCreateResponse)
+async def create_session(request: Request, body: SessionCreateRequest) -> Any:
+    """Create a new research session.
+
+    Sessions accumulate search results, scraped content, and LLM answers
+    server-side so agents can steer multi-step research without carrying
+    full page content in their context window.
+    """
+    from .session import SessionManager
+
+    mgr = SessionManager(redis_url=_get_redis_url(request))
+    session_id = await mgr.create_session(ttl=body.ttl)
+    session = await mgr.get_session(session_id)
+    if session is None:
+        raise NotFoundError(detail="Failed to create session")
+    return SessionCreateResponse(
+        session_id=session["id"],
+        expires_at=session["expires_at"],
+        ttl=session.get("ttl", 3600),
+    )
+
+
+@router.post("/v2/session/{session_id}/step", response_model=SessionStepResponse)
+async def session_step(
+    request: Request, session_id: str, body: SessionStepRequest
+) -> Any:
+    """Execute an action step within a research session.
+
+    Supported actions:
+        - ``search``: SearXNG search, stores results as refs. Params: query, limit.
+        - ``scrape``: Scrape URLs, stores content as refs. Params: urls[].
+        - ``query``: LLM over accumulated context. Params: question.
+    """
+    from .session import SessionManager
+
+    mgr = SessionManager(redis_url=_get_redis_url(request))
+    try:
+        result = await mgr.step(
+            session_id=session_id,
+            action=body.action,
+            params=body.params,
+            searxng_url=request.app.state.searxng_url,
+            scraper_url=request.app.state.scraper_url,
+            llm_base_url=request.app.state.llm_base_url,
+            llm_api_key=request.app.state.llm_api_key,
+            llm_model=request.app.state.llm_model,
+        )
+        return SessionStepResponse(
+            step_index=result["step_index"],
+            action=result["action"],
+            summary=result["summary"],
+            result=result,
+        )
+    except ValueError as e:
+        msg = str(e)
+        if "not found" in msg.lower():
+            raise NotFoundError(detail=msg)
+        if "currently executing" in msg.lower():
+            raise ConflictError(detail=msg)
+        raise InvalidRequestError(detail=msg)
+
+
+@router.get("/v2/session/{session_id}", response_model=SessionStatusResponse)
+async def get_session(request: Request, session_id: str) -> Any:
+    """Get session status, step history, and artifact length."""
+    from .session import SessionManager
+
+    mgr = SessionManager(redis_url=_get_redis_url(request))
+    session = await mgr.get_session(session_id)
+    if session is None:
+        raise NotFoundError(detail=f"Session not found: {session_id}")
+    return SessionStatusResponse(
+        session_id=session["id"],
+        status=session.get("status", "active"),
+        created_at=session.get("created_at", ""),
+        expires_at=session.get("expires_at", ""),
+        step_count=session.get("step_count", 0),
+        steps=session.get("steps", []),
+        artifact_length=session.get("artifact_length", 0),
+    )
+
+
+@router.post("/v2/session/{session_id}/export", response_model=SessionExportResponse)
+async def export_session(request: Request, session_id: str) -> Any:
+    """Export the accumulated session artifact as markdown."""
+    from .session import SessionManager
+
+    mgr = SessionManager(redis_url=_get_redis_url(request))
+    try:
+        export = await mgr.export_session(session_id)
+        return SessionExportResponse(**export)
+    except ValueError as e:
+        raise NotFoundError(detail=str(e))
+
+
+@router.delete("/v2/session/{session_id}", response_model=SessionDeleteResponse)
+async def delete_session(request: Request, session_id: str) -> Any:
+    """Delete a session and all associated data."""
+    from .session import SessionManager
+
+    mgr = SessionManager(redis_url=_get_redis_url(request))
+    deleted = await mgr.delete_session(session_id)
+    return SessionDeleteResponse(session_id=session_id, deleted=deleted)
+
+
+@router.post(
+    "/v2/session/{session_id}/resolve",
+    response_model=SessionResolveResponse,
+)
+async def resolve_session_refs(
+    request: Request, session_id: str, body: SessionResolveRequest
+) -> Any:
+    """Resolve reference IDs to full source content.
+
+    Returns full markdown, URL, title, source, char_count, and
+    scraped_at for each requested ref.  Missing refs are silently
+    omitted — compare ``resolved`` count against ``len(ref_ids)``
+    to detect gaps.
+
+    Args:
+        session_id: The session to query.
+        body: Contains ``ref_ids`` (list of ref ID strings).
+
+    Returns:
+        ``SessionResolveResponse`` with resolved refs, resolved count,
+        and list of missing ref IDs.
+
+    Raises:
+        ``NotFoundError`` (404) if the session does not exist.
+    """
+    from .session import SessionManager
+
+    mgr = SessionManager(redis_url=_get_redis_url(request))
+    session = await mgr.get_session(session_id)
+    if session is None:
+        raise NotFoundError(
+            detail=f"Session not found: {session_id}",
+            details={"session_id": session_id},
+        )
+
+    resolved_refs = await mgr.resolve_refs(session_id, body.ref_ids)
+
+    # Build compact ref view (full markdown included for resolve)
+    compact: dict[str, dict[str, Any]] = {}
+    for ref_id in body.ref_ids:
+        ref_data = resolved_refs.get(ref_id)
+        if ref_data is not None:
+            compact[ref_id] = {
+                "url": ref_data.get("url", ""),
+                "title": ref_data.get("title", ""),
+                "markdown": ref_data.get("markdown", ""),
+                "source": ref_data.get("source", "unknown"),
+                "char_count": ref_data.get("char_count", 0),
+                "scraped_at": ref_data.get("scraped_at", ""),
+            }
+
+    missing = [rid for rid in body.ref_ids if rid not in resolved_refs]
+
+    return SessionResolveResponse(
+        session_id=session_id,
+        refs=compact,
+        resolved=len(compact),
+        missing=missing,
     )
 
 
@@ -1802,11 +2856,10 @@ async def run_monitor_check(request: Request, monitor_id: str) -> MonitorRespons
     Runs the check regardless of the cron schedule and returns
     the updated monitor status including any diff or new results.
     """
-    store: JobStore = request.app.state.job_store
     scraper_url = request.app.state.scraper_url
 
     try:
-        result = await run_monitor(monitor_id, scraper_url=scraper_url)
+        await run_monitor(monitor_id, scraper_url=scraper_url)
     except ValueError:
         raise NotFoundError(
             detail="Monitor not found", details={"monitor_id": monitor_id}
@@ -2014,6 +3067,388 @@ async def get_llmstxt_status(request: Request, job_id: str) -> LLMsTextStatusRes
         error=job.get("error"),
         expires_at=job.get("completed_at") or job.get("created_at"),
     )
+
+
+# ── Research Memory (Phase 4) ──────────────────────────────────
+
+
+@router.post(
+    "/v2/research-memory/query",
+    response_model=ResearchMemoryQueryResponse,
+)
+async def research_memory_query(
+    request: Request, body: ResearchMemoryQueryRequest
+) -> ResearchMemoryQueryResponse:
+    """Search research memory for a semantically similar cached artifact.
+
+    Embeds the question via semantic-svc, searches Qdrant for similar
+    entries, and fetches matching artifacts from Valkey.  Returns the
+    best match with freshness classification.
+
+    Args:
+        body: Contains ``question`` (the text to search for) and
+            optional ``max_age_hours`` (default 72).
+
+    Returns:
+        ``ResearchMemoryQueryResponse`` with ``hit``, ``artifact``,
+        ``age_hours``, and ``freshness`` fields.
+    """
+    from .research_memory import ResearchMemory
+    from .settings import load_settings
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    memory = ResearchMemory(
+        redis_url=redis_url,
+        semantic_url=settings.semantic_url,
+    )
+    try:
+        user_id = _derive_user_id(request)
+        result = await memory.query(
+            prompt=body.question,
+            user_id=user_id,
+        )
+        return ResearchMemoryQueryResponse(**result)
+    finally:
+        await memory.close()
+
+
+@router.post(
+    "/v2/research-memory/store",
+    response_model=ResearchMemoryStoreResponse,
+)
+async def research_memory_store(
+    request: Request, body: ResearchMemoryStoreRequest
+) -> ResearchMemoryStoreResponse:
+    """Store a research artifact in the cross-session memory.
+
+    Embeds the question via semantic-svc, stores the artifact in Valkey
+    with TTL, and upserts a point in Qdrant for similarity search.
+
+    Args:
+        body: Contains ``question``, ``answer``, ``sources``, and
+            optional ``metadata``.
+
+    Returns:
+        ``ResearchMemoryStoreResponse`` with the new ``artifact_id``.
+    """
+    from .research_memory import ResearchMemory
+    from .settings import load_settings
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    memory = ResearchMemory(
+        redis_url=redis_url,
+        semantic_url=settings.semantic_url,
+    )
+    try:
+        user_id = _derive_user_id(request)
+        artifact_id = await memory.store(
+            prompt=body.question,
+            artifact=body.answer,
+            sources=body.sources,
+            user_id=user_id,
+            metadata=body.metadata,
+        )
+        return ResearchMemoryStoreResponse(artifact_id=artifact_id)
+    finally:
+        await memory.close()
+
+
+@router.delete("/v2/research-memory/{artifact_id}")
+async def research_memory_delete(request: Request, artifact_id: str) -> dict:
+    """Delete a research memory artifact by ID from both Valkey and Qdrant.
+
+    Args:
+        artifact_id: The artifact ID returned by the store endpoint.
+
+    Returns:
+        ``{"success": true}`` if deleted, ``{"success": false}`` if
+        the artifact was not found.
+    """
+    from .research_memory import ResearchMemory
+    from .settings import load_settings
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    memory = ResearchMemory(
+        redis_url=redis_url,
+        semantic_url=settings.semantic_url,
+    )
+    try:
+        deleted = await memory.delete(artifact_id)
+        return {"success": deleted}
+    finally:
+        await memory.close()
+
+
+# ── Research Memory: direct Valkey routes ───────────────────────
+
+
+@router.get("/v2/memory/{memory_id}")
+async def get_memory(request: Request, memory_id: str) -> dict[str, Any]:
+    """Retrieve a research memory artifact by ID.
+
+    Returns the full stored artifact including query, artifact text,
+    sources, model, created_at, expires_at, and user_id.
+
+    Args:
+        memory_id: The memory ID (UUID v4).
+
+    Returns:
+        200 with the artifact dict, or 404 if not found.
+    """
+    from .research_memory import ResearchMemory
+    from .settings import load_settings
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    memory = ResearchMemory(
+        redis_url=redis_url,
+        semantic_url=settings.semantic_url,
+    )
+    try:
+        entry = await memory.get(memory_id)
+        if entry is None:
+            raise NotFoundError(
+                detail="Memory artifact not found",
+                details={"memory_id": memory_id},
+            )
+        return {"success": True, "memory_id": memory_id, **entry}
+    finally:
+        await memory.close()
+
+
+@router.delete("/v2/memory/{memory_id}")
+async def delete_memory(request: Request, memory_id: str) -> dict[str, Any]:
+    """Delete a research memory artifact from both Valkey and Qdrant.
+
+    Args:
+        memory_id: The memory ID to delete.
+
+    Returns:
+        ``{"success": true, "deleted": true}`` if deleted.
+
+    Raises:
+        ``NotFoundError`` (404) if the memory entry does not exist.
+    """
+    from .research_memory import ResearchMemory
+    from .settings import load_settings
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    memory = ResearchMemory(
+        redis_url=redis_url,
+        semantic_url=settings.semantic_url,
+    )
+    try:
+        deleted = await memory.delete(memory_id)
+        if not deleted:
+            raise NotFoundError(
+                detail="Memory entry not found",
+                details={"memory_id": memory_id},
+            )
+        return {"success": True, "deleted": True}
+    finally:
+        await memory.close()
+
+
+@router.post("/v2/memory/sweep")
+async def sweep_memory(request: Request) -> dict[str, Any]:
+    """Sweep orphaned Qdrant points whose Valkey keys have expired.
+
+    Trigger a manual cleanup of the research_memory Qdrant collection.
+    Scans all points and removes those with no corresponding Valkey key.
+
+    **Admin-only operation**: Rate-limited to 1 call per 60s per
+    client IP to prevent operational DoS from repeated full Qdrant
+    scans.
+
+    Returns:
+        ``{"success": true, "swept": N}`` where N is the number of
+        Qdrant points removed.
+    """
+    # Rate limit: one sweep per 60s per client IP
+    client_ip = _get_client_ip(request)
+    rate_limiter = request.app.state.rate_limiter
+    allowed, _remaining = await rate_limiter.check(f"{client_ip}:memory_sweep")
+    if not allowed:
+        from .exceptions import RateLimitedError
+
+        raise RateLimitedError(
+            detail=f"Sweep rate limit exceeded — max 1 per {rate_limiter.window}s. "
+            "This is an admin-only maintenance endpoint."
+        )
+
+    from .research_memory import ResearchMemory
+    from .settings import load_settings
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    memory = ResearchMemory(
+        redis_url=redis_url,
+        semantic_url=settings.semantic_url,
+    )
+    try:
+        count = await memory.sweep()
+        return {"success": True, "swept": count}
+    finally:
+        await memory.close()
+
+
+# ── Research Memory: Batch Operations ───────────────────────────
+
+
+@router.post(
+    "/v2/memory/batch/query",
+    response_model=MemoryBatchQueryResponse,
+)
+async def memory_batch_query(
+    request: Request,
+    body: MemoryBatchQueryRequest,
+) -> MemoryBatchQueryResponse:
+    """Batch lookup of multiple queries against research memory.
+
+    Each query is independently embedded and searched.  Results are
+    returned in the same order as the input queries.
+
+    Args:
+        body: Contains ``queries`` (list of strings).
+
+    Returns:
+        ``MemoryBatchQueryResponse`` with ``results`` array of
+        per-query hit/miss, similarity, freshness, and artifact data.
+    """
+    from .research_memory import ResearchMemory
+    from .settings import load_settings
+
+    if not body.queries:
+        return MemoryBatchQueryResponse(success=True, results=[])
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    memory = ResearchMemory(
+        redis_url=redis_url,
+        semantic_url=settings.semantic_url,
+    )
+    try:
+        user_id = _derive_user_id(request)
+        raw_results = await memory.batch_query(
+            queries=body.queries,
+            user_id=user_id,
+        )
+        results: list[MemoryBatchQueryEntry] = []
+        for i, r in enumerate(raw_results):
+            entry = MemoryBatchQueryEntry(
+                hit=r.get("hit", False),
+                similarity=r.get("similarity"),
+                freshness=r.get("freshness"),
+                memory_id=r.get("memory_id"),
+            )
+            if r.get("hit") and r.get("artifact"):
+                art = r["artifact"]
+                entry.query = art.get(
+                    "query", body.queries[i] if i < len(body.queries) else ""
+                )
+                entry.artifact = art.get("artifact", "")
+                entry.sources = art.get("sources", [])
+            results.append(entry)
+        return MemoryBatchQueryResponse(success=True, results=results)
+    finally:
+        await memory.close()
+
+
+@router.post(
+    "/v2/memory/batch/store",
+    response_model=MemoryBatchStoreResponse,
+)
+async def memory_batch_store(
+    request: Request,
+    body: MemoryBatchStoreRequest,
+) -> MemoryBatchStoreResponse:
+    """Batch store multiple research artifacts in memory.
+
+    Each entry is stored independently.  If one fails (e.g. embedding
+    failure), the others still succeed.  Per-entry status is returned.
+
+    Args:
+        body: Contains ``entries`` list of ``{query, artifact, sources,
+            model}`` dicts.
+
+    Returns:
+        ``MemoryBatchStoreResponse`` with ``stored_count``,
+        ``failed_count``, and per-entry ``results``.
+    """
+    from .research_memory import ResearchMemory
+    from .settings import load_settings
+
+    if not body.entries:
+        return MemoryBatchStoreResponse(
+            success=True,
+            stored_count=0,
+            failed_count=0,
+            results=[],
+        )
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    memory = ResearchMemory(
+        redis_url=redis_url,
+        semantic_url=settings.semantic_url,
+    )
+    try:
+        user_id = _derive_user_id(request)
+        raw_results = await memory.batch_store(
+            entries=[e.model_dump() for e in body.entries],
+            user_id=user_id,
+        )
+        results: list[MemoryBatchStoreResult] = []
+        stored = 0
+        failed = 0
+        for r in raw_results:
+            if r.get("success"):
+                stored += 1
+            else:
+                failed += 1
+            results.append(
+                MemoryBatchStoreResult(
+                    success=r.get("success", False),
+                    memory_id=r.get("memory_id"),
+                    error=r.get("error"),
+                )
+            )
+        return MemoryBatchStoreResponse(
+            success=True,
+            stored_count=stored,
+            failed_count=failed,
+            results=results,
+        )
+    finally:
+        await memory.close()
 
 
 async def _index_scrape(url: str, title: str, content: str, request: Request) -> None:
