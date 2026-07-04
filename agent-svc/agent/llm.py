@@ -169,9 +169,17 @@ class LLMClient:
             body["enable_thinking"] = True
 
         # If schema is provided, request structured JSON output
+        # Uses strict json_schema mode for better compliance (vs json_object)
         if schema:
-            body["response_format"] = {"type": "json_object"}
-            # Inject schema into the system prompt
+            body["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "response",
+                    "schema": schema,
+                    "strict": True,
+                },
+            }
+            # Also inject schema into the system prompt as a fallback hint
             messages[0]["content"] += (
                 f"\n\nYou MUST respond with valid JSON matching this schema:\n"
                 f"{json.dumps(schema, indent=2)}"

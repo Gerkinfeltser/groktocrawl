@@ -56,6 +56,20 @@ class VerbosityLevel(str, Enum):
     full = "full"  # Complete page text including structural markup
 
 
+class CitationStyle(str, Enum):
+    """Citation formatting styles for agent and answer responses.
+
+    Attributes:
+        inline: Bare ``[N]`` markers with a separate citations list in the
+            response body (current behaviour, Firecrawl v2 default).
+        compact: Self-contained ``[N](url)`` markers embedded directly in
+            the markdown answer text.  No separate citations list needed.
+    """
+
+    inline = "inline"
+    compact = "compact"
+
+
 class SectionCategory(str, Enum):
     header = "header"
     navigation = "navigation"
@@ -446,6 +460,9 @@ class AgentRequest(BaseModel):
     schema_: dict[str, Any] | None = Field(
         None, alias="schema", description="JSON Schema for structured output"
     )
+    output_schema: dict[str, Any] | None = Field(
+        None, description="JSON Schema for structured output (alias for schema)"
+    )
     model: str = Field(default="default", description="Model hint")
     max_credits: int | None = None
     webhook: dict[str, Any] | None = None
@@ -453,6 +470,10 @@ class AgentRequest(BaseModel):
     stream: bool = Field(default=False, description="SSE streaming response")
     include_images: bool = Field(
         default=False, description="Collect images from scraped sources"
+    )
+    citation_style: CitationStyle = Field(
+        default=CitationStyle.inline,
+        description="Citation formatting style: inline, compact, footnote, or none",
     )
 
     model_config = ConfigDict(populate_by_name=True)
@@ -1051,6 +1072,13 @@ class AnswerRequest(BaseModel):
     )
     model: str = Field(default="default", description="Per-request LLM override")
     stream: bool = Field(default=False, description="SSE streaming response")
+    output_schema: dict[str, Any] | None = Field(
+        None, description="JSON Schema for structured output from the answer"
+    )
+    citation_style: CitationStyle = Field(
+        default=CitationStyle.inline,
+        description="Citation formatting style: inline, compact, footnote, or none",
+    )
 
 
 class AnswerResponse(BaseModel):
@@ -1060,6 +1088,158 @@ class AnswerResponse(BaseModel):
     citations: list[Citation] = Field(default_factory=list)
     search_type: str = "auto"
     latency_ms: int = 0
+
+
+# ── Citations Resolve ──────────────────────────────────────────
+
+
+class CitationsResolveRequest(BaseModel):
+    """Request to resolve inline citation markers to full URLs.
+
+    Takes markdown text with ``[N]`` markers and a source list, and
+    returns the text with resolved citations according to the requested
+    style.
+    """
+
+    text: str = Field(
+        ...,
+        min_length=1,
+        max_length=500_000,
+        description="Markdown text with [N] citation markers to resolve",
+    )
+    sources: list[Source] = Field(
+        ...,
+        min_length=1,
+        max_length=500,
+        description="Source list where index matches [N] markers (1-based)",
+    )
+    style: CitationStyle = Field(
+        default=CitationStyle.inline,
+        description="Target citation style for the resolved output",
+    )
+
+
+class ResolvedCitation(BaseModel):
+    """A single resolved citation with both marker and full URL."""
+
+    index: int
+    url: str
+    title: str = ""
+    marker_text: str = ""  # The original [N] text in the source
+    resolved_text: str = ""  # The replacement text (e.g., [1](url) for compact)
+
+
+class CitationsResolveResponse(BaseModel):
+    """Response from the citations resolve endpoint."""
+
+    success: bool = True
+    resolved_text: str = Field(
+        default="",
+        description="The input text with all [N] markers resolved per the requested style",
+    )
+    citations: list[ResolvedCitation] = Field(
+        default_factory=list,
+        description="Mapping of each resolved citation marker to its URL and title",
+    )
+    style: CitationStyle = CitationStyle.inline
+    citation_count: int = 0
+
+
+# ── Session Protocol ───────────────────────────────────────────
+
+
+class SessionCreateRequest(BaseModel):
+    """Request to create a new research session."""
+
+    ttl: int | None = Field(
+        default=None,
+        ge=60,
+        le=86400,
+        description="Session TTL in seconds (60-86400). Default: 3600 (1 hour).",
+    )
+
+
+class SessionCreateResponse(BaseModel):
+    """Response from session creation."""
+
+    success: bool = True
+    session_id: str = ""
+    expires_at: str = ""
+    ttl: int = 3600
+
+
+class SessionStepRequest(BaseModel):
+    """Execute an action step within a research session.
+
+    Supported actions:
+        - ``search``: Search via SearXNG.  Params: ``query`` (required),
+          ``limit``, ``sources``, ``categories``.
+        - ``scrape``: Scrape specific URLs.  Params: ``urls`` (required,
+          list of URLs), ``scrape_options`` (optional).
+        - ``query``: Run LLM over accumulated session context.  Params:
+          ``question`` (required), ``model`` (optional).
+    """
+
+    action: str = Field(
+        ...,
+        description="Step action: search, scrape, or query",
+    )
+    params: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Action-specific parameters",
+    )
+
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, value: str) -> str:
+        allowed = {"search", "scrape", "query"}
+        if value not in allowed:
+            raise ValueError(
+                f"Unknown action: {value!r}. Supported: {', '.join(sorted(allowed))}"
+            )
+        return value
+
+
+class SessionStepResponse(BaseModel):
+    """Response from a session step execution."""
+
+    success: bool = True
+    step_index: int = 0
+    action: str = ""
+    summary: str = ""
+    result: dict[str, Any] = Field(default_factory=dict)
+
+
+class SessionExportResponse(BaseModel):
+    """Response from session export."""
+
+    success: bool = True
+    session_id: str = ""
+    artifact: str = ""
+    steps: list[dict[str, Any]] = Field(default_factory=list)
+    refs: dict[str, dict[str, str]] = Field(default_factory=dict)
+    artifact_length: int = 0
+
+
+class SessionStatusResponse(BaseModel):
+    """Response from GET /v2/session/{id} — session status and history."""
+
+    success: bool = True
+    session_id: str = ""
+    status: str = "active"
+    created_at: str = ""
+    expires_at: str = ""
+    step_count: int = 0
+    steps: list[dict[str, Any]] = Field(default_factory=list)
+    artifact_length: int = 0
+
+
+class SessionDeleteResponse(BaseModel):
+    """Response from DELETE /v2/session/{id}."""
+
+    success: bool = True
+    session_id: str = ""
+    deleted: bool = False
 
 
 class ActivityItem(BaseModel):

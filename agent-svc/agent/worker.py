@@ -79,14 +79,22 @@ async def _process_agent_async(
     webhook_config: dict[str, Any] | None = None,
     requested_model: str | None = None,
     include_images: bool = False,
+    citation_style: Any = None,
 ) -> None:
     settings = _get_worker_settings()
     store = JobStore(
         f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
     )
+    from .models import CitationStyle
+
+    cs = (
+        citation_style
+        if isinstance(citation_style, CitationStyle)
+        else CitationStyle.inline
+    )
 
     async def work_fn() -> dict[str, Any]:
-        return await run_research(
+        result = await run_research(
             prompt=prompt,
             urls=urls,
             schema=schema_,
@@ -97,7 +105,26 @@ async def _process_agent_async(
             llm_model=llm_model,
             requested_model=requested_model,
             include_images=include_images,
+            citation_style=cs,
         )
+        # When citation_style is compact, replace full source_details with
+        # a compact citations mapping (index → {url}) to reduce
+        # response payload size.  The answer text already has [N](url)
+        # embedded markers so the full source objects are redundant.
+        if cs == CitationStyle.compact:
+            source_details = result.get("source_details", [])
+            compact_sources: list[dict[str, str | int]] = []
+            for i, src in enumerate(source_details, start=1):
+                compact_sources.append(
+                    {
+                        "index": i,
+                        "url": src.get("url", ""),
+                    }
+                )
+            result["sources_compact"] = compact_sources
+            # Drop the full source_details to save payload size
+            result["source_details"] = []
+        return result
 
     await _run_job_with_observability(job_id, "agent", store, webhook_config, work_fn)
 

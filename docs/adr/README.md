@@ -58,5 +58,8 @@ An Architecture Decision Record captures an important architectural decision mad
 | 0037 | [Split Semantic Service app.py into Focused Modules](0037-split-semantic-svc-app-modules.md) | proposed |
 | 0038 | [Crawl Engine — BFS Orchestrator with Shared Link Extraction](0038-crawl-engine.md) | accepted |
 | 0039 | [API-CLI Surface Must Ship Together](0039-api-cli-surface-ship-together.md) | accepted |
+| 0040 | [Session Protocol — Agent-Native Research Sessions](0040-session-protocol.md) | proposed |
+| 0041 | [Research Memory — Cross-Session Semantic Cache](0041-research-memory.md) | proposed |
+| 0042 | [MCP Server Architecture](0042-mcp-server-architecture.md) | proposed |
 
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full ADR workflow: when to write an ADR, how to number it, and how to get it reviewed in a PR.

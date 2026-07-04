@@ -36,6 +36,9 @@ from .models import (
     BrowserExecuteResponse,
     BrowserListResponse,
     Citation,
+    CitationsResolveRequest,
+    CitationsResolveResponse,
+    CitationStyle,
     CrawlActiveItem,
     CrawlActiveResponse,
     CrawlCreateResponse,
@@ -65,12 +68,20 @@ from .models import (
     ParamsPreviewRequest,
     ParamsPreviewResponse,
     ParseResponse,
+    ResolvedCitation,
     ScrapeData,
     ScrapeRequest,
     ScrapeResponse,
     SearchRequest,
     SearchResponse,
     SearchResult,
+    SessionCreateRequest,
+    SessionCreateResponse,
+    SessionDeleteResponse,
+    SessionExportResponse,
+    SessionStatusResponse,
+    SessionStepRequest,
+    SessionStepResponse,
     Source,
 )
 from .monitor import (
@@ -215,7 +226,7 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
             async for event in run_research_stream(
                 prompt=body.prompt,
                 urls=body.urls,
-                schema=body.schema_,
+                schema=body.schema_ or body.output_schema,
                 searxng_url=request.app.state.searxng_url,
                 scraper_url=request.app.state.scraper_url,
                 llm_base_url=request.app.state.llm_base_url,
@@ -224,6 +235,7 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
                 requested_model=body.model if body.model != "default" else None,
                 max_searches_per_request=max_searches,
                 include_images=body.include_images,
+                citation_style=body.citation_style,
             ):
                 import json
 
@@ -271,7 +283,7 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
             job_id=job_id,
             prompt=body.prompt,
             urls=body.urls,
-            schema_=body.schema_,
+            schema_=body.schema_ or body.output_schema,
             llm_base_url=request.app.state.llm_base_url,
             llm_api_key=request.app.state.llm_api_key,
             llm_model=request.app.state.llm_model,
@@ -280,6 +292,7 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
             webhook_config=body.webhook,
             requested_model=body.model,
             include_images=body.include_images,
+            citation_style=body.citation_style,
         )
     )
 
@@ -1062,7 +1075,11 @@ async def search(request: Request, body: SearchRequest) -> SearchResponse:
                 llm_model=request.app.state.llm_model,
             )
             search_results = deep_result["results"]
-            deep_data: dict[str, list] = {"web": search_results, "images": [], "news": []}
+            deep_data: dict[str, list] = {
+                "web": search_results,
+                "images": [],
+                "news": [],
+            }
             return SearchResponse(
                 data=deep_data, query_variations=deep_result.get("query_variations", [])
             )
@@ -1377,6 +1394,8 @@ async def answer(request: Request, body: AnswerRequest, response: Response) -> A
                 llm_model=request.app.state.llm_model,
                 requested_model=body.model if body.model != "default" else None,
                 max_searches_per_request=max_searches,
+                output_schema=body.output_schema,
+                citation_style=body.citation_style,
             ):
                 if event["type"] == "sources_pending":
                     import json
@@ -1424,6 +1443,8 @@ async def answer(request: Request, body: AnswerRequest, response: Response) -> A
         llm_model=request.app.state.llm_model,
         requested_model=body.model if body.model != "default" else None,
         max_searches_per_request=max_searches,
+        output_schema=body.output_schema,
+        citation_style=body.citation_style,
     )
     response.headers["X-Search-Budget"] = f"{max_searches}/{max_searches}"
     response.headers["X-Search-Rate-Remaining"] = (
@@ -1437,6 +1458,184 @@ async def answer(request: Request, body: AnswerRequest, response: Response) -> A
         search_type=result["search_type"],
         latency_ms=result["latency_ms"],
     )
+
+
+@router.post("/v2/citations/resolve", response_model=CitationsResolveResponse)
+async def resolve_citations(request: Request, body: CitationsResolveRequest):
+    """Resolve inline citation markers to full citations.
+
+    Takes markdown text with ``[N]`` markers and a source list.  Returns
+    the text with citations resolved according to the requested style.
+
+    Citation styles:
+        - ``inline``: Keep ``[N]`` markers as-is (returns original text).
+        - ``compact``: Replace ``[N]`` with ``[N](url)`` self-contained links.
+    """
+    import re
+
+    resolved: list[ResolvedCitation] = []
+    seen_indices: set[int] = set()
+    text = body.text
+    style = body.style
+
+    # Build lookup: index (1-based) → source
+    src_map: dict[int, Source] = {}
+    for i, src in enumerate(body.sources, start=1):
+        src_map[i] = src
+
+    if style == CitationStyle.compact:
+        # Replace [N] with [N](url) — self-contained link
+        def _compact_replacer(match: re.Match) -> str:
+            idx = int(match.group(1))
+            if idx in src_map and idx not in seen_indices:
+                seen_indices.add(idx)
+                src = src_map[idx]
+                resolved.append(
+                    ResolvedCitation(
+                        index=idx,
+                        url=src.url,
+                        title=src.title,
+                        marker_text=match.group(0),
+                        resolved_text=f"[{idx}]({src.url})",
+                    )
+                )
+                return f"[{idx}]({src.url})"
+            return match.group(0)
+
+        text = re.sub(r"\[(\d+)\]", _compact_replacer, text)
+    else:  # inline — return as-is but build citation list
+        for match in re.finditer(r"\[(\d+)\]", text):
+            idx = int(match.group(1))
+            if idx in src_map and idx not in seen_indices:
+                seen_indices.add(idx)
+                src = src_map[idx]
+                resolved.append(
+                    ResolvedCitation(
+                        index=idx,
+                        url=src.url,
+                        title=src.title,
+                        marker_text=match.group(0),
+                        resolved_text=match.group(0),
+                    )
+                )
+
+    return CitationsResolveResponse(
+        resolved_text=text,
+        citations=resolved,
+        style=style,
+        citation_count=len(resolved),
+    )
+
+
+# ── Session Protocol ──────────────────────────────────────────
+
+
+def _get_redis_url(request: Request) -> str:
+    """Build a Redis/Valkey URL from the app settings."""
+    from .settings import load_settings
+
+    settings = load_settings()
+    return f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+
+
+@router.post("/v2/session/create", response_model=SessionCreateResponse)
+async def create_session(request: Request, body: SessionCreateRequest) -> Any:
+    """Create a new research session.
+
+    Sessions accumulate search results, scraped content, and LLM answers
+    server-side so agents can steer multi-step research without carrying
+    full page content in their context window.
+    """
+    from .session import SessionManager
+
+    mgr = SessionManager(redis_url=_get_redis_url(request))
+    session_id = await mgr.create_session(ttl=body.ttl)
+    session = await mgr.get_session(session_id)
+    if session is None:
+        raise NotFoundError(detail="Failed to create session")
+    return SessionCreateResponse(
+        session_id=session["id"],
+        expires_at=session["expires_at"],
+        ttl=session.get("ttl", 3600),
+    )
+
+
+@router.post("/v2/session/{session_id}/step", response_model=SessionStepResponse)
+async def session_step(
+    request: Request, session_id: str, body: SessionStepRequest
+) -> Any:
+    """Execute an action step within a research session.
+
+    Supported actions:
+        - ``search``: SearXNG search, stores results as refs. Params: query, limit.
+        - ``scrape``: Scrape URLs, stores content as refs. Params: urls[].
+        - ``query``: LLM over accumulated context. Params: question.
+    """
+    from .session import SessionManager
+
+    mgr = SessionManager(redis_url=_get_redis_url(request))
+    try:
+        result = await mgr.step(
+            session_id=session_id,
+            action=body.action,
+            params=body.params,
+            searxng_url=request.app.state.searxng_url,
+            scraper_url=request.app.state.scraper_url,
+            llm_base_url=request.app.state.llm_base_url,
+            llm_api_key=request.app.state.llm_api_key,
+            llm_model=request.app.state.llm_model,
+        )
+        return SessionStepResponse(
+            step_index=result["step_index"],
+            action=result["action"],
+            summary=result["summary"],
+            result=result,
+        )
+    except ValueError as e:
+        raise NotFoundError(detail=str(e))
+
+
+@router.get("/v2/session/{session_id}", response_model=SessionStatusResponse)
+async def get_session(request: Request, session_id: str) -> Any:
+    """Get session status, step history, and artifact length."""
+    from .session import SessionManager
+
+    mgr = SessionManager(redis_url=_get_redis_url(request))
+    session = await mgr.get_session(session_id)
+    if session is None:
+        raise NotFoundError(detail=f"Session not found: {session_id}")
+    return SessionStatusResponse(
+        session_id=session["id"],
+        status=session.get("status", "active"),
+        created_at=session.get("created_at", ""),
+        expires_at=session.get("expires_at", ""),
+        step_count=session.get("step_count", 0),
+        steps=session.get("steps", []),
+        artifact_length=session.get("artifact_length", 0),
+    )
+
+
+@router.post("/v2/session/{session_id}/export", response_model=SessionExportResponse)
+async def export_session(request: Request, session_id: str) -> Any:
+    """Export the accumulated session artifact as markdown."""
+    from .session import SessionManager
+
+    mgr = SessionManager(redis_url=_get_redis_url(request))
+    try:
+        export = await mgr.export_session(session_id)
+        return SessionExportResponse(**export)
+    except ValueError as e:
+        raise NotFoundError(detail=str(e))
+
+
+@router.delete("/v2/session/{session_id}", response_model=SessionDeleteResponse)
+async def delete_session(request: Request, session_id: str) -> Any:
+    """Delete a session and all associated data."""
+    from .session import SessionManager
+
+    mgr = SessionManager(redis_url=_get_redis_url(request))
+    deleted = await mgr.delete_session(session_id)
+    return SessionDeleteResponse(session_id=session_id, deleted=deleted)
 
 
 @router.post("/v2/enrich", response_model=EnrichResponse)
