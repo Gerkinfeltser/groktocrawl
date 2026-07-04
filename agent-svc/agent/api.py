@@ -77,6 +77,8 @@ from .models import (
     ParamsPreviewRequest,
     ParamsPreviewResponse,
     ParseResponse,
+    PlanModification,
+    PlanModifications,
     PlanRequest,
     PlanResponse,
     ResearchMemoryQueryRequest,
@@ -228,7 +230,7 @@ async def scrape(request: Request, body: ScrapeRequest) -> ScrapeResponse:
     raise ScrapeError(detail=result.get("error", "Scrape failed"))
 
 
-@router.post("/v2/agent", response_model=AgentCreateResponse)
+@router.post("/v2/agent")
 async def create_agent(request: Request, body: AgentRequest, response: Response) -> Any:
     # ── Per-client rate limit check ────────────────────────────
     client_ip = _get_client_ip(request)
@@ -253,6 +255,13 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
     METRICS.counter("search_calls_total", "Total search calls", ["status"]).inc(
         {"status": "allowed"}
     )
+
+    # ── Mode: plan — generate a research plan (streaming via _handle_plan_mode) ──
+    if body.mode == "plan":
+        response.headers["X-Search-Rate-Remaining"] = (
+            f"{rate_remaining}/{rate_limiter.limit}"
+        )
+        return await _handle_plan_mode(request, body, response)
 
     # ── Research Memory: check cache before LLM health check ──
     # If cache hit and streaming, we can return immediately without LLM.
@@ -518,11 +527,106 @@ async def cancel_agent(request: Request, job_id: str) -> AgentCancelResponse:
     return AgentCancelResponse(success=True)
 
 
+# ── Plan mode helper (shared by /v2/agent {mode:plan} and /v2/agent/plan) ──
+
+
+async def _handle_plan_mode(request: Request, body: Any, response: Response) -> Any:
+    """Generate a structured research plan from an AgentRequest or PlanRequest.
+
+    Called from ``create_agent`` when ``mode: "plan"`` and from
+    ``/v2/agent/plan``.  Supports dual-path: streaming SSE or synchronous
+    response.
+    """
+    from fastapi.responses import StreamingResponse
+
+    from .llm import LLMClient
+    from .planner import PlanStore, ResearchPlanner
+    from .settings import load_settings
+
+    settings = load_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+
+    effective_model = (
+        body.model
+        if body.model and body.model != "default"
+        else request.app.state.llm_model
+    )
+    prompt = body.prompt
+    urls = getattr(body, "urls", None)
+    stream = getattr(body, "stream", False)
+
+    llm = LLMClient(
+        base_url=request.app.state.llm_base_url,
+        api_key=request.app.state.llm_api_key,
+        model=effective_model,
+    )
+    planner = ResearchPlanner()
+
+    # ── Streaming path ───────────────────────────────────────
+    if stream:
+        # Pre-flight LLM health check
+        if not await llm.check_health():
+            await llm.close()
+            from fastapi import HTTPException
+
+            raise HTTPException(
+                status_code=503,
+                detail="LLM backend is not available. Cannot generate plan.",
+            )
+
+        async def event_stream() -> Any:
+            import json
+
+            try:
+                async for event_type, data in planner.plan_stream(
+                    prompt=prompt,
+                    llm_client=llm,
+                    urls=urls,
+                ):
+                    if event_type == "token":
+                        yield f"data: {json.dumps({'type': 'token', 'content': data})}\n\n"
+                    elif event_type == "plan":
+                        store = PlanStore(redis_url=redis_url)
+                        plan_id = store.create(prompt=prompt, plan=data)
+                        yield f"data: {json.dumps({'type': 'plan', 'plan_id': plan_id, 'plan': data})}\n\n"
+                        yield f"data: {json.dumps({'type': 'done', 'plan_id': plan_id, 'plan': data})}\n\n"
+                    elif event_type == "error":
+                        yield f"data: {json.dumps({'type': 'error', 'content': data})}\n\n"
+            except Exception as e:
+                logger.error("Plan stream failed: %s", e)
+                yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+            finally:
+                await llm.close()
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    # ── Sync path ────────────────────────────────────────────
+    try:
+        plan = await planner.plan(prompt=prompt, llm_client=llm, urls=urls)
+    finally:
+        await llm.close()
+
+    store = PlanStore(redis_url=redis_url)
+    plan_id = store.create(prompt=prompt, plan=plan)
+    doc = store.get(plan_id) or {}
+    return PlanResponse(
+        plan_id=plan_id,
+        plan=plan,
+        created_at=doc.get("created_at", ""),
+        expires_at=doc.get("expires_at", ""),
+    )
+
+
 # ── Plan-Consent (Phase 3) ─────────────────────────────────────
 
 
 @router.post("/v2/agent/plan", response_model=PlanResponse)
-async def create_plan(request: Request, body: PlanRequest) -> PlanResponse:
+async def create_plan(
+    request: Request, body: PlanRequest, response: Response
+) -> PlanResponse:
     """Generate a structured research plan for a given prompt.
 
     Calls the LLM to decompose the prompt into ordered phases (search,
@@ -534,32 +638,28 @@ async def create_plan(request: Request, body: PlanRequest) -> PlanResponse:
     ``POST /v2/agent/execute``.
 
     Args:
-        body: Contains ``prompt`` and an optional ``model`` override.
+        body: Contains ``prompt``, optional ``model`` override, optional
+            ``urls`` (seed URLs), and optional ``stream`` (SSE mode).
 
     Returns:
-        ``PlanResponse`` with ``plan_id`` and the full ``plan`` dict
-        (``phases``, ``estimated_sources``, ``dimensions``).
+        ``PlanResponse`` with ``plan_id``, full ``plan`` dict
+        (``phases``, ``estimated_sources``, ``comparison_dimensions``),
+        ``created_at``, and ``expires_at``.
     """
-    from .llm import LLMClient
-    from .planner import PlanStore, ResearchPlanner
+    return await _handle_plan_mode(request, body, response)
 
-    effective_model = (
-        body.model
-        if body.model and body.model != "default"
-        else request.app.state.llm_model
-    )
-    llm = LLMClient(
-        base_url=request.app.state.llm_base_url,
-        api_key=request.app.state.llm_api_key,
-        model=effective_model,
-    )
-    try:
-        planner = ResearchPlanner()
-        plan = await planner.plan(body.prompt, llm)
-    finally:
-        await llm.close()
 
-    # Build redis URL from settings (same pattern as session routes)
+@router.get("/v2/agent/plan/{plan_id}")
+async def get_plan(request: Request, plan_id: str) -> dict[str, Any]:
+    """Retrieve a previously-generated research plan by ID.
+
+    Returns the full plan document including ``plan_id``, ``prompt``,
+    ``plan`` (phases, estimated_sources, comparison_dimensions),
+    ``created_at``, and ``expires_at``.
+
+    Returns 404 if the plan was not found, expired, or already consumed.
+    """
+    from .planner import PlanStore
     from .settings import load_settings
 
     settings = load_settings()
@@ -568,32 +668,38 @@ async def create_plan(request: Request, body: PlanRequest) -> PlanResponse:
     )
 
     store = PlanStore(redis_url=redis_url)
-    plan_id = store.create(prompt=body.prompt, plan=plan)
-
-    return PlanResponse(plan_id=plan_id, plan=plan)
+    doc = store.get(plan_id)
+    if doc is None:
+        raise NotFoundError(
+            detail="Plan not found or expired",
+            details={"plan_id": plan_id},
+        )
+    return {"success": True, **doc}
 
 
 @router.post("/v2/agent/execute")
-async def execute_plan(request: Request, body: ExecutePlanRequest) -> Any:
+async def execute_plan(
+    request: Request, body: ExecutePlanRequest, response: Response
+) -> Any:
     """Execute a previously-generated research plan with optional modifications.
 
     Loads the plan from Valkey, applies any modifications (narrow scope,
-    add/remove dimensions), and streams research results as Server-Sent
-    Events.
+    add/remove dimensions), and either streams results as SSE or creates
+    a job for async polling.
 
-    SSE events include:
-        - ``phase``: a new phase is starting (``phase_index``, ``action``)
-        - ``search``: search results found (``query``, ``results``)
-        - ``scrape``: a URL was scraped (``url``, ``chars``)
-        - ``token``: LLM synthesis token
-        - ``done``: final result with ``result``, ``sources``, ``latency_ms``
-        - ``error``: error message
+    Plans are ONE-SHOT: consumed (deleted) on first successful execution
+    attempt.  Re-executing the same plan_id returns 404.
+
+    Supports two modification formats:
+        - List form: ``[{type: "narrow", params: {focus: "..."}}, ...]``
+        - Dict form (legacy): ``{narrow: "...", add_dimension: [...], ...}``
 
     Args:
         body: Contains ``plan_id`` and optional ``modifications``.
 
     Returns:
-        A ``StreamingResponse`` with ``text/event-stream`` content type.
+        - When streaming: ``StreamingResponse`` (text/event-stream)
+        - Sync path: ``AgentCreateResponse`` with job ID for polling
     """
     from .planner import PlanStore
     from .settings import load_settings
@@ -604,20 +710,54 @@ async def execute_plan(request: Request, body: ExecutePlanRequest) -> Any:
     )
 
     plan_store = PlanStore(redis_url=redis_url)
-    doc = plan_store.get(body.plan_id)
+    doc = plan_store.consume(body.plan_id)
     if doc is None:
         raise NotFoundError(
-            detail="Plan not found or expired",
+            detail="Plan not found, expired, or already executed",
             details={"plan_id": body.plan_id},
         )
 
     plan = doc["plan"]
     prompt = doc["prompt"]
 
-    # Apply modifications in-memory (do NOT mutate the stored plan)
-    if body.modifications:
-        plan = _apply_plan_modifications(plan, body.modifications, prompt)
+    # Normalize modifications into a unified dict form (backward compatible)
+    mods: dict[str, Any] | None = _normalize_modifications(body.modifications)
 
+    # Apply modifications in-memory (do NOT mutate the stored plan)
+    if mods:
+        plan = _apply_plan_modifications(plan, mods, prompt)
+
+    # ── Sync path: create job, process in background ──────────
+    if not getattr(body, "stream", False):
+        store: JobStore = request.app.state.job_store
+        job_id = store.create_job(
+            kind="plan_execute",
+            payload={
+                "plan_id": body.plan_id,
+                "prompt": prompt,
+                "plan": plan,
+                "modifications": mods,
+            },
+        )
+        from .worker import _process_plan_execution_async
+
+        request.app.state.task_tracker.create_background_task(
+            _process_plan_execution_async(
+                job_id=job_id,
+                prompt=prompt,
+                plan=plan,
+                modifications=mods,
+                llm_base_url=request.app.state.llm_base_url,
+                llm_api_key=request.app.state.llm_api_key,
+                llm_model=request.app.state.llm_model,
+                searxng_url=request.app.state.searxng_url,
+                scraper_url=request.app.state.scraper_url,
+                webhook_config=None,
+            )
+        )
+        return AgentCreateResponse(id=job_id)
+
+    # ── Streaming path: run inline, return SSE ────────────────
     from fastapi.responses import StreamingResponse
 
     async def event_stream() -> Any:
@@ -656,8 +796,8 @@ async def execute_plan(request: Request, body: ExecutePlanRequest) -> Any:
                 if action == "search":
                     # Build query: combine prompt + phase description + narrow hint
                     query = description or prompt
-                    if body.modifications and body.modifications.narrow:
-                        query = f"{body.modifications.narrow} {query}"
+                    if mods and mods.get("narrow"):
+                        query = f"{mods.get('narrow')} {query}"
 
                     try:
                         results, _health = await searxng.search(query, limit=10)
@@ -688,20 +828,17 @@ async def execute_plan(request: Request, body: ExecutePlanRequest) -> Any:
                             min_sources=1,
                             max_attempts=min(5, len(new_urls)),
                         )
-                        for doc, detail in zip(
+                        for doc, _detail in zip(
                             scraped_docs, scraped_details, strict=False
                         ):
                             accumulated_context_parts.append(doc)
-                            yield f"data: {json.dumps({'type': 'scrape', 'url': detail.get('url', ''), 'chars': len(doc)})}\n\n"
+                            yield f"data: {json.dumps({'type': 'scrape', 'url': _detail.get('url', ''), 'chars': len(doc)})}\n\n"
 
                 elif action == "scrape":
                     # Phase description may contain URLs or URL hints
-                    # For now, we rely on previously discovered URLs from search phases
-                    # If the plan has explicit URLs, they'd be in the description
-                    pass  # scrape phases consume URLs discovered in prior search phases
+                    pass
 
                 elif action == "synthesize":
-                    # Build context from accumulated documents
                     context = (
                         "\n\n---\n\n".join(accumulated_context_parts)
                         if accumulated_context_parts
@@ -712,17 +849,19 @@ async def execute_plan(request: Request, body: ExecutePlanRequest) -> Any:
                     )
 
                     # Include dimensions in the synthesis prompt
-                    dimensions = plan.get("dimensions", [])
-                    if body.modifications:
-                        if body.modifications.add_dimension:
-                            dimensions = (
-                                list(dimensions) + body.modifications.add_dimension
-                            )
-                        if body.modifications.remove_dimension:
+                    dimensions = list(
+                        plan.get("comparison_dimensions", plan.get("dimensions", []))
+                    )
+                    if mods:
+                        if mods.get("add_dimension"):
+                            for d in mods.get("add_dimension", []):
+                                if d not in dimensions:
+                                    dimensions.append(d)
+                        if mods.get("remove_dimension"):
                             dimensions = [
                                 d
                                 for d in dimensions
-                                if d not in (body.modifications.remove_dimension or [])
+                                if d not in (mods.get("remove_dimension") or [])
                             ]
 
                     if dimensions:
@@ -739,7 +878,6 @@ async def execute_plan(request: Request, body: ExecutePlanRequest) -> Any:
                         f"Cite sources by their URL. Be thorough and precise."
                     )
 
-                    # Stream LLM tokens
                     full_synthesis = ""
                     async for chunk in llm.generate_stream(
                         system_prompt=(
@@ -777,19 +915,87 @@ async def execute_plan(request: Request, body: ExecutePlanRequest) -> Any:
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+def _normalize_modifications(raw: Any) -> dict[str, Any] | None:
+    """Normalize modifications from list or dict form into a unified dict.
+
+    - List form: ``[{type: "narrow", params: {focus: "..."}}, ...]`` →
+      ``{narrow: "...", add_dimension: [...]}``
+    - Dict form / PlanModifications: passthrough
+    - None / empty: returns None
+
+    Args:
+        raw: Raw modifications from the request body (after model validation).
+
+    Returns:
+        A unified dict with optional ``narrow`` (str), ``add_dimension``
+        (list[str]), and ``remove_dimension`` (list[str]) keys, or ``None``.
+    """
+    if raw is None:
+        return None
+
+    # Already normalized dict form (PlanModifications)
+    if isinstance(raw, PlanModifications):
+        result: dict[str, Any] = {}
+        if raw.narrow:
+            result["narrow"] = raw.narrow
+        if raw.add_dimension:
+            result["add_dimension"] = raw.add_dimension
+        if raw.remove_dimension:
+            result["remove_dimension"] = raw.remove_dimension
+        return result or None
+
+    if isinstance(raw, dict) and "type" not in raw:
+        # Legacy dict form
+        return raw or None
+
+    # List form: convert each PlanModification into unified dict
+    items = raw if isinstance(raw, list) else [raw]
+    if isinstance(items, (PlanModifications, dict)):
+        return _normalize_modifications(items)
+
+    result = {}
+    for mod in items:
+        if isinstance(mod, PlanModification):
+            mod_type = mod.type
+            mod_params = mod.params
+        elif isinstance(mod, dict):
+            mod_type = mod.get("type", "")
+            mod_params = mod.get("params", {})
+        else:
+            continue
+
+        if mod_type == "narrow":
+            result["narrow"] = mod_params.get("focus", mod_params.get("narrow", ""))
+        elif mod_type == "add_dimension":
+            dim = mod_params.get("dimension", mod_params.get("name", ""))
+            if dim:
+                result.setdefault("add_dimension", []).append(dim)
+        elif mod_type == "modify_query":
+            # Store modify_query params for future use
+            result.setdefault("modify_queries", []).append(mod_params)
+        elif mod_type == "remove_dimension":
+            dim = mod_params.get("dimension", mod_params.get("name", ""))
+            if dim:
+                result.setdefault("remove_dimension", []).append(dim)
+
+    return result or None
+
+
 def _apply_plan_modifications(
     plan: dict,
-    modifications: Any,
+    modifications: dict[str, Any],
     prompt: str,
 ) -> dict:
     """Apply user modifications to a plan in-memory.
 
-    Returns a shallow copy of the plan with modifications applied.
+    Returns a deep copy of the plan with modifications applied.
     Does NOT mutate the original dict or persist changes to Valkey.
 
     Args:
         plan: The original plan dict with ``phases``, ``dimensions``, etc.
-        modifications: A ``PlanModifications`` instance or dict.
+        modifications: A unified dict with optional ``narrow`` (str),
+            ``add_dimension`` (list[str]), ``remove_dimension`` (list[str]),
+            and ``modify_queries`` (list[dict]).
         prompt: The original research prompt (used when narrowing).
 
     Returns:
@@ -800,13 +1006,7 @@ def _apply_plan_modifications(
     plan = copy.deepcopy(plan)
 
     # Narrow — inject focus into the first search phase
-    if hasattr(modifications, "narrow"):
-        narrow = modifications.narrow
-    elif isinstance(modifications, dict):
-        narrow = modifications.get("narrow")
-    else:
-        narrow = None
-
+    narrow = modifications.get("narrow")
     if narrow:
         phases = plan.get("phases", [])
         for phase in phases:
@@ -825,32 +1025,31 @@ def _apply_plan_modifications(
                 },
             )
 
-    # Add dimensions
-    if hasattr(modifications, "add_dimension"):
-        add_dims = modifications.add_dimension
-    elif isinstance(modifications, dict):
-        add_dims = modifications.get("add_dimension")
-    else:
-        add_dims = None
+    # Apply modify_query changes
+    modify_queries = modifications.get("modify_queries", [])
+    for mq in modify_queries:
+        phase_index = mq.get("phase_index")
+        new_query = mq.get("new_query")
+        if phase_index is not None and new_query:
+            phases = plan.get("phases", [])
+            if 0 <= phase_index < len(phases):
+                phases[phase_index]["description"] = new_query
 
+    # Add dimensions (supports both "dimensions" and "comparison_dimensions" keys)
+    dims_key: str = (
+        "comparison_dimensions" if "comparison_dimensions" in plan else "dimensions"
+    )
+    add_dims = modifications.get("add_dimension")
     if add_dims:
-        existing = plan.setdefault("dimensions", [])
+        existing = plan.setdefault(dims_key, [])
         for d in add_dims:
             if d not in existing:
                 existing.append(d)
 
     # Remove dimensions
-    if hasattr(modifications, "remove_dimension"):
-        remove_dims = modifications.remove_dimension
-    elif isinstance(modifications, dict):
-        remove_dims = modifications.get("remove_dimension")
-    else:
-        remove_dims = None
-
+    remove_dims = modifications.get("remove_dimension")
     if remove_dims:
-        plan["dimensions"] = [
-            d for d in plan.get("dimensions", []) if d not in remove_dims
-        ]
+        plan[dims_key] = [d for d in plan.get(dims_key, []) if d not in remove_dims]
 
     return plan
 

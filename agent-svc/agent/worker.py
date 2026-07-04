@@ -736,3 +736,181 @@ async def _index_batch_async(pages: list[dict]) -> None:
         logger.debug(
             "Failed to batch-index %d pages (vector index unavailable)", len(pages)
         )
+
+
+async def _process_plan_execution_async(
+    job_id: str,
+    prompt: str,
+    plan: dict[str, Any],
+    modifications: dict[str, Any] | None,
+    llm_base_url: str,
+    llm_api_key: str,
+    llm_model: str,
+    searxng_url: str,
+    scraper_url: str,
+    webhook_config: dict[str, Any] | None = None,
+) -> None:
+    """Process a plan execution job asynchronously (sync/polling path).
+
+    Follows the plan phases: search → scrape → synthesize in sequence,
+    guided by the plan structure and optional modifications.
+
+    Args:
+        job_id: The job UUID for status polling.
+        prompt: The original user research prompt.
+        plan: The plan dict with ``phases``, ``estimated_sources``, ``dimensions``.
+        modifications: Optional unified modifications dict.
+        llm_base_url: LLM API base URL.
+        llm_api_key: LLM API key.
+        llm_model: LLM model name.
+        searxng_url: SearXNG base URL.
+        scraper_url: Scraper service base URL.
+        webhook_config: Optional webhook configuration.
+    """
+    settings = _get_worker_settings()
+    redis_url = (
+        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    )
+    store = JobStore(redis_url)
+
+    async def work_fn() -> dict[str, Any]:
+        from .llm import LLMClient
+        from .research import _scrape_urls
+        from .scraper_client import ScraperClient
+        from .searxng_client import SearXNGClient
+
+        llm = LLMClient(
+            base_url=llm_base_url,
+            api_key=llm_api_key,
+            model=llm_model,
+        )
+        searxng = SearXNGClient(searxng_url)
+        scraper = ScraperClient(scraper_url)
+
+        all_sources: list[dict] = []
+        accumulated_context_parts: list[str] = []
+        seen_urls: set[str] = set()
+        full_synthesis = ""
+
+        try:
+            phases = plan.get("phases", [])
+            for phase_idx, phase in enumerate(phases):
+                # Check for cancellation between phases
+                job_meta = store.get_job(job_id)
+                if job_meta and job_meta.get("status") == "cancelled":
+                    logger.info(
+                        "Plan execution %s cancelled at phase %d/%d",
+                        job_id,
+                        phase_idx + 1,
+                        len(phases),
+                    )
+                    break
+
+                action = phase.get("action", "search")
+                description = phase.get("description", "")
+
+                if action == "search":
+                    query = description or prompt
+                    if modifications and modifications.get("narrow"):
+                        query = f"{modifications.get('narrow')} {query}"
+
+                    try:
+                        results, _health = await searxng.search(query, limit=10)
+                    except Exception:
+                        results = []
+
+                    new_urls = []
+                    for r in results:
+                        url = r.get("url", "")
+                        if url and url not in seen_urls:
+                            seen_urls.add(url)
+                            new_urls.append(url)
+                            all_sources.append(
+                                {
+                                    "url": url,
+                                    "title": r.get("title", ""),
+                                    "relevance": r.get("description", ""),
+                                }
+                            )
+
+                    if new_urls:
+                        scraped_docs, scraped_details = await _scrape_urls(
+                            new_urls[:5],
+                            scraper,
+                            min_sources=1,
+                            max_attempts=min(5, len(new_urls)),
+                        )
+                        for doc, _detail in zip(
+                            scraped_docs, scraped_details, strict=False
+                        ):
+                            accumulated_context_parts.append(doc)
+
+                elif action == "synthesize":
+                    context = (
+                        "\n\n---\n\n".join(accumulated_context_parts)
+                        if accumulated_context_parts
+                        else ""
+                    )
+                    synthesis_prompt = (
+                        description or f"Synthesise findings for: {prompt}"
+                    )
+
+                    dimensions = list(
+                        plan.get("comparison_dimensions", plan.get("dimensions", []))
+                    )
+                    if modifications:
+                        if modifications.get("add_dimension"):
+                            for d in modifications.get("add_dimension", []):
+                                if d not in dimensions:
+                                    dimensions.append(d)
+                        if modifications.get("remove_dimension"):
+                            dimensions = [
+                                d
+                                for d in dimensions
+                                if d
+                                not in (modifications.get("remove_dimension") or [])
+                            ]
+
+                    if dimensions:
+                        dims_str = ", ".join(dimensions)
+                        synthesis_prompt = (
+                            f"{synthesis_prompt}\n\n"
+                            f"CRITICAL: Address each of these analysis dimensions: {dims_str}. "
+                            f"For each dimension, provide specific evidence from the sources below."
+                        )
+
+                    synthesis_prompt = (
+                        f"{synthesis_prompt}\n\n"
+                        f"Base your answer ONLY on the source content provided below. "
+                        f"Cite sources by their URL. Be thorough and precise."
+                    )
+
+                    full_synthesis = await llm.generate(
+                        system_prompt=(
+                            "You are GroktoCrawl, a research synthesis agent. "
+                            "Synthesise information from the provided sources into a "
+                            "comprehensive, well-structured answer. Be thorough, precise, "
+                            "and cite specific sources."
+                        ),
+                        user_prompt=synthesis_prompt,
+                        context=context or None,
+                    )
+                    if full_synthesis:
+                        accumulated_context_parts.append(full_synthesis)
+
+            return {
+                "result": full_synthesis,
+                "sources": [s.get("url", "") for s in all_sources],
+                "source_details": all_sources,
+                "phases_completed": len(phases),
+                "total_sources": len(all_sources),
+            }
+
+        finally:
+            await llm.close()
+            await searxng.close()
+            await scraper.close()
+
+    await _run_job_with_observability(
+        job_id, "plan_execute", store, webhook_config, work_fn
+    )
