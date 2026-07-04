@@ -273,15 +273,22 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
                 elif event["type"] == "done":
                     import json as _json
 
+                    # Apply citation_style to transform result text markers
+                    source_details = event.get("source_details", [])
+                    cs = body.citation_style
+                    from .research import _apply_citation_style
+
+                    transformed_result, _ = _apply_citation_style(
+                        event["result"], source_details, cs
+                    )
+
                     done_payload: dict = {
                         "type": "done",
-                        "result": event["result"],
+                        "result": transformed_result,
                         "sources": event["sources"],
                         "latency_ms": event["latency_ms"],
                     }
                     # Apply citation_style transformation (VAL-CC-008, VAL-CC-009)
-                    source_details = event.get("source_details", [])
-                    cs = body.citation_style
                     done_payload["citation_style"] = cs.value
                     if cs == CitationStyle.compact:
                         compact_sources = []
@@ -2406,11 +2413,10 @@ async def run_monitor_check(request: Request, monitor_id: str) -> MonitorRespons
     Runs the check regardless of the cron schedule and returns
     the updated monitor status including any diff or new results.
     """
-    store: JobStore = request.app.state.job_store
     scraper_url = request.app.state.scraper_url
 
     try:
-        result = await run_monitor(monitor_id, scraper_url=scraper_url)
+        await run_monitor(monitor_id, scraper_url=scraper_url)
     except ValueError:
         raise NotFoundError(
             detail="Monitor not found", details={"monitor_id": monitor_id}

@@ -162,12 +162,18 @@ async def _process_agent_async(
             include_images=include_images,
             citation_style=cs,
         )
+        # Apply citation style to transform bare [N] markers to [N](url)
+        # for compact style, or leave them unchanged for inline style.
+        source_details = result.get("source_details", [])
+        from .research import _apply_citation_style
+
+        result_text, _ = _apply_citation_style(result["result"], source_details, cs)
+        result["result"] = result_text
+
         # When citation_style is compact, replace full source_details with
         # a compact citations mapping (index → {url}) to reduce
-        # response payload size.  The answer text already has [N](url)
-        # embedded markers so the full source objects are redundant.
+        # response payload size.
         if cs == CitationStyle.compact:
-            source_details = result.get("source_details", [])
             compact_sources: list[dict[str, str | int]] = []
             for i, src in enumerate(source_details, start=1):
                 compact_sources.append(
