@@ -467,6 +467,10 @@ class AgentRequest(BaseModel):
         None, description="JSON Schema for structured output (alias for schema)"
     )
     model: str = Field(default="default", description="Model hint")
+    mode: str | None = Field(
+        default=None,
+        description="Agent mode: None (default agent pipeline), 'plan' (plan-only, no execution)",
+    )
     max_credits: int | None = None
     webhook: dict[str, Any] | None = None
     strict_constrain_to_urls: bool = False
@@ -1553,10 +1557,13 @@ class PlanRequest(BaseModel):
         prompt: The user's natural-language research question.
         model: Optional per-request LLM override.  When ``"default"``
             or omitted, the environment-configured model is used.
+        urls: Optional seed URLs to scope the research plan around.
+        stream: When True, stream plan generation via SSE events.
     """
 
     prompt: str = Field(
         ...,
+        min_length=1,
         max_length=100000,
         description="Natural-language research question to plan for",
     )
@@ -1564,25 +1571,91 @@ class PlanRequest(BaseModel):
         default=None,
         description="Optional per-request LLM model override",
     )
+    urls: list[str] | None = Field(
+        default=None,
+        description="Optional seed URLs to scope the research plan around",
+    )
+    stream: bool = Field(
+        default=False,
+        description="When True, stream plan generation via SSE events",
+    )
 
 
 class PlanResponse(BaseModel):
-    """Response from POST /v2/agent/plan.
+    """Response from POST /v2/agent/plan or POST /v2/agent {mode: plan}.
 
-    Returns the generated plan ID and the full plan object so the
+    Returns the generated plan ID, full plan object, and metadata so the
     client can display it for review and modification before executing.
     """
 
     success: bool = True
     plan_id: str = ""
     plan: dict = Field(default_factory=dict)
+    created_at: str = ""
+    expires_at: str = ""
+
+
+class PlanModification(BaseModel):
+    """A single modification to apply to a plan before execution.
+
+    Supported types:
+        - ``narrow``: Reduce scope (fewer sources, narrower focus).
+          Params: ``focus`` (str, required).
+        - ``add_dimension``: Add a comparison dimension.
+          Params: ``dimension`` (str, required).
+        - ``modify_query``: Change a search query in the plan.
+          Params: ``phase_index`` (int, 0-based), ``new_query`` (str, required).
+    """
+
+    type: str = Field(
+        ...,
+        description="Modification type: narrow, add_dimension, or modify_query",
+    )
+    params: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Type-specific parameters",
+    )
+
+    @field_validator("type")
+    @classmethod
+    def validate_type(cls, value: str) -> str:
+        allowed = frozenset({"narrow", "add_dimension", "modify_query"})
+        if value not in allowed:
+            raise ValueError(
+                f"Invalid modification type '{value}'. "
+                f"Allowed: {', '.join(sorted(allowed))}"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def validate_required_params(self) -> "PlanModification":
+        """Validate that required params are present for each modification type."""
+        params = self.params or {}
+        if self.type == "narrow":
+            if not params.get("focus"):
+                raise ValueError("narrow modification requires 'focus' in params")
+        elif self.type == "add_dimension":
+            if not params.get("dimension"):
+                raise ValueError(
+                    "add_dimension modification requires 'dimension' in params"
+                )
+        elif self.type == "modify_query":
+            if "phase_index" not in params:
+                raise ValueError(
+                    "modify_query modification requires 'phase_index' in params"
+                )
+            if not params.get("new_query"):
+                raise ValueError(
+                    "modify_query modification requires 'new_query' in params"
+                )
+        return self
 
 
 class PlanModifications(BaseModel):
-    """Optional modifications to apply to a plan before execution.
+    """Optional modifications to apply to a plan before execution (dict form).
 
-    All fields are optional.  When provided, they modify the stored plan
-    in-memory before execution begins (the stored plan is NOT mutated).
+    This is the legacy dict form — use ``PlanModification`` list form for
+    new code.  Both are accepted by the execute endpoint.
 
     Attributes:
         narrow: Optional focus string to narrow the research scope.
@@ -1609,22 +1682,76 @@ class PlanModifications(BaseModel):
 class ExecutePlanRequest(BaseModel):
     """Request to execute a previously-generated research plan.
 
-    Loads the plan from Valkey, applies any modifications, and streams
-    research results as Server-Sent Events.
+    Loads the plan from Valkey, applies any modifications, and creates
+    a job for the research pipeline.  Plans are one-shot: consumed on
+    first successful execution.
+
+    Supports two modification formats:
+        - List form (preferred): ``[{type: "narrow"/"add_dimension"/"modify_query",
+          params: {...}}]``
+        - Dict form (legacy): ``{narrow: "...", add_dimension: [...], ...}``
 
     Attributes:
-        plan_id: The plan ID returned by POST /v2/agent/plan.
+        plan_id: The plan ID returned by POST /v2/agent/plan or
+            POST /v2/agent with mode:plan.
         modifications: Optional adjustments to narrow scope or change
             analysis dimensions before execution.
     """
 
-    plan_id: str = Field(..., description="Plan ID from POST /v2/agent/plan")
-    modifications: PlanModifications | None = Field(
+    plan_id: str = Field(..., description="Plan ID from plan generation")
+    modifications: list[dict[str, Any]] | dict[str, Any] | None = Field(
         default=None,
         description="Optional plan modifications before execution",
     )
 
     model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="after")
+    def normalize_modifications(self) -> "ExecutePlanRequest":
+        """Normalize modifications into a validated internal form.
+
+        - ``None`` → ``None`` (no modifications)
+        - Dict form (``{narrow: ..., add_dimension: ...}``) → validated
+          ``PlanModifications``
+        - List form (``[{type: ..., params: ...}, ...]``) → validated
+          list of ``PlanModification``
+        - Empty list ``[]`` → ``None``
+        """
+        raw = self.modifications
+        if raw is None:
+            return self
+
+        if isinstance(raw, list):
+            if len(raw) == 0:
+                # Empty list → treat as no modifications
+                self.modifications = None
+                return self
+            # Validate each item as a PlanModification
+            validated: list[PlanModification] = []
+            for item in raw:
+                if not isinstance(item, dict):
+                    raise ValueError(
+                        f"Each modification must be an object, got {type(item).__name__}"
+                    )
+                validated.append(PlanModification(**item))
+            self.modifications = validated
+            return self
+
+        if isinstance(raw, dict):
+            # Try to interpret as dict form (PlanModifications)
+            if "type" in raw:
+                # Looks like a single PlanModification in dict form
+                validated = PlanModification(**raw)
+                self.modifications = [validated]
+                return self
+            # Otherwise treat as legacy PlanModifications form
+            validated = PlanModifications(**raw)
+            self.modifications = validated
+            return self
+
+        raise ValueError(
+            f"modifications must be a dict, list, or null, got {type(raw).__name__}"
+        )
 
 
 # ── Depth Injection (Phase 3) ──────────────────────────────────
