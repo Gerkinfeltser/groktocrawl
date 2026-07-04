@@ -5245,8 +5245,8 @@ def test_memory_ttl_configurable():
     assert get_r.status_code == 200
     data = get_r.json()
 
-    created_at = _dt.datetime.fromisoformat(data["createdAt"])
-    expires_at = _dt.datetime.fromisoformat(data["expiresAt"])
+    created_at = _dt.datetime.fromisoformat(data["created_at"])
+    expires_at = _dt.datetime.fromisoformat(data["expires_at"])
     delta = (expires_at - created_at).total_seconds()
     assert 600000 <= delta <= 610000, f"TTL delta should be ~604800s, got {delta}"
 
