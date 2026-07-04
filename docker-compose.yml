@@ -162,6 +162,11 @@ services:
       - SEMANTIC_URL=${SEMANTIC_URL:-http://semantic-svc:8003}
       - HOST=0.0.0.0
       - PORT=8080
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   ofelia:
     image: mcuadros/ofelia:latest
@@ -188,6 +193,20 @@ services:
       context: .
       dockerfile: parse-svc/Dockerfile
     restart: unless-stopped
+
+  mcp-svc:
+    build: ./mcp-svc
+    ports:
+      - '8083:8083'
+    environment:
+      - GROKTOCRAWL_API_URL=http://agent-svc:8080
+      - GROKTOCRAWL_API_KEY=${API_KEY:-}
+    depends_on:
+      agent-svc:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      - all
 
 volumes:
   valkey_data:
