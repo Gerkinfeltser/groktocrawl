@@ -1,12 +1,12 @@
 [project]
 name = 'mcp-svc'
-version = '0.1.0'
-description = 'MCP server for GroktoCrawl'
-requires-python = '>=3.11'
+version = '0.3.0'
+description = 'MCP server for GroktoCrawl — exposes all tools via Model Context Protocol'
+requires-python = '>=3.12'
 dependencies = [
-    'mcp>=1.28.1',
-    'httpx>=0.27.0',
-    'pydantic>=2.0.0',
+    'mcp==1.27.0',
+    'httpx==0.28.1',
+    'pydantic==2.10.6',
 ]
 
 [tool.setuptools]
@@ -14,5 +14,4 @@ py-modules = [
     'mcp_server',
     'groktocrawl_client',
     'session_store',
-    'browser_handler',
 ]

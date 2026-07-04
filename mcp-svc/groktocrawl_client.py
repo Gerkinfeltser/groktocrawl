@@ -177,11 +177,18 @@ class GroktocrawlClient:
 
     # ── API methods ─────────────────────────────────────────────
 
-    async def scrape(self, url: str, formats: list[str] | None = None) -> dict:
+    async def scrape(
+        self,
+        url: str,
+        formats: list[str] | None = None,
+        only_main_content: bool = True,
+    ) -> dict:
         """Scrape a URL to markdown."""
         body: dict[str, Any] = {"url": url}
         if formats:
             body["formats"] = formats
+        if not only_main_content:
+            body["only_main_content"] = only_main_content
         return await self._post("/v2/scrape", body)
 
     async def search(
@@ -189,11 +196,14 @@ class GroktocrawlClient:
         query: str,
         limit: int = 5,
         sources: list[str] | None = None,
+        search_type: str | None = None,
     ) -> dict:
-        """Web search with optional source filtering."""
+        """Web search with optional source filtering and search type."""
         body: dict[str, Any] = {"query": query, "limit": limit}
         if sources:
             body["sources"] = sources
+        if search_type:
+            body["search_type"] = search_type
         return await self._post("/v2/search", body)
 
     async def agent(
@@ -230,12 +240,86 @@ class GroktocrawlClient:
             await asyncio.sleep(1.0)
         return self._error_result("Agent job timed out after 120s")
 
-    async def answer(self, question: str, output_schema: dict | None = None) -> dict:
+    async def answer(
+        self,
+        question: str,
+        num_sources: int = 5,
+        output_schema: dict | None = None,
+    ) -> dict:
         """Grounded Q&A — synchronous."""
-        body: dict[str, Any] = {"query": question}
+        body: dict[str, Any] = {"query": question, "num_sources": num_sources}
         if output_schema:
             body["output_schema"] = output_schema
         return await self._post("/v2/answer", body)
+
+    # ── Non-polling job creation methods ────────────────────────
+
+    async def create_crawl(
+        self,
+        url: str,
+        max_pages: int | None = None,
+        max_depth: int | None = None,
+    ) -> dict:
+        """Create a crawl job without polling for completion.
+
+        Returns the agent-svc response containing the job ``id``.
+        Use :meth:`get_crawl_status` to poll for results.
+        """
+        body: dict[str, Any] = {"url": url}
+        if max_pages is not None:
+            body["max_pages"] = max_pages
+        if max_depth is not None:
+            body["max_depth"] = max_depth
+        return await self._post("/v2/crawl", body)
+
+    async def create_extract(
+        self,
+        urls: list[str],
+        prompt: str | None = None,
+        schema: dict | None = None,
+    ) -> dict:
+        """Create an extract job without polling for completion.
+
+        Returns the agent-svc response containing the job ``id``.
+        Use :meth:`get_extract_status` to poll for results.
+        """
+        body: dict[str, Any] = {"urls": urls}
+        if prompt:
+            body["prompt"] = prompt
+        if schema:
+            body["schema"] = schema
+        return await self._post("/v2/extract", body)
+
+    async def create_batch_scrape(self, urls: list[str]) -> dict:
+        """Create a batch scrape job without polling for completion.
+
+        Returns the agent-svc response containing the job ``id``.
+        Use :meth:`get_batch_scrape_status` to poll for results.
+        """
+        return await self._post("/v2/batch/scrape", {"urls": urls})
+
+    async def create_llmstxt(
+        self,
+        url: str,
+        max_pages: int | None = None,
+    ) -> dict:
+        """Create an llms.txt generation job without polling.
+
+        Returns the agent-svc response containing the job ``id``.
+        Use :meth:`get_llmstxt_status` to poll for results.
+        """
+        body: dict[str, Any] = {"url": url}
+        if max_pages is not None:
+            body["max_pages"] = max_pages
+        return await self._post("/v2/generate-llmstxt", body)
+
+    async def get_batch_scrape_status(self, job_id: str) -> dict:
+        """Get the current status of a batch scrape job."""
+        return await self._get(f"/v2/batch/scrape/{job_id}")
+
+    async def get_llmstxt_status(self, job_id: str) -> dict:
+        """Get the current status of an llms.txt generation job."""
+        return await self._get(f"/v2/generate-llmstxt/{job_id}")
 
     async def crawl(
         self,

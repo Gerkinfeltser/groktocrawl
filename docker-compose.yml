@@ -195,18 +195,20 @@ services:
     restart: unless-stopped
 
   mcp-svc:
-    build: ./mcp-svc
+    build:
+      context: ./mcp-svc
     ports:
-      - '8083:8083'
+      - '${MCP_PORT:-8002}:8002'
     environment:
-      - GROKTOCRAWL_URL=http://agent-svc:8080
-      - GROKTOCRAWL_API_KEY=${API_KEY:-}
+      - GROKTOCRAWL_URL=${GROKTOCRAWL_URL:-http://agent-svc:8000}
+      - GROKTOCRAWL_API_KEY=${GROKTOCRAWL_API_KEY:-}
+      - MCP_PORT=${MCP_PORT:-8002}
+      - SESSION_TTL=${SESSION_TTL:-3600}
+      - SESSION_SWEEP_INTERVAL=${SESSION_SWEEP_INTERVAL:-300}
+      - HTTP_TIMEOUT=${MCP_HTTP_TIMEOUT:-60}
     depends_on:
-      agent-svc:
-        condition: service_healthy
+      - agent-svc
     restart: unless-stopped
-    profiles:
-      - all
 
 volumes:
   valkey_data:
