@@ -1,104 +1,200 @@
-"""Thread-safe in-memory session store with TTL-based expiry."""
+"""Generic TTL session store with asyncio.Lock and periodic sweep.
 
+In-process dict-based storage.  Sessions carry arbitrary metadata and
+are expired after a configurable TTL.  A background asyncio task
+periodically sweeps expired sessions.
+
+Configuration (environment variables):
+    SESSION_TTL            TTL in seconds (default 3600).
+    SESSION_SWEEP_INTERVAL Sweep interval in seconds (default 300).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
 import time
-import threading
 import uuid
-from typing import Any
+from contextlib import suppress
+
+logger = logging.getLogger(__name__)
+
+_SESSION_TTL = int(os.environ.get("SESSION_TTL", "3600"))
+_SESSION_SWEEP_INTERVAL = int(os.environ.get("SESSION_SWEEP_INTERVAL", "300"))
 
 
 class SessionStore:
-    """Generic in-memory session store with optional TTL.
+    """Generic in-memory session store with TTL-based expiry.
 
-    Sessions are stored as dicts keyed by UUID string.  Each session
-    carries ``type``, ``ttl``, and ``created_at`` fields.  Expired
-    sessions are removed when ``cleanup_expired()`` is called.
+    Sessions are stored in a plain ``dict`` protected by an
+    ``asyncio.Lock``.  A background sweep task removes expired
+    sessions on a configurable interval.
 
-    Thread safety is provided by a ``threading.Lock``.
+    The store is **generic** — it imports nothing from the MCP SDK and
+    places no constraints on the shape of stored metadata.
     """
 
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._sessions: dict[str, dict] = {}
-
-    def create(self, session_type: str, ttl: int) -> str:
-        """Create a new session and return its UUID.
+    def __init__(
+        self,
+        ttl: int | None = None,
+        sweep_interval: int | None = None,
+    ) -> None:
+        """Initialise the store and start the background sweep task.
 
         Args:
-            session_type: Arbitrary string label (e.g. ``"browser"``).
-            ttl: Time-to-live in seconds.
+            ttl: Session TTL in seconds.  Defaults to ``SESSION_TTL``
+                env var (3600 s).
+            sweep_interval: Interval between sweep passes in seconds.
+                Defaults to ``SESSION_SWEEP_INTERVAL`` env var (300 s).
+        """
+        self._ttl = ttl if ttl is not None else _SESSION_TTL
+        self._sweep_interval = (
+            sweep_interval if sweep_interval is not None else _SESSION_SWEEP_INTERVAL
+        )
+
+        self._sessions: dict[str, dict] = {}
+        self._lock = asyncio.Lock()
+
+        self._stop_event = asyncio.Event()
+        self._sweep_task: asyncio.Task | None = None
+
+    # ── Public API ─────────────────────────────────────────────────
+
+    async def _ensure_sweep_running(self) -> None:
+        """Start the background sweep task if it is not already running.
+
+        Called lazily on first use so that the sweep task runs inside
+        the server's asyncio event loop regardless of whether the
+        ``SessionStore`` was created at module level or on demand.
+        """
+        if self._sweep_task is not None and not self._sweep_task.done():
+            return
+        self._stop_event.clear()
+        self._sweep_task = asyncio.create_task(self._sweep_loop())
+        logger.debug(
+            "Sweep task started (ttl=%ds, interval=%ds)",
+            self._ttl,
+            self._sweep_interval,
+        )
+
+    async def create(
+        self,
+        metadata: dict | None = None,
+        *,
+        session_id: str | None = None,
+    ) -> str:
+        """Create a new session and return its identifier.
+
+        Args:
+            metadata: Arbitrary key-value data to store with the session.
+            session_id: Explicit session identifier.  A UUID v4 is
+                generated when *session_id* is ``None``.
 
         Returns:
-            The new session ID (UUID v4 string).
+            The session identifier (provided or generated).
         """
-        session_id = str(uuid.uuid4())
+        sid = session_id or str(uuid.uuid4())
         now = time.time()
-        with self._lock:
-            self._sessions[session_id] = {
-                "type": session_type,
-                "ttl": ttl,
+        await self._ensure_sweep_running()
+        async with self._lock:
+            self._sessions[sid] = {
                 "created_at": now,
-                "data": {},
+                "data": dict(metadata) if metadata else {},
             }
-        return session_id
+        return sid
 
-    def get(self, session_id: str) -> dict | None:
-        """Return the session dict or ``None`` if not found."""
-        with self._lock:
-            return self._sessions.get(session_id)
+    async def get(self, session_id: str) -> dict | None:
+        """Retrieve session metadata, or ``None`` if missing / expired.
 
-    def update(self, session_id: str, data: dict) -> bool:
-        """Merge *data* into the session's ``data`` sub-dict.
-
-        Returns ``True`` if the session was found and updated,
-        ``False`` otherwise.
+        Returns a shallow copy of the stored data dict so callers
+        cannot mutate internal state.
         """
-        with self._lock:
+        await self._ensure_sweep_running()
+        async with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
-                return False
-            session.setdefault("data", {}).update(data)
-            return True
+                return None
+            if time.time() - session["created_at"] > self._ttl:
+                return None
+            return dict(session["data"])
 
-    def put(self, session_id: str, session_type: str, ttl: int) -> None:
-        """Create or overwrite a session with a specific ID.
+    async def update(self, session_id: str, data: dict) -> None:
+        """Merge *data* into an existing session's metadata in-place.
 
-        Args:
-            session_id: The explicit session ID to use.
-            session_type: Arbitrary string label.
-            ttl: Time-to-live in seconds.
+        Does nothing when the session does not exist.
         """
-        now = time.time()
-        with self._lock:
-            self._sessions[session_id] = {
-                "type": session_type,
-                "ttl": ttl,
-                "created_at": now,
-                "data": {},
-            }
+        await self._ensure_sweep_running()
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if session is not None:
+                session["data"].update(data)
 
-    def delete(self, session_id: str) -> bool:
-        """Remove a session by ID.
+    async def destroy(self, session_id: str) -> None:
+        """Remove a session by identifier (no-op for unknown IDs)."""
+        await self._ensure_sweep_running()
+        async with self._lock:
+            self._sessions.pop(session_id, None)
 
-        Returns ``True`` if the session existed and was removed,
-        ``False`` otherwise.
-        """
-        with self._lock:
-            return self._sessions.pop(session_id, None) is not None
+    async def sweep(self) -> int:
+        """Remove all expired sessions.
 
-    def cleanup_expired(self) -> int:
-        """Remove all sessions whose TTL has elapsed.
-
-        Returns the number of sessions removed.
+        Returns:
+            Number of sessions removed.
         """
         now = time.time()
         removed = 0
-        with self._lock:
-            expired_ids = [
+        await self._ensure_sweep_running()
+        async with self._lock:
+            expired = [
                 sid
                 for sid, s in self._sessions.items()
-                if now - s["created_at"] > s["ttl"]
+                if now - s["created_at"] > self._ttl
             ]
-            for sid in expired_ids:
+            for sid in expired:
                 del self._sessions[sid]
-                removed += 1
+            removed = len(expired)
+        if removed:
+            logger.debug("Sweep removed %d expired sessions", removed)
         return removed
+
+    # ── Lifecycle ──────────────────────────────────────────────────
+
+    def start_sweep(self) -> None:
+        """Launch the periodic background sweep task.
+
+        Safe to call multiple times — subsequent calls are no-ops when
+        a sweep task is already running.
+        """
+        if self._sweep_task is not None and not self._sweep_task.done():
+            return
+        self._stop_event.clear()
+        self._sweep_task = asyncio.create_task(self._sweep_loop())
+        logger.debug(
+            "Sweep task started (ttl=%ds, interval=%ds)",
+            self._ttl,
+            self._sweep_interval,
+        )
+
+    async def stop_sweep(self) -> None:
+        """Cancel the background sweep task and wait for it to finish."""
+        if self._sweep_task is None:
+            return
+        self._stop_event.set()
+        with suppress(asyncio.CancelledError):
+            await self._sweep_task
+        self._sweep_task = None
+        logger.debug("Sweep task stopped")
+
+    async def _sweep_loop(self) -> None:
+        """Run ``sweep()`` on a fixed interval until stopped."""
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(), timeout=self._sweep_interval
+                )
+                # _stop_event was set — exit
+                break
+            except TimeoutError:
+                # Interval elapsed — sweep
+                await self.sweep()

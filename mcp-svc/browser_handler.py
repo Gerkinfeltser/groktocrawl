@@ -32,9 +32,7 @@ class BrowserHandler:
     validate that a session exists before executing actions.
     """
 
-    def __init__(
-        self, client: GroktocrawlClient, session_store: SessionStore
-    ) -> None:
+    def __init__(self, client: GroktocrawlClient, session_store: SessionStore) -> None:
         self._client = client
         self._store = session_store
 
@@ -51,7 +49,10 @@ class BrowserHandler:
         if "error" not in result:
             session_id = result.get("id")
             if session_id:
-                self._store.put(session_id, "browser", ttl)
+                await self._store.create(
+                    {"type": "browser", "ttl": ttl},
+                    session_id=session_id,
+                )
             else:
                 result.setdefault("error", "Browser create: missing id in response")
         return result
@@ -72,7 +73,7 @@ class BrowserHandler:
         if action not in VALID_ACTIONS:
             return {"error": f"Unknown action type: {action!r}"}
 
-        session = self._store.get(session_id)
+        session = await self._store.get(session_id)
         if session is None:
             return {"error": f"Browser session not found: {session_id}"}
 
@@ -90,5 +91,5 @@ class BrowserHandler:
             API response dict.
         """
         result = await self._client.browser_destroy(session_id)
-        self._store.delete(session_id)
+        await self._store.destroy(session_id)
         return result
