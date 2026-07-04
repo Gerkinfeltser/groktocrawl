@@ -93,6 +93,8 @@ from .models import (
     SessionCreateResponse,
     SessionDeleteResponse,
     SessionExportResponse,
+    SessionResolveRequest,
+    SessionResolveResponse,
     SessionStatusResponse,
     SessionStepRequest,
     SessionStepResponse,
@@ -2180,6 +2182,67 @@ async def delete_session(request: Request, session_id: str) -> Any:
     mgr = SessionManager(redis_url=_get_redis_url(request))
     deleted = await mgr.delete_session(session_id)
     return SessionDeleteResponse(session_id=session_id, deleted=deleted)
+
+
+@router.post(
+    "/v2/session/{session_id}/resolve",
+    response_model=SessionResolveResponse,
+)
+async def resolve_session_refs(
+    request: Request, session_id: str, body: SessionResolveRequest
+) -> Any:
+    """Resolve reference IDs to full source content.
+
+    Returns full markdown, URL, title, source, char_count, and
+    scraped_at for each requested ref.  Missing refs are silently
+    omitted — compare ``resolved`` count against ``len(ref_ids)``
+    to detect gaps.
+
+    Args:
+        session_id: The session to query.
+        body: Contains ``ref_ids`` (list of ref ID strings).
+
+    Returns:
+        ``SessionResolveResponse`` with resolved refs, resolved count,
+        and list of missing ref IDs.
+
+    Raises:
+        ``NotFoundError`` (404) if the session does not exist.
+    """
+    from .session import SessionManager
+
+    mgr = SessionManager(redis_url=_get_redis_url(request))
+    session = await mgr.get_session(session_id)
+    if session is None:
+        raise NotFoundError(
+            detail=f"Session not found: {session_id}",
+            details={"session_id": session_id},
+        )
+
+    resolved_refs = await mgr.resolve_refs(session_id, body.ref_ids)
+
+    # Build compact ref view (full markdown included for resolve)
+    compact: dict[str, dict[str, Any]] = {}
+    for ref_id in body.ref_ids:
+        ref_data = resolved_refs.get(ref_id)
+        if ref_data is not None:
+            compact[ref_id] = {
+                "url": ref_data.get("url", ""),
+                "title": ref_data.get("title", ""),
+                "markdown": ref_data.get("markdown", ""),
+                "source": ref_data.get("source", "unknown"),
+                "char_count": ref_data.get("char_count", 0),
+                "scraped_at": ref_data.get("scraped_at", ""),
+            }
+
+    missing = [rid for rid in body.ref_ids if rid not in resolved_refs]
+
+    return SessionResolveResponse(
+        session_id=session_id,
+        refs=compact,
+        resolved=len(compact),
+        missing=missing,
+    )
 
 
 @router.post("/v2/enrich", response_model=EnrichResponse)

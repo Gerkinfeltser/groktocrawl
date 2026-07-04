@@ -179,6 +179,31 @@ class SessionManager:
 
         return result
 
+    async def resolve_ref(self, session_id: str, ref_id: str) -> dict | None:
+        """Resolve a single reference ID to its full source content.
+
+        Returns the full ref data including ``url``, ``title``, ``markdown``,
+        ``source``, ``char_count``, and ``scraped_at``.  Returns ``None`` if
+        the ref or session does not exist.
+        """
+        return self.store.get_ref(session_id, ref_id)
+
+    async def resolve_refs(
+        self, session_id: str, ref_ids: list[str]
+    ) -> dict[str, dict]:
+        """Resolve multiple reference IDs to their full source content.
+
+        Returns a dict mapping ``ref_id`` → ``ref_data``.  Missing refs are
+        silently omitted (the caller can detect gaps by comparing requested
+        vs returned keys).
+        """
+        result: dict[str, dict] = {}
+        for ref_id in ref_ids:
+            ref_data = self.store.get_ref(session_id, ref_id)
+            if ref_data is not None:
+                result[ref_id] = ref_data
+        return result
+
     async def export_session(self, session_id: str) -> dict:
         """Export the accumulated session artifact as markdown.
 
@@ -380,11 +405,15 @@ class SessionManager:
                     break
         self.store.append_artifact(session_id, section)
 
+        total_chars = sum(s["char_count"] for s in scraped)
         return {
             "step_index": step_index,
             "action": "scrape",
             "ref_count": len(scraped),
             "refs": refs_added,
+            "char_count": total_chars,
+            "succeeded": len(scraped),
+            "failed": len(urls) - len(scraped),
             "summary": f"Scraped {len(scraped)}/{len(urls)} URLs, stored as refs {step_index}_1 through {step_index}_{len(scraped)}",
         }
 

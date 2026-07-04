@@ -1307,6 +1307,35 @@ class SessionDeleteResponse(BaseModel):
     deleted: bool = False
 
 
+class SessionResolveRequest(BaseModel):
+    """Request to resolve reference IDs to full source content.
+
+    Takes a list of ref IDs (e.g., ``["ref_1_1", "ref_2_3"]``) and
+    returns the full content for each found ref.
+    """
+
+    ref_ids: list[str] = Field(
+        default_factory=list,
+        min_length=1,
+        max_length=100,
+        description="Ref IDs to resolve (e.g., ['ref_1_1', 'ref_2_3'])",
+    )
+
+
+class SessionResolveResponse(BaseModel):
+    """Response from POST /v2/session/{id}/resolve.
+
+    Returns full source content for each requested ref ID.
+    Missing refs are silently omitted from the ``refs`` dict.
+    """
+
+    success: bool = True
+    session_id: str = ""
+    refs: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    resolved: int = 0
+    missing: list[str] = Field(default_factory=list)
+
+
 class ActivityItem(BaseModel):
     """A single job entry in the activity feed."""
 
