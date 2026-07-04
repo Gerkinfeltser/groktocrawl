@@ -129,6 +129,7 @@ jobs:
           cp .env.sample .env
           echo "LLM_BASE_URL=http://llm-svc:8011/v1" >> .env
           echo "LLM_MODEL=fixture-model" >> .env
+          echo "AGENT_SEARCH_RATE_LIMIT=1000/1s" >> .env
 
       - name: Force-remove all stale project containers
         run: docker ps -a --filter name=groktocrawl -q | xargs -r docker rm -f || true
