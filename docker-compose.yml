@@ -205,7 +205,7 @@ services:
       - MCP_PORT=${MCP_PORT:-8002}
       - SESSION_TTL=${SESSION_TTL:-3600}
       - SESSION_SWEEP_INTERVAL=${SESSION_SWEEP_INTERVAL:-300}
-      - HTTP_TIMEOUT=${MCP_HTTP_TIMEOUT:-60}
+      - HTTP_TIMEOUT=${HTTP_TIMEOUT:-60}
     depends_on:
       - agent-svc
     restart: unless-stopped

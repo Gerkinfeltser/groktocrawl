@@ -1,14 +1,18 @@
-FROM python:3.13-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install dependencies from pyproject.toml
+# Install pinned dependencies
 COPY pyproject.toml .
-RUN pip install --no-cache-dir mcp>=1.27.0 httpx>=0.27.0 pydantic>=2.0.0
+RUN pip install --no-cache-dir \
+    mcp==1.27.0 \
+    httpx==0.28.1 \
+    pydantic==2.11.4
 
 # Copy application code
 COPY groktocrawl_client.py .
 COPY mcp_server.py .
+COPY session_store.py .
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \

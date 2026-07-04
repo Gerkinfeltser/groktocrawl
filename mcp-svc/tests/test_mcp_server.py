@@ -578,3 +578,338 @@ class TestDescriptions:
                 # Both are acceptable; we just check they're valid
                 assert isinstance(prop_name, str)
                 assert len(prop_name) > 0
+
+
+# ── Environment Variable Defaults (VAL-MCP-L03) ──────────────────
+
+
+class TestEnvVarDefaults:
+    """VAL-MCP-L03: Environment variable defaults match specification."""
+
+    def test_api_url_default(self, monkeypatch):
+        """GROKTOCRAWL_URL defaults to http://agent-svc:8000."""
+        monkeypatch.delenv("GROKTOCRAWL_URL", raising=False)
+        monkeypatch.delenv("GROKTOCRAWL_API_URL", raising=False)
+        # Reimport the module to pick up new env
+        import importlib
+
+        import mcp_server
+
+        importlib.reload(mcp_server)
+        assert mcp_server.API_URL == "http://agent-svc:8000"
+
+    def test_http_timeout_default(self, monkeypatch):
+        """HTTP_TIMEOUT defaults to 60."""
+        monkeypatch.delenv("HTTP_TIMEOUT", raising=False)
+        import importlib
+
+        import mcp_server
+
+        importlib.reload(mcp_server)
+        assert mcp_server.DEFAULT_TIMEOUT == 60.0
+
+    def test_mcp_port_default(self, monkeypatch):
+        """MCP_PORT defaults to 8002."""
+        monkeypatch.delenv("MCP_PORT", raising=False)
+        import importlib
+
+        import mcp_server
+
+        importlib.reload(mcp_server)
+        assert mcp_server.PORT == 8002
+
+    def test_groktocrawl_url_from_env(self, monkeypatch):
+        """GROKTOCRAWL_URL env var is read correctly."""
+        monkeypatch.setenv("GROKTOCRAWL_URL", "http://custom-svc:9999")
+        monkeypatch.delenv("GROKTOCRAWL_API_URL", raising=False)
+        import importlib
+
+        import mcp_server
+
+        importlib.reload(mcp_server)
+        assert mcp_server.API_URL == "http://custom-svc:9999"
+
+    def test_http_timeout_from_env(self, monkeypatch):
+        """HTTP_TIMEOUT env var is read correctly as float."""
+        monkeypatch.setenv("HTTP_TIMEOUT", "90")
+        import importlib
+
+        import mcp_server
+
+        importlib.reload(mcp_server)
+        assert mcp_server.DEFAULT_TIMEOUT == 90.0
+
+    def test_mcp_port_from_env(self, monkeypatch):
+        """MCP_PORT env var is read correctly as int."""
+        monkeypatch.setenv("MCP_PORT", "9000")
+        import importlib
+
+        import mcp_server
+
+        importlib.reload(mcp_server)
+        assert mcp_server.PORT == 9000
+
+
+# ── Health Endpoint (VAL-MCP-K08, VAL-MCP-L01) ────────────────────
+
+
+class TestHealthEndpoint:
+    """VAL-MCP-K08: Health endpoint returns correct JSON with agent_svc status."""
+
+    async def test_health_endpoint_returns_ok(self):
+        """GET /health returns status: ok."""
+        from mcp_server import _health_endpoint
+
+        responses: list[dict] = []
+        received_body: list[bytes] = []
+
+        async def _send(msg: dict) -> None:
+            responses.append(msg)
+            if msg.get("type") == "http.response.body":
+                received_body.append(msg.get("body", b""))
+
+        async def _receive() -> dict:
+            return {"type": "http.request"}
+
+        await _health_endpoint(
+            {"type": "http", "path": "/health", "method": "GET"},
+            _receive,
+            _send,
+        )
+
+        assert len(responses) >= 2
+        start_msg = responses[0]
+        assert start_msg["type"] == "http.response.start"
+        assert start_msg["status"] == 200
+        assert received_body
+        body = json.loads(received_body[0])
+        assert body["status"] == "ok"
+
+    async def test_health_endpoint_has_agent_svc_field(self):
+        """GET /health includes agent_svc field (connected or disconnected)."""
+        from mcp_server import _health_endpoint
+
+        received_body: list[bytes] = []
+
+        async def _send(msg: dict) -> None:
+            if msg.get("type") == "http.response.body":
+                received_body.append(msg.get("body", b""))
+
+        async def _receive() -> dict:
+            return {"type": "http.request"}
+
+        await _health_endpoint(
+            {"type": "http", "path": "/health", "method": "GET"},
+            _receive,
+            _send,
+        )
+
+        body = json.loads(received_body[0])
+        assert "agent_svc" in body
+        assert body["agent_svc"] in ("connected", "disconnected")
+
+    async def test_health_endpoint_has_uptime_seconds(self):
+        """GET /health includes uptime_seconds field as a non-negative number."""
+        from mcp_server import _health_endpoint
+
+        received_body: list[bytes] = []
+
+        async def _send(msg: dict) -> None:
+            if msg.get("type") == "http.response.body":
+                received_body.append(msg.get("body", b""))
+
+        async def _receive() -> dict:
+            return {"type": "http.request"}
+
+        await _health_endpoint(
+            {"type": "http", "path": "/health", "method": "GET"},
+            _receive,
+            _send,
+        )
+
+        body = json.loads(received_body[0])
+        assert "uptime_seconds" in body
+        assert isinstance(body["uptime_seconds"], (int, float))
+        assert body["uptime_seconds"] >= 0
+
+    async def test_health_endpoint_content_type_json(self):
+        """GET /health returns content-type: application/json."""
+        from mcp_server import _health_endpoint
+
+        responses: list[dict] = []
+
+        async def _send(msg: dict) -> None:
+            responses.append(msg)
+
+        async def _receive() -> dict:
+            return {"type": "http.request"}
+
+        await _health_endpoint(
+            {"type": "http", "path": "/health", "method": "GET"},
+            _receive,
+            _send,
+        )
+
+        start_msg = responses[0]
+        headers = {
+            k.decode() if isinstance(k, bytes) else k: v.decode()
+            if isinstance(v, bytes)
+            else v
+            for k, v in start_msg.get("headers", [])
+        }
+        assert headers.get("content-type") == "application/json"
+
+    async def test_check_agent_svc_returns_bool(self):
+        """_check_agent_svc returns True or False."""
+        from mcp_server import _check_agent_svc
+
+        result = await _check_agent_svc()
+        assert isinstance(result, bool)
+
+
+# ── Docker & Deployment (VAL-MCP-L01, L02, L04) ───────────────────
+
+
+class TestDockerDeployment:
+    """VAL-MCP-L01, L02, L04: Docker deployment assertions.
+
+    These tests verify properties that the Docker deployment must satisfy.
+    They are sanity checks for the deployable artifacts.
+    """
+
+    def test_dockerfile_uses_python_312_slim(self):
+        """VAL-MCP-L04: Dockerfile uses python:3.12-slim base image."""
+        import os
+
+        dockerfile_path = os.path.join(os.path.dirname(__file__), "..", "Dockerfile")
+        with open(dockerfile_path) as f:
+            content = f.read()
+        assert "FROM python:3.12-slim" in content, (
+            "Dockerfile must use python:3.12-slim base image"
+        )
+
+    def test_dockerfile_exposes_port_8002(self):
+        """VAL-MCP-L01: Dockerfile exposes port 8002."""
+        import os
+
+        dockerfile_path = os.path.join(os.path.dirname(__file__), "..", "Dockerfile")
+        with open(dockerfile_path) as f:
+            content = f.read()
+        assert "EXPOSE 8002" in content, "Dockerfile must EXPOSE port 8002"
+
+    def test_dockerfile_copies_all_source_files(self):
+        """Dockerfile copies mcp_server.py, groktocrawl_client.py, session_store.py."""
+        import os
+
+        dockerfile_path = os.path.join(os.path.dirname(__file__), "..", "Dockerfile")
+        with open(dockerfile_path) as f:
+            content = f.read()
+        assert "COPY mcp_server.py" in content
+        assert "COPY groktocrawl_client.py" in content
+        assert "COPY session_store.py" in content
+
+    def test_dockerfile_installs_pinned_dependencies(self):
+        """Dockerfile installs mcp, httpx, pydantic with pinned versions."""
+        import os
+
+        dockerfile_path = os.path.join(os.path.dirname(__file__), "..", "Dockerfile")
+        with open(dockerfile_path) as f:
+            content = f.read()
+        assert "mcp==" in content, "mcp must be pinned"
+        assert "httpx==" in content, "httpx must be pinned"
+        assert "pydantic==" in content, "pydantic must be pinned"
+
+    def test_docker_compose_has_mcp_svc_service(self):
+        """VAL-MCP-L02: docker-compose.yml declares mcp-svc service."""
+        import os
+
+        compose_path = os.path.join(
+            os.path.dirname(__file__), "..", "..", "docker-compose.yml"
+        )
+        with open(compose_path) as f:
+            content = f.read()
+        assert "mcp-svc:" in content, "docker-compose.yml must have mcp-svc service"
+
+    def test_docker_compose_mcp_depends_on_agent(self):
+        """VAL-MCP-L02: mcp-svc depends_on agent-svc."""
+        import os
+
+        compose_path = os.path.join(
+            os.path.dirname(__file__), "..", "..", "docker-compose.yml"
+        )
+        with open(compose_path) as f:
+            content = f.read()
+
+        # Find mcp-svc section
+        mcp_start = content.index("mcp-svc:")
+        # Find the next top-level service or end of file
+        remaining = content[mcp_start:]
+        # Should contain depends_on with agent-svc
+        assert "depends_on:" in remaining
+        assert "agent-svc" in remaining
+
+    def test_docker_compose_mcp_env_vars(self):
+        """VAL-MCP-L03: docker-compose.yml has all required env vars for mcp-svc."""
+        import os
+
+        compose_path = os.path.join(
+            os.path.dirname(__file__), "..", "..", "docker-compose.yml"
+        )
+        with open(compose_path) as f:
+            content = f.read()
+
+        mcp_start = content.index("mcp-svc:")
+        remaining = content[mcp_start:]
+
+        required_vars = [
+            "GROKTOCRAWL_URL",
+            "GROKTOCRAWL_API_KEY",
+            "MCP_PORT",
+            "SESSION_TTL",
+            "SESSION_SWEEP_INTERVAL",
+            "HTTP_TIMEOUT",
+        ]
+        for var in required_vars:
+            assert var in remaining, f"Missing env var {var} in mcp-svc service"
+
+    def test_docker_compose_mcp_port_mapping(self):
+        """VAL-MCP-L01: mcp-svc has port mapping for 8002."""
+        import os
+
+        compose_path = os.path.join(
+            os.path.dirname(__file__), "..", "..", "docker-compose.yml"
+        )
+        with open(compose_path) as f:
+            content = f.read()
+
+        mcp_start = content.index("mcp-svc:")
+        remaining = content[mcp_start:]
+        assert "8002" in remaining, "mcp-svc must map port 8002"
+
+    def test_pyproject_has_pinned_dependencies(self):
+        """pyproject.toml has pinned (==) dependencies."""
+        import os
+
+        pyproject_path = os.path.join(os.path.dirname(__file__), "..", "pyproject.toml")
+        with open(pyproject_path) as f:
+            content = f.read()
+        assert "'mcp==" in content, "mcp must be pinned with =="
+        assert "'httpx==" in content, "httpx must be pinned with =="
+        assert "'pydantic==" in content, "pydantic must be pinned with =="
+        # pydantic must satisfy mcp's requirement: >=2.11.0
+        assert (
+            "pydantic==2.11." in content
+            or "pydantic==2.12." in content
+            or "pydantic==2.13." in content
+        ), "pydantic must be pinned to >=2.11.0 to satisfy mcp's dependency"
+
+    def test_pyproject_includes_session_store_module(self):
+        """pyproject.toml lists session_store as a py-module."""
+        import os
+
+        pyproject_path = os.path.join(os.path.dirname(__file__), "..", "pyproject.toml")
+        with open(pyproject_path) as f:
+            content = f.read()
+        assert "session_store" in content, (
+            "pyproject.toml must include session_store in py-modules"
+        )
