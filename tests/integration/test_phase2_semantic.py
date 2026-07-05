@@ -31,6 +31,7 @@ def wait_for(url: str, path: str = "/health", timeout_s: int = 120):
 
 # ── Phase 1: Embedding & Reranking ───────────────────────────────
 
+
 def test_embed_endpoint_returns_1024_dim_vectors():
     """POST /embed returns L2-normalized 1024-dim BGE-M3 vectors."""
     resp = httpx.post(
@@ -77,6 +78,7 @@ def test_rerank_endpoint_ranks_relevant_higher():
 
 
 # ── Phase 1: Search Retrieval Modes ──────────────────────────────
+
 
 def test_keyword_mode_is_default_and_backward_compatible():
     """Keyword mode (default) returns results without semantic-svc dependency."""
@@ -133,6 +135,7 @@ def test_hybrid_retrieval_mode_returns_results():
 
 
 # ── Phase 2: Vector Index ────────────────────────────────────────
+
 
 def test_index_endpoint_stores_and_retrieves():
     """Index a page, then search for it by semantic similarity."""
@@ -195,9 +198,7 @@ def test_delete_index_removes_page():
     url_hash = idx_resp.json()["url_hash"]
 
     # Delete it
-    del_resp = httpx.delete(
-        SEMANTIC + f"/index/{url_hash}", timeout=30
-    )
+    del_resp = httpx.delete(SEMANTIC + f"/index/{url_hash}", timeout=30)
     assert del_resp.status_code == 200
     assert del_resp.json()["status"] == "deleted"
 
@@ -213,6 +214,7 @@ def test_delete_index_removes_page():
 
 
 # ── Phase 2: Vector Search Modes ─────────────────────────────────
+
 
 def test_vector_retrieval_mode_queries_qdrant():
     """Vector mode queries Qdrant without SearXNG."""
@@ -273,29 +275,49 @@ def test_reindex_same_url_updates_not_duplicates():
     url = "https://fixture.test/reindex-test-5588"
 
     # Index twice with different content
-    httpx.post(SEMANTIC + "/index", json={
-        "url": url, "title": "First", "content": "original content about databases",
-    }, timeout=120)
+    httpx.post(
+        SEMANTIC + "/index",
+        json={
+            "url": url,
+            "title": "First",
+            "content": "original content about databases",
+        },
+        timeout=120,
+    )
 
-    httpx.post(SEMANTIC + "/index", json={
-        "url": url, "title": "Second", "content": "updated content about graph theory",
-    }, timeout=120)
+    httpx.post(
+        SEMANTIC + "/index",
+        json={
+            "url": url,
+            "title": "Second",
+            "content": "updated content about graph theory",
+        },
+        timeout=120,
+    )
 
     # Search — should find the page but not twice
-    resp = httpx.post(SEMANTIC + "/search/vector", json={
-        "query": "graph theory and networks", "limit": 10,
-    }, timeout=120)
+    resp = httpx.post(
+        SEMANTIC + "/search/vector",
+        json={
+            "query": "graph theory and networks",
+            "limit": 10,
+        },
+        timeout=120,
+    )
 
     results = resp.json()["results"]
     matches = [r for r in results if r["url"] == url]
-    assert len(matches) <= 1, f"Duplicate indexed: found {len(matches)} entries for {url}"
+    assert len(matches) <= 1, (
+        f"Duplicate indexed: found {len(matches)} entries for {url}"
+    )
 
 
 if __name__ == "__main__":
     import sys
 
     tests = [
-        fn for name, fn in sorted(globals().items())
+        fn
+        for name, fn in sorted(globals().items())
         if name.startswith("test_") and callable(fn)
     ]
     passed = 0

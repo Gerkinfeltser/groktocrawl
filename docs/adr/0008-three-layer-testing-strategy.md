@@ -3,6 +3,7 @@
 * Status: accepted
 * Deciders: magnus, jasper
 * Date: 2025-06-05
+* Updated: 2025-07-05 — test directory structure reorganized per this ADR
 
 Technical Story: Adapters are inherently more brittle than generic scraping because they depend on external APIs and site structures that change without notice.
 
@@ -25,6 +26,18 @@ A YouTube adapter that works today may break tomorrow if YouTube changes its tra
 ## Decision Outcome
 
 Chosen option: **A. Three-layer strategy**. Layer 1 (contract tests) run in milliseconds and validate output shape. Layer 2 (VCR-recorded) run in seconds and catch regressions against known API responses. Layer 3 (live) runs weekly in CI to detect API drift.
+
+## Test Directory Structure
+
+Tests are organized into three subdirectories under `tests/` corresponding to the three layers:
+
+| Directory | Layer | Characteristics | CI |
+|-----------|-------|-----------------|-----|
+| `tests/unit/` | Layer 1 | Fast, no Docker, no network. Pure function/class tests with mocked dependencies. | Every push |
+| `tests/service/` | Layer 2 | Running service with mocked external deps (VCR recordings, fixture servers). | Every push |
+| `tests/integration/` | Layer 3 | Full Docker stack. End-to-end API contract tests against live fixture services. | Every push |
+
+The root `tests/conftest.py` sets up the Python path for all three subdirectories.
 
 ### Positive Consequences
 

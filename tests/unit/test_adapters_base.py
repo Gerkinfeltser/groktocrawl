@@ -94,7 +94,7 @@ class TestSiteAdapterConcrete:
             # Can't instantiate abstract class
             class Bad(SiteAdapter):  # type: ignore
                 name = "bad"
-                patterns = [re.compile(".*")]  # noqa: RUF012
+                patterns = [re.compile(".*")]
 
             Bad()  # raises TypeError
 
@@ -102,7 +102,7 @@ class TestSiteAdapterConcrete:
     async def test_concrete_adapter_works(self):
         class GoodAdapter(SiteAdapter):
             name = "good"
-            patterns = [re.compile(r"https://good\.example\.com/.*")]  # noqa: RUF012
+            patterns = [re.compile(r"https://good\.example\.com/.*")]
             priority = 200
 
             async def scrape(self, url, ctx):
@@ -117,7 +117,7 @@ class TestSiteAdapterConcrete:
     async def test_can_handle_override(self):
         class PickyAdapter(SiteAdapter):
             name = "picky"
-            patterns = [re.compile(r"https://example\.com/.*")]  # noqa: RUF012
+            patterns = [re.compile(r"https://example\.com/.*")]
 
             async def scrape(self, url, ctx):
                 return AdapterResult(success=True, markdown="ok", source="picky")
@@ -137,7 +137,7 @@ class TestAdapterRegistry:
 
         class NoopAdapter(SiteAdapter):
             name = "noop"
-            patterns = [re.compile(r"https://irrelevant\.com/.*")]  # noqa: RUF012
+            patterns = [re.compile(r"https://irrelevant\.com/.*")]
 
             async def scrape(self, url, ctx):
                 return AdapterResult(success=True, markdown="", source="noop")
@@ -152,7 +152,7 @@ class TestAdapterRegistry:
 
         class LowAdapter(SiteAdapter):
             name = "low"
-            patterns = [re.compile(r"https://example\.com/.*")]  # noqa: RUF012
+            patterns = [re.compile(r"https://example\.com/.*")]
             priority = 50
 
             async def scrape(self, url, ctx):
@@ -160,7 +160,7 @@ class TestAdapterRegistry:
 
         class HighAdapter(SiteAdapter):
             name = "high"
-            patterns = [re.compile(r"https://example\.com/.*")]  # noqa: RUF012
+            patterns = [re.compile(r"https://example\.com/.*")]
             priority = 200
 
             async def scrape(self, url, ctx):
@@ -178,7 +178,7 @@ class TestAdapterRegistry:
 
         class FailingAdapter(SiteAdapter):
             name = "fails"
-            patterns = [re.compile(r"https://example\.com/.*")]  # noqa: RUF012
+            patterns = [re.compile(r"https://example\.com/.*")]
             priority = 100
 
             async def scrape(self, url, ctx):
@@ -186,7 +186,7 @@ class TestAdapterRegistry:
 
         class SuccessAdapter(SiteAdapter):
             name = "works"
-            patterns = [re.compile(r"https://example\.com/.*")]  # noqa: RUF012
+            patterns = [re.compile(r"https://example\.com/.*")]
             priority = 50
 
             async def scrape(self, url, ctx):
@@ -204,7 +204,7 @@ class TestAdapterRegistry:
 
         class SelectiveAdapter(SiteAdapter):
             name = "selective"
-            patterns = [re.compile(r"https://example\.com/.*")]  # noqa: RUF012
+            patterns = [re.compile(r"https://example\.com/.*")]
 
             async def scrape(self, url, ctx):
                 return AdapterResult(success=True, markdown="hit!", source="selective")
@@ -227,7 +227,7 @@ class TestAdapterRegistry:
 
         class GithubAdapter(SiteAdapter):
             name = "github"
-            patterns = [re.compile(r"github\.com")]  # noqa: RUF012
+            patterns = [re.compile(r"github\.com")]
 
             async def scrape(self, url, ctx):
                 return AdapterResult(success=True, markdown="gh", source="github")
@@ -249,7 +249,7 @@ class TestAdapterDecorator:
         @adapter
         class DecoratedAdapter(SiteAdapter):
             name = "decorated"
-            patterns = [re.compile(".*")]  # noqa: RUF012
+            patterns = [re.compile(".*")]
 
             async def scrape(self, url, ctx):
                 return AdapterResult(success=True, markdown="dec", source="dec")

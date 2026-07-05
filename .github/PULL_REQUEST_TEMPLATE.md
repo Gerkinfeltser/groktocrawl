@@ -18,7 +18,7 @@
 
 ## Test Plan
 
-- [ ] Integration tests pass: `docker compose exec agent-svc python3 /app/agent/tests/test_stack.py`
+- [ ] Integration tests pass: `docker compose exec agent-svc python3 -m pytest /app/tests/integration/ /app/tests/service/`
 - [ ] New tests added for the change
 - [ ] Manual verification done (describe)
 

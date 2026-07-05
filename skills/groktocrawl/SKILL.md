@@ -9,8 +9,9 @@ description: >-
 license: MIT
 metadata:
   author: groktopus
-  version: "1.7.0"
+  version: "1.8.0"
   changelog:
+    "1.8.0": "PR #395 Agent-Native Research Platform: session protocol, plan-consent, depth injection, research memory, compact citations, MCP server, structured output for agent"
     "1.7.0": "Update adapter count to 22 (Shopify, ATS added); add Tavily competitive comparison reference"
     "1.6.0": "Agent endpoint SSE streaming; CLI --sync flag; streaming default for agent command"
     "1.5.1": "CLI answer default changed from sync to streaming; --stream flag replaced with --sync (opt-out)"
@@ -101,4 +102,110 @@ The generic pipeline now has **7 phases** that run sequentially if earlier phase
 
 If an adapter cannot handle a URL, the request falls through to this pipeline.
 
-[Remaining content unchanged from 1.6.0]
+## Agent-Native Research Platform (v0.11.0+)
+
+PR #395 added an **Agent-Native Research Platform** — transforming GroktoCrawl into a platform where AI agents can conduct multi-step research without accumulating intermediate content in their context windows.
+
+### Session Protocol
+
+Server-side research state management — research results accumulate server-side, agents retrieve only what they need.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /v2/session/create` | Create a research session, returns `session_id` |
+| `POST /v2/session/{id}/step` | Execute a step: `search`, `scrape`, `query`, or `deepen` |
+| `POST /v2/session/{id}/export` | Export full session artifact tree |
+
+Step actions:
+- **search** — Run a search query, store results in the session
+- **scrape** — Fetch a URL, store content
+- **query** — LLM query against accumulated session artifacts
+- **deepen** — Deepen specific findings (see Depth Injection below)
+
+References tracked by step index + result index. Full content stored server-side; agents request compact summaries.
+
+### Plan-Consent Mode
+
+`POST /v2/agent` accepts `{mode: "plan"}` — generates a research plan before execution. Agents review, modify, and approve the plan before the agent runs.
+
+**Workflow:**
+1. `POST /v2/agent` with `{prompt: "...", mode: "plan"}` → returns a research plan with strategy, expected searches, and estimated depth
+2. Modify the plan (add/remove search directions, adjust depth)
+3. `POST /v2/agent/execute` with the approved plan → runs the research
+
+The CLI's `groktocrawl agent` command defaults to immediate execution (streaming). For plan-consent, use the API directly.
+
+### Depth Injection
+
+The `deepen` session step action — targeted deepening of specific findings within an active session. Rather than re-running a full research pass, inject depth into specific dimensions of existing results.
+
+```
+POST /v2/session/{id}/step
+{"action": "deepen", "finding_ref": "3.1", "depth_prompt": "Find pricing models"}
+```
+
+### Research Memory (Semantic Cache)
+
+Hybrid cache using Valkey (storage) + Qdrant (semantic similarity). Auto-stores agent results on completion; checks cache before running a new research pipeline.
+
+**Freshness classification:**
+- `fresh` — recent result, return directly
+- `aging` — older result, return but flag staleness
+- `stale` — expired, bypass cache and re-run
+
+Bypass cache with `force_fresh=true` on agent requests.
+
+### Compact Citation Model
+
+`POST /v2/agent` and `POST /v2/answer` accept `citation_style: "compact"` — returns citation IDs instead of full source objects. Resolve IDs to full sources via:
+
+```
+POST /v2/citations/resolve
+{"citation_ids": ["src_1", "src_2", "src_3"]}
+```
+
+Useful for agent-native consumers that batch citation resolution.
+
+### Structured Output
+
+`POST /v2/agent` and `POST /v2/answer` accept `output_schema` — a JSON Schema dict that the LLM response must conform to. The LLM client uses strict structured output mode.
+
+```
+POST /v2/agent
+{"prompt": "...", "output_schema": {"type": "object", "properties": {...}}}
+```
+
+### MCP Server
+
+A Model Context Protocol server exposing all GroktoCrawl capabilities through MCP tools. Runs as `mcp-svc` Docker service on port 8002. Provides 20 MCP tools covering:
+
+- `groktocrawl_search` — Web search
+- `groktocrawl_scrape` — URL scraping
+- `groktocrawl_crawl` — Site crawling
+- `groktocrawl_map` — URL discovery
+- `groktocrawl_agent` — Autonomous research
+- `groktocrawl_answer` — Grounded Q&A
+- `groktocrawl_extract` — Structured extraction
+- Session tools — Create, step, export sessions
+- Monitor tools — Create, list, delete monitors
+- Parse tools — Document parsing
+
+Connect MCP servers to Hermes via `~/.hermes/config.yaml`:
+
+```yaml
+mcp:
+  servers:
+    groktocrawl:
+      type: http
+      url: http://hal2000:8002
+```
+
+### New CLI Features
+
+The `groktocrawl agent` command now supports:
+
+- `--pyramid` — Write artifact-pyramid output to disk (SSE-buffered)
+- `-o/--output-dir` — Output directory for pyramid (implies --pyramid)
+- `--include-images` — Collect images from scraped sources
+
+The `groktocrawl answer` command now supports `--pyramid` and `-o/--output-dir`.
