@@ -40,18 +40,7 @@ async def _lookup_agent_cache(request: Request, body: AgentRequest) -> dict | No
     if body.force_fresh:
         return None
     try:
-        from ..research_memory import ResearchMemory
-        from ..settings import load_settings
-
-        settings = load_settings()
-        redis_url = (
-            f"redis://{settings.valkey_host}:{settings.valkey_port}"
-            f"/{settings.valkey_db}"
-        )
-        memory = ResearchMemory(
-            redis_url=redis_url,
-            semantic_url=settings.semantic_url,
-        )
+        memory = request.app.state.research_memory
         memory_scope = os.environ.get("RESEARCH_MEMORY_SCOPE", "global")
         user_id = _derive_user_id(request)
         cache_result = await memory.query(
@@ -232,6 +221,7 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
             citation_style=body.citation_style,
             force_fresh=body.force_fresh,
             user_id=user_id,
+            research_memory=request.app.state.research_memory,
         )
     )
 

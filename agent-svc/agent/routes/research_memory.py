@@ -46,27 +46,13 @@ async def research_memory_query(
         ``ResearchMemoryQueryResponse`` with ``hit``, ``artifact``,
         ``age_hours``, and ``freshness`` fields.
     """
-    from ..research_memory import ResearchMemory
-    from ..settings import load_settings
-
-    settings = load_settings()
-    redis_url = (
-        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    memory = request.app.state.research_memory
+    user_id = _derive_user_id(request)
+    result = await memory.query(
+        prompt=body.question,
+        user_id=user_id,
     )
-
-    memory = ResearchMemory(
-        redis_url=redis_url,
-        semantic_url=settings.semantic_url,
-    )
-    try:
-        user_id = _derive_user_id(request)
-        result = await memory.query(
-            prompt=body.question,
-            user_id=user_id,
-        )
-        return ResearchMemoryQueryResponse(**result)
-    finally:
-        await memory.close()
+    return ResearchMemoryQueryResponse(**result)
 
 
 @router.post(
@@ -88,30 +74,16 @@ async def research_memory_store(
     Returns:
         ``ResearchMemoryStoreResponse`` with the new ``artifact_id``.
     """
-    from ..research_memory import ResearchMemory
-    from ..settings import load_settings
-
-    settings = load_settings()
-    redis_url = (
-        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    memory = request.app.state.research_memory
+    user_id = _derive_user_id(request)
+    artifact_id = await memory.store(
+        prompt=body.question,
+        artifact=body.answer,
+        sources=body.sources,
+        user_id=user_id,
+        metadata=body.metadata,
     )
-
-    memory = ResearchMemory(
-        redis_url=redis_url,
-        semantic_url=settings.semantic_url,
-    )
-    try:
-        user_id = _derive_user_id(request)
-        artifact_id = await memory.store(
-            prompt=body.question,
-            artifact=body.answer,
-            sources=body.sources,
-            user_id=user_id,
-            metadata=body.metadata,
-        )
-        return ResearchMemoryStoreResponse(artifact_id=artifact_id)
-    finally:
-        await memory.close()
+    return ResearchMemoryStoreResponse(artifact_id=artifact_id)
 
 
 @router.delete("/v2/research-memory/{artifact_id}")
@@ -125,23 +97,9 @@ async def research_memory_delete(request: Request, artifact_id: str) -> dict:
         ``{"success": true}`` if deleted, ``{"success": false}`` if
         the artifact was not found.
     """
-    from ..research_memory import ResearchMemory
-    from ..settings import load_settings
-
-    settings = load_settings()
-    redis_url = (
-        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
-    )
-
-    memory = ResearchMemory(
-        redis_url=redis_url,
-        semantic_url=settings.semantic_url,
-    )
-    try:
-        deleted = await memory.delete(artifact_id)
-        return {"success": deleted}
-    finally:
-        await memory.close()
+    memory = request.app.state.research_memory
+    deleted = await memory.delete(artifact_id)
+    return {"success": deleted}
 
 
 @router.get("/v2/memory/{memory_id}")
@@ -157,28 +115,14 @@ async def get_memory(request: Request, memory_id: str) -> dict[str, Any]:
     Returns:
         200 with the artifact dict, or 404 if not found.
     """
-    from ..research_memory import ResearchMemory
-    from ..settings import load_settings
-
-    settings = load_settings()
-    redis_url = (
-        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
-    )
-
-    memory = ResearchMemory(
-        redis_url=redis_url,
-        semantic_url=settings.semantic_url,
-    )
-    try:
-        entry = await memory.get(memory_id)
-        if entry is None:
-            raise NotFoundError(
-                detail="Memory artifact not found",
-                details={"memory_id": memory_id},
-            )
-        return {"success": True, "memory_id": memory_id, **entry}
-    finally:
-        await memory.close()
+    memory = request.app.state.research_memory
+    entry = await memory.get(memory_id)
+    if entry is None:
+        raise NotFoundError(
+            detail="Memory artifact not found",
+            details={"memory_id": memory_id},
+        )
+    return {"success": True, "memory_id": memory_id, **entry}
 
 
 @router.delete("/v2/memory/{memory_id}")
@@ -194,28 +138,14 @@ async def delete_memory(request: Request, memory_id: str) -> dict[str, Any]:
     Raises:
         ``NotFoundError`` (404) if the memory entry does not exist.
     """
-    from ..research_memory import ResearchMemory
-    from ..settings import load_settings
-
-    settings = load_settings()
-    redis_url = (
-        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
-    )
-
-    memory = ResearchMemory(
-        redis_url=redis_url,
-        semantic_url=settings.semantic_url,
-    )
-    try:
-        deleted = await memory.delete(memory_id)
-        if not deleted:
-            raise NotFoundError(
-                detail="Memory entry not found",
-                details={"memory_id": memory_id},
-            )
-        return {"success": True, "deleted": True}
-    finally:
-        await memory.close()
+    memory = request.app.state.research_memory
+    deleted = await memory.delete(memory_id)
+    if not deleted:
+        raise NotFoundError(
+            detail="Memory entry not found",
+            details={"memory_id": memory_id},
+        )
+    return {"success": True, "deleted": True}
 
 
 @router.post("/v2/memory/sweep")
@@ -243,23 +173,9 @@ async def sweep_memory(request: Request) -> dict[str, Any]:
             "This is an admin-only maintenance endpoint."
         )
 
-    from ..research_memory import ResearchMemory
-    from ..settings import load_settings
-
-    settings = load_settings()
-    redis_url = (
-        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
-    )
-
-    memory = ResearchMemory(
-        redis_url=redis_url,
-        semantic_url=settings.semantic_url,
-    )
-    try:
-        count = await memory.sweep()
-        return {"success": True, "swept": count}
-    finally:
-        await memory.close()
+    memory = request.app.state.research_memory
+    count = await memory.sweep()
+    return {"success": True, "swept": count}
 
 
 @router.post(
@@ -282,46 +198,32 @@ async def memory_batch_query(
         ``MemoryBatchQueryResponse`` with ``results`` array of
         per-query hit/miss, similarity, freshness, and artifact data.
     """
-    from ..research_memory import ResearchMemory
-    from ..settings import load_settings
-
     if not body.queries:
         return MemoryBatchQueryResponse(success=True, results=[])
 
-    settings = load_settings()
-    redis_url = (
-        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    memory = request.app.state.research_memory
+    user_id = _derive_user_id(request)
+    raw_results = await memory.batch_query(
+        queries=body.queries,
+        user_id=user_id,
     )
-
-    memory = ResearchMemory(
-        redis_url=redis_url,
-        semantic_url=settings.semantic_url,
-    )
-    try:
-        user_id = _derive_user_id(request)
-        raw_results = await memory.batch_query(
-            queries=body.queries,
-            user_id=user_id,
+    results: list[MemoryBatchQueryEntry] = []
+    for i, r in enumerate(raw_results):
+        entry = MemoryBatchQueryEntry(
+            hit=r.get("hit", False),
+            similarity=r.get("similarity"),
+            freshness=r.get("freshness"),
+            memory_id=r.get("memory_id"),
         )
-        results: list[MemoryBatchQueryEntry] = []
-        for i, r in enumerate(raw_results):
-            entry = MemoryBatchQueryEntry(
-                hit=r.get("hit", False),
-                similarity=r.get("similarity"),
-                freshness=r.get("freshness"),
-                memory_id=r.get("memory_id"),
+        if r.get("hit") and r.get("artifact"):
+            art = r["artifact"]
+            entry.query = art.get(
+                "query", body.queries[i] if i < len(body.queries) else ""
             )
-            if r.get("hit") and r.get("artifact"):
-                art = r["artifact"]
-                entry.query = art.get(
-                    "query", body.queries[i] if i < len(body.queries) else ""
-                )
-                entry.artifact = art.get("artifact", "")
-                entry.sources = art.get("sources", [])
-            results.append(entry)
-        return MemoryBatchQueryResponse(success=True, results=results)
-    finally:
-        await memory.close()
+            entry.artifact = art.get("artifact", "")
+            entry.sources = art.get("sources", [])
+        results.append(entry)
+    return MemoryBatchQueryResponse(success=True, results=results)
 
 
 @router.post(
@@ -345,9 +247,6 @@ async def memory_batch_store(
         ``MemoryBatchStoreResponse`` with ``stored_count``,
         ``failed_count``, and per-entry ``results``.
     """
-    from ..research_memory import ResearchMemory
-    from ..settings import load_settings
-
     if not body.entries:
         return MemoryBatchStoreResponse(
             success=True,
@@ -356,41 +255,30 @@ async def memory_batch_store(
             results=[],
         )
 
-    settings = load_settings()
-    redis_url = (
-        f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
+    memory = request.app.state.research_memory
+    user_id = _derive_user_id(request)
+    raw_results = await memory.batch_store(
+        entries=[e.model_dump() for e in body.entries],
+        user_id=user_id,
     )
-
-    memory = ResearchMemory(
-        redis_url=redis_url,
-        semantic_url=settings.semantic_url,
-    )
-    try:
-        user_id = _derive_user_id(request)
-        raw_results = await memory.batch_store(
-            entries=[e.model_dump() for e in body.entries],
-            user_id=user_id,
-        )
-        results: list[MemoryBatchStoreResult] = []
-        stored = 0
-        failed = 0
-        for r in raw_results:
-            if r.get("success"):
-                stored += 1
-            else:
-                failed += 1
-            results.append(
-                MemoryBatchStoreResult(
-                    success=r.get("success", False),
-                    memory_id=r.get("memory_id"),
-                    error=r.get("error"),
-                )
+    results: list[MemoryBatchStoreResult] = []
+    stored = 0
+    failed = 0
+    for r in raw_results:
+        if r.get("success"):
+            stored += 1
+        else:
+            failed += 1
+        results.append(
+            MemoryBatchStoreResult(
+                success=r.get("success", False),
+                memory_id=r.get("memory_id"),
+                error=r.get("error"),
             )
-        return MemoryBatchStoreResponse(
-            success=True,
-            stored_count=stored,
-            failed_count=failed,
-            results=results,
         )
-    finally:
-        await memory.close()
+    return MemoryBatchStoreResponse(
+        success=True,
+        stored_count=stored,
+        failed_count=failed,
+        results=results,
+    )

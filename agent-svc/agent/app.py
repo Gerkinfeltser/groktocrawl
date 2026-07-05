@@ -28,6 +28,7 @@ from .health import check_all
 from .llm import LLMClient
 from .models import ErrorDetail, ErrorResponse
 from .rate_limiter import SlidingWindowRateLimiter
+from .research_memory import ResearchMemory
 from .scraper_client import ScraperClient
 from .searxng_client import SearXNGClient
 from .settings import load_settings
@@ -119,6 +120,10 @@ def create_app() -> FastAPI:
     app.state.llm_api_key = settings.llm_api_key
     app.state.llm_model = settings.llm_model
     app.state.semantic_url = settings.semantic_url
+    app.state.research_memory = ResearchMemory(
+        redis_url=redis_url,
+        semantic_url=settings.semantic_url,
+    )
     app.state.rate_limiter = rate_limiter
     app.state.max_searches_per_request = settings.max_searches_per_request
     app.state.task_tracker = TaskTracker()
@@ -285,6 +290,7 @@ def create_app() -> FastAPI:
     @app.on_event("shutdown")
     async def shutdown_event() -> None:
         await app.state.task_tracker.shutdown(grace_period=5.0)
+        await app.state.research_memory.close()
         await app.state.scraper_client.close()
         await app.state.searxng_client.close()
         await app.state.llm_client.close()

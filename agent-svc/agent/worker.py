@@ -83,6 +83,7 @@ async def _process_agent_async(
     citation_style: Any = None,
     force_fresh: bool = False,
     user_id: str | None = None,
+    research_memory: Any = None,
 ) -> None:
     settings = _get_worker_settings()
     redis_url = (
@@ -106,13 +107,7 @@ async def _process_agent_async(
     stale_cache_hit: dict | None = None
     if not force_fresh:
         try:
-            from .research_memory import ResearchMemory
-
-            memory = ResearchMemory(
-                redis_url=redis_url,
-                semantic_url=settings.semantic_url,
-            )
-            cache_result = await memory.query(
+            cache_result = await research_memory.query(
                 prompt=prompt,
                 user_id=user_id if memory_scope == "per_user" else None,
             )
@@ -227,12 +222,6 @@ async def _process_agent_async(
 
         # ── Store fresh result in research memory ──────────────────
         try:
-            from .research_memory import ResearchMemory
-
-            memory = ResearchMemory(
-                redis_url=redis_url,
-                semantic_url=settings.semantic_url,
-            )
             answer = result.get("result", "")
             # Use rich_source_details (preserved before compactification) for memory
             store_sources = rich_source_details or result.get("sources", [])
@@ -248,7 +237,7 @@ async def _process_agent_async(
                 metadata["latency_ms"] = result.get("latency_ms", 0)
 
             memory_user_id = user_id if memory_scope == "per_user" else None
-            artifact_id = await memory.store(
+            artifact_id = await research_memory.store(
                 prompt=prompt,
                 artifact=answer,
                 sources=store_sources,
