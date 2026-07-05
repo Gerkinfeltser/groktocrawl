@@ -15,6 +15,7 @@ from .rerank import _rerank_answer_sources
 from .scoring import _is_video_platform_url
 from .search import run_deep_search, run_rich_search, run_search_stream
 from .similar import run_find_similar
+from .streaming import stream_cached_artifact, stream_research_live
 from .utils import _validate_json_if_schema
 
 __all__ = [
@@ -34,4 +35,6 @@ __all__ = [
     "run_research_stream",
     "run_rich_search",
     "run_search_stream",
+    "stream_cached_artifact",
+    "stream_research_live",
 ]

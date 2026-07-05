@@ -302,61 +302,27 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
     if cache_hit_data is not None and body.stream:
         from fastapi.responses import StreamingResponse
 
-        async def cache_hit_stream() -> Any:
-            import json
-            import time as _time
+        from .research.streaming import stream_cached_artifact
 
-            stream_start = _time.monotonic()
-            entry = cache_hit_data["artifact"]
-            artifact_text = entry.get("artifact", "")
-            sources = entry.get("sources", [])
-
-            # Apply citation style
-            from .research import _apply_citation_style
-
-            transformed_text, _ = _apply_citation_style(
-                artifact_text, sources, body.citation_style
-            )
-
-            # Schema mode (schema or output_schema): skip token replay,
-            # emit only done event (matches non-cached schema streaming behavior)
-            has_schema = bool(body.output_schema or body.schema_)
-            if not has_schema:
-                # Replay artifact as token events
-                chunk_size = 8
-                for i in range(0, len(transformed_text), chunk_size):
-                    chunk = transformed_text[i : i + chunk_size]
-                    yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
-
-            latency_ms = int((_time.monotonic() - stream_start) * 1000)
-            done_payload: dict = {
-                "type": "done",
-                "result": transformed_text,
-                "sources": [s.get("url", "") for s in sources],
-                "latency_ms": latency_ms,
-                "from_cache": True,
-                "memory_id": cache_hit_data.get("memory_id", ""),
-                "freshness": cache_hit_data.get("freshness", "fresh"),
-                "similarity": cache_hit_data.get("similarity", 0),
-                "citation_style": body.citation_style.value,
-            }
-            if body.citation_style == CitationStyle.compact:
-                compact_srcs = []
-                for i, src in enumerate(sources, start=1):
-                    compact_srcs.append({"index": i, "url": src.get("url", "")})
-                done_payload["sources_compact"] = compact_srcs
-                done_payload["source_details"] = []
-            else:
-                done_payload["source_details"] = sources
-            yield f"data: {json.dumps(done_payload)}\n\n"
-            yield "data: [DONE]\n\n"
+        entry = cache_hit_data["artifact"]
+        artifact_text = entry.get("artifact", "")
+        sources = entry.get("sources", [])
+        has_schema = bool(body.output_schema or body.schema_)
 
         headers = {
             "X-Search-Budget": f"{max_searches}/{max_searches}",
             "X-Search-Rate-Remaining": f"{rate_remaining}/{rate_limiter.limit}",
         }
         return StreamingResponse(
-            cache_hit_stream(),
+            stream_cached_artifact(
+                artifact_text=artifact_text,
+                sources=sources,
+                memory_id=cache_hit_data.get("memory_id", ""),
+                freshness=cache_hit_data.get("freshness", "fresh"),
+                similarity=cache_hit_data.get("similarity", 0),
+                citation_style=body.citation_style,
+                has_schema=has_schema,
+            ),
             media_type="text/event-stream",
             headers=headers,
         )
@@ -389,12 +355,14 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
         await llm_check.close()
         from fastapi.responses import StreamingResponse
 
-        async def event_stream() -> Any:
-            import json
+        from .research.streaming import stream_research_live
 
-            from .research import run_research_stream
-
-            async for event in run_research_stream(
+        headers = {
+            "X-Search-Budget": f"{max_searches}/{max_searches}",
+            "X-Search-Rate-Remaining": f"{rate_remaining}/{rate_limiter.limit}",
+        }
+        return StreamingResponse(  # type: ignore[return-value]
+            stream_research_live(
                 prompt=body.prompt,
                 urls=body.urls,
                 schema=body.output_schema or body.schema_,
@@ -407,65 +375,9 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
                 max_searches_per_request=max_searches,
                 include_images=body.include_images,
                 citation_style=body.citation_style,
-            ):
-                if event["type"] == "sources_pending":
-                    yield f"data: {json.dumps({'type': 'sources_pending', 'sources': event['sources']})}\n\n"
-                elif event["type"] == "source_scraped":
-                    yield f"data: {json.dumps({'type': 'source_scraped', 'url': event['url'], 'source': event.get('source', ''), 'chars': event.get('chars', 0)})}\n\n"
-                elif event["type"] == "sources":
-                    yield f"data: {json.dumps({'type': 'sources', 'sources': event['sources']})}\n\n"
-                elif event["type"] == "token":
-                    yield f"data: {json.dumps({'type': 'token', 'content': event['content']})}\n\n"
-                elif event["type"] == "done":
-                    import json as _json
-
-                    # Apply citation_style to transform result text markers
-                    source_details = event.get("source_details", [])
-                    cs = body.citation_style
-                    from .research import _apply_citation_style
-
-                    transformed_result, _ = _apply_citation_style(
-                        event["result"], source_details, cs
-                    )
-
-                    done_payload: dict = {
-                        "type": "done",
-                        "result": transformed_result,
-                        "sources": event["sources"],
-                        "latency_ms": event["latency_ms"],
-                    }
-                    # Apply citation_style transformation (VAL-CC-008, VAL-CC-009)
-                    done_payload["citation_style"] = cs.value
-                    if cs == CitationStyle.compact:
-                        compact_sources = []
-                        for i, src in enumerate(source_details, start=1):
-                            compact_sources.append(
-                                {
-                                    "index": i,
-                                    "url": src.get("url", ""),
-                                }
-                            )
-                        done_payload["sources_compact"] = compact_sources
-                        done_payload["source_details"] = []
-                    else:
-                        done_payload["source_details"] = source_details
-                    yield f"data: {_json.dumps(done_payload)}\n\n"
-                elif event["type"] == "error":
-                    yield f"data: {json.dumps({'type': 'error', 'content': event['content']})}\n\n"
-                elif event["type"] == "status":
-                    yield f"data: {json.dumps({'type': 'status', 'state': event['state']})}\n\n"
-                elif event["type"] == "research_plan":
-                    yield f"data: {json.dumps({'type': 'research_plan', 'strategy': event['strategy'], 'queries': event['queries'], 'reasoning': event['reasoning']})}\n\n"
-                elif event["type"] == "research_pass":
-                    yield f"data: {json.dumps({'type': 'research_pass', 'pass': event['pass'], 'total_passes': event['total_passes']})}\n\n"
-            yield "data: [DONE]\n\n"
-
-        headers = {
-            "X-Search-Budget": f"{max_searches}/{max_searches}",
-            "X-Search-Rate-Remaining": f"{rate_remaining}/{rate_limiter.limit}",
-        }
-        return StreamingResponse(  # type: ignore[return-value]
-            event_stream(), media_type="text/event-stream", headers=headers
+            ),
+            media_type="text/event-stream",
+            headers=headers,
         )
 
     # Sync path — create job, process in background
