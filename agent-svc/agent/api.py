@@ -110,71 +110,19 @@ from .monitor import (
     run_monitor,
     save_monitor,
 )
+from .routes._helpers import (
+    _browser_proxy,
+    _derive_user_id,
+    _get_client_ip,
+    _get_redis_url,
+    _index_scrape,
+    _resolve_output_schema,
+)
 from .store import JobStore
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-def _get_client_ip(request: Request) -> str:
-    """Extract the client IP address from the request.
-
-    Respects the ``X-Forwarded-For`` header for reverse-proxy deployments.
-    Falls back to ``request.client.host`` when the header is absent.
-    """
-    xff = request.headers.get("X-Forwarded-For")
-    if xff:
-        return xff.split(",")[0].strip()
-    if request.client:
-        return request.client.host
-    return "unknown"
-
-
-def _resolve_output_schema(
-    output_schema: dict[str, Any] | None,
-    schema_alias: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    """Resolve the effective output schema from request fields.
-
-    - ``output_schema`` takes priority over ``schema`` alias.
-    - Empty dicts (``{}``) are treated as ``None`` (no schema).
-    - ``None`` means "not set" — falls back to ``schema`` alias.
-    - Returns ``None`` when no valid schema is provided.
-    """
-    effective = output_schema if output_schema is not None else schema_alias
-    if effective is not None and not any(effective):
-        return None
-    return effective
-
-
-def _derive_user_id(request: Request) -> str | None:
-    """Derive a user identifier from the request for cache scoping.
-
-    When RESEARCH_MEMORY_SCOPE=per_user, the user_id is derived from
-    the ``X-API-Key`` or ``Authorization: Bearer`` header.  When no
-    API key is present, the client IP is used as a fallback.
-
-    Returns ``None`` for global scope (no per-user isolation).
-    """
-    import hashlib
-    import os as _os
-
-    scope = _os.environ.get("RESEARCH_MEMORY_SCOPE", "global")
-    if scope != "per_user":
-        return None
-
-    # Try API key first
-    api_key = (
-        request.headers.get("X-API-Key", "")
-        or request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
-    )
-    if api_key:
-        # Hash the key for privacy — we only need a stable identifier
-        return hashlib.sha256(api_key.encode()).hexdigest()[:16]
-
-    # Fall back to client IP
-    return _get_client_ip(request)
 
 
 @router.get("/v2/activity", response_model=ActivityResponse)
@@ -2231,14 +2179,6 @@ async def resolve_citations(request: Request, body: CitationsResolveRequest):
 # ── Session Protocol ──────────────────────────────────────────
 
 
-def _get_redis_url(request: Request) -> str:
-    """Build a Redis/Valkey URL from the app settings."""
-    from .settings import load_settings
-
-    settings = load_settings()
-    return f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
-
-
 @router.post("/v2/session/create", response_model=SessionCreateResponse)
 async def create_session(request: Request, body: SessionCreateRequest) -> Any:
     """Create a new research session.
@@ -2524,25 +2464,6 @@ async def map_site(request: Request, body: MapRequest) -> MapResponse:
 
 
 # ----- Browser Sessions -----
-
-BROWSER_SVC_URL = "http://browser-svc:8012"
-
-
-async def _browser_proxy(
-    path: str, method: str = "POST", json_data: dict[str, Any] | None = None
-) -> Any:
-    """Proxy a request to the browser service."""
-    async with httpx.AsyncClient(timeout=120) as client:
-        if method == "GET":
-            resp = await client.get(f"{BROWSER_SVC_URL}{path}")
-        elif method == "DELETE":
-            resp = await client.delete(f"{BROWSER_SVC_URL}{path}")
-        else:
-            resp = await client.post(f"{BROWSER_SVC_URL}{path}", json=json_data or {})
-        try:
-            return resp.json()
-        except Exception:
-            return {"success": False, "error": resp.text[:200]}
 
 
 @router.post("/v2/browser", response_model=BrowserCreateResponse)
@@ -3361,22 +3282,3 @@ async def memory_batch_store(
         )
     finally:
         await memory.close()
-
-
-async def _index_scrape(url: str, title: str, content: str, request: Request) -> None:
-    """Fire-and-forget index a scraped page in the vector index."""
-    semantic = None
-    try:
-        from .semantic_client import SemanticClient
-
-        semantic = SemanticClient(request.app.state.semantic_url)
-        await semantic.index_page(url, title, content[:2000])
-    except Exception:
-        logger.warning(
-            "Semantic indexing failed for %s — page will not appear in vector search",
-            url,
-            exc_info=True,
-        )
-    finally:
-        if semantic is not None:
-            await semantic.close()
