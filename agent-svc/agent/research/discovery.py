@@ -111,6 +111,52 @@ async def _scrape_urls(
     return documents, source_details
 
 
+async def _scrape_with_fallback(
+    urls: list[str],
+    scraper: ScraperClient,
+    min_sources: int = 3,
+    scrape_options: dict | None = None,
+) -> tuple[list[str], list[dict]]:
+    """Scrape URLs with video-platform fallback strategy.
+
+    Splits URLs into preferred (text-based) and deprioritized (video-platform).
+    Scrapes preferred URLs first. If fewer than ``min_sources`` documents are
+    obtained, falls back to deprioritized URLs.
+
+    Returns (documents, source_details).
+    """
+    preferred = [u for u in urls if not _is_video_platform_url(u)]
+    deprioritized = [u for u in urls if _is_video_platform_url(u)]
+
+    documents, source_details = await _scrape_urls(
+        preferred,
+        scraper,
+        min_sources=min_sources,
+        max_attempts=len(preferred) or 10,
+        scrape_options=scrape_options,
+    )
+    logger.info(
+        "Scrape with fallback: %d docs from %d preferred URLs (min_sources=%d)",
+        len(documents),
+        len(preferred),
+        min_sources,
+    )
+
+    if len(documents) < min_sources and deprioritized:
+        remaining = min_sources - len(documents)
+        extra_docs, extra_details = await _scrape_urls(
+            deprioritized,
+            scraper,
+            min_sources=remaining,
+            max_attempts=remaining * 2,
+            scrape_options=scrape_options,
+        )
+        documents.extend(extra_docs)
+        source_details.extend(extra_details)
+
+    return documents, source_details
+
+
 async def _run_multi_query_discover_and_scrape(
     queries: list[str],
     urls: list[str] | None,
@@ -175,36 +221,9 @@ async def _run_multi_query_discover_and_scrape(
 
     # Score and rank URLs before scraping (F1: source pre-filtering)
     target_urls = _filter_and_rank_urls(target_urls, max_urls=20)
-
-    preferred = [u for u in target_urls if not _is_video_platform_url(u)]
-    deprioritized = [u for u in target_urls if _is_video_platform_url(u)]
-
-    documents, source_details = await _scrape_urls(
-        preferred,
-        scraper,
-        min_sources=3,
-        max_attempts=len(preferred) or 10,
-        scrape_options=scrape_options,
+    documents, source_details = await _scrape_with_fallback(
+        target_urls, scraper, min_sources=3, scrape_options=scrape_options
     )
-    logger.info(
-        "Multi-query: scraped %d docs from %d preferred URLs (attempts=%d)",
-        len(documents),
-        len(preferred),
-        len(preferred) or 10,
-    )
-
-    if len(documents) < 3 and deprioritized:
-        remaining = 3 - len(documents)
-        extra_docs, extra_details = await _scrape_urls(
-            deprioritized,
-            scraper,
-            min_sources=remaining,
-            max_attempts=remaining * 2,
-            scrape_options=scrape_options,
-        )
-        documents.extend(extra_docs)
-        source_details.extend(extra_details)
-
     context = "\n\n---\n\n".join(documents) if documents else ""
 
     return {
@@ -239,36 +258,9 @@ async def _run_research_discover_and_scrape(
 
     # Score and rank URLs before scraping (F1: source pre-filtering)
     target_urls = _filter_and_rank_urls(target_urls, max_urls=20)
-
-    preferred = [u for u in target_urls if not _is_video_platform_url(u)]
-    deprioritized = [u for u in target_urls if _is_video_platform_url(u)]
-
-    documents, source_details = await _scrape_urls(
-        preferred,
-        scraper,
-        min_sources=3,
-        max_attempts=len(preferred) or 10,
-        scrape_options=scrape_options,
+    documents, source_details = await _scrape_with_fallback(
+        target_urls, scraper, min_sources=3, scrape_options=scrape_options
     )
-    logger.info(
-        "run_research: scraped %d docs from %d preferred URLs (attempts=%d)",
-        len(documents),
-        len(preferred),
-        len(preferred) or 10,
-    )
-
-    if len(documents) < 3 and deprioritized:
-        remaining = 3 - len(documents)
-        extra_docs, extra_details = await _scrape_urls(
-            deprioritized,
-            scraper,
-            min_sources=remaining,
-            max_attempts=remaining * 2,
-            scrape_options=scrape_options,
-        )
-        documents.extend(extra_docs)
-        source_details.extend(extra_details)
-
     context = "\n\n---\n\n".join(documents) if documents else ""
 
     return {
