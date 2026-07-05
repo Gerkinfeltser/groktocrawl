@@ -3,19 +3,19 @@
 These tests parse the source file directly — no imports, no Docker needed.
 Run from repo root:
 
-    python3 -m pytest tests/test_prompts.py -v
+    python3 -m pytest tests/unit/test_prompts.py -v
 
 Or without pytest:
 
-    python3 tests/test_prompts.py
+    python3 tests/unit/test_prompts.py
 """
 
 import ast
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
-RESEARCH_PY = REPO / "agent-svc" / "agent" / "research.py"
+REPO = Path(__file__).resolve().parent.parent.parent
+RESEARCH_PY = REPO / "agent-svc" / "agent" / "research" / "prompts.py"
 
 
 def extract_prompt(name: str) -> str:
