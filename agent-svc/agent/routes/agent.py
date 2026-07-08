@@ -144,6 +144,7 @@ async def _handle_agent_streaming(
                 max_searches_per_request=max_searches,
                 include_images=body.include_images,
                 citation_style=body.citation_style,
+                search_type=body.search_type,
             ),
             media_type="text/event-stream",
             headers=headers,
@@ -222,6 +223,7 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
             force_fresh=body.force_fresh,
             user_id=user_id,
             research_memory=request.app.state.research_memory,
+            search_type=body.search_type,
         )
     )
 

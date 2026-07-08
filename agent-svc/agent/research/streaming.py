@@ -80,6 +80,7 @@ async def stream_research_live(
     max_searches_per_request: int,
     include_images: bool,
     citation_style: CitationStyle,
+    search_type: str = "deep",
 ) -> Any:
     """Orchestrate full research SSE pipeline for cache-miss or force-fresh.
 
@@ -99,6 +100,7 @@ async def stream_research_live(
         max_searches_per_request=max_searches_per_request,
         include_images=include_images,
         citation_style=citation_style,
+        search_type=search_type,
     ):
         if event["type"] == "sources_pending":
             yield f"data: {json.dumps({'type': 'sources_pending', 'sources': event['sources']})}\n\n"
