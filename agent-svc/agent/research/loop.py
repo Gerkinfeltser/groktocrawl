@@ -39,6 +39,7 @@ async def run_research(
     max_searches_per_request: int = 5,
     include_images: bool = False,
     citation_style: Any = None,
+    search_type: str = "deep",
 ) -> dict:
     """Execute the research loop: plan → search → scrape → think → answer.
 
@@ -64,12 +65,18 @@ async def run_research(
 
     try:
         pass_count = 0
-        max_passes = 1  # May increase to 2 if gaps are detected
+        max_passes = 2 if search_type == "deep" else 1
 
         # Phase 0: Query Intelligence — analyze prompt, generate research plan (once)
         research_plan = await _generate_research_plan(prompt, llm)
         queries = research_plan["focused_queries"]
         strategy = research_plan["research_strategy"]
+
+        # search_type user preference overrides auto-classification
+        if search_type == "deep":
+            strategy = "deep"
+        elif search_type == "focused":
+            strategy = "focused"
 
         all_source_details: list[dict] = []
         combined_context = ""
@@ -150,7 +157,7 @@ async def run_research(
 
             # ── Gap detection after pass 1 ─────────────────────────
             if pass_count == 1:
-                gap_topics = await _detect_gaps(combined_context, llm)
+                gap_topics = await _detect_gaps(combined_context, llm, original_query=prompt)
                 if not gap_topics:
                     break  # Coverage is adequate, done
                 max_passes = 2  # Enable second pass
@@ -179,6 +186,7 @@ async def run_research_stream(
     max_searches_per_request: int = 5,
     include_images: bool = False,
     citation_style: Any = None,
+    search_type: str = "deep",
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Streaming version of run_research. Yields SSE-suitable dicts.
 
@@ -224,8 +232,14 @@ async def run_research_stream(
             "reasoning": reasoning,
         }
 
+        # search_type user preference overrides auto-classification
+        if search_type == "deep":
+            strategy = "deep"
+        elif search_type == "focused":
+            strategy = "focused"
+
         pass_count = 0
-        max_passes = 1  # May increase to 2 if gaps are detected
+        max_passes = 2 if search_type == "deep" else 1
         all_source_details: list[dict] = []
         combined_context = ""
         gap_topics: list[str] = []
@@ -357,12 +371,12 @@ async def run_research_stream(
 
                 # ── Gap detection after pass 1 ──────────────────────
                 if pass_count == 1:
-                    gap_topics = await _detect_gaps(combined_context, llm)
+                    gap_topics = await _detect_gaps(combined_context, llm, original_query=prompt)
                     if not gap_topics:
                         break  # Coverage is adequate, done
                     max_passes = 2  # Enable second pass
-                    continue
-            else:
+                    if pass_count == 1:
+                        continue
                 # No schema — stream tokens from the LLM
                 yield {
                     "type": "sources",
@@ -386,12 +400,12 @@ async def run_research_stream(
 
                 # ── Gap detection after pass 1 ──────────────────────
                 if pass_count == 1:
-                    gap_topics = await _detect_gaps(combined_context, llm)
+                    gap_topics = await _detect_gaps(combined_context, llm, original_query=prompt)
                     if not gap_topics:
                         break  # Coverage is adequate, done
                     max_passes = 2  # Enable second pass
-                    continue
-
+                    if pass_count == 1:
+                        continue
         # ── Final done event after all passes ───────────────────────
         source_list = [s["url"] for s in all_source_details]
         elapsed = int((time.monotonic() - start) * 1000)

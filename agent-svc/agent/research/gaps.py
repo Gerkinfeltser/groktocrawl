@@ -8,12 +8,15 @@ from ..llm import LLMClient
 logger = logging.getLogger(__name__)
 
 
-async def _detect_gaps(combined_context: str, llm: LLMClient) -> list[str]:
+async def _detect_gaps(
+    combined_context: str,
+    llm: LLMClient,
+    original_query: str = "",
+) -> list[str]:
     """Check if the research context has coverage gaps.
 
-    Uses an LLM call to analyze the scraped context for gap signals:
-    topics that are mentioned as missing, not covered, or insufficiently
-    documented in the gathered sources.
+    Uses an LLM call to analyze the scraped context for topic areas
+    that are not adequately covered relative to the original research query.
 
     Returns a list of topic strings (max 5) for missing areas, or an
     empty list if coverage is adequate.
@@ -21,12 +24,14 @@ async def _detect_gaps(combined_context: str, llm: LLMClient) -> list[str]:
     if not combined_context:
         return []
 
+    query_context = f'Original research query: "{original_query}"\n\n' if original_query else ""
     gap_check_prompt = (
-        "Analyze the following research context and identify specific topics "
-        "that are mentioned as missing, not covered, or insufficiently "
-        "documented. Return a JSON array of topic strings (max 5). "
-        "Return [] if coverage is adequate.\n\n"
-        f"Context:\n{combined_context[:4000]}"
+        f"{query_context}Analyze the following research context and identify specific topics, "
+        "angles, or aspects of the original query that are NOT adequately covered "
+        "by the gathered sources. Focus on what's missing or thin, not what's present. "
+        "Return a JSON array of topic strings (max 5) that would make good follow-up search queries. "
+        "Return [] if you're satisfied with coverage.\n\n"
+        f"Context:\n{combined_context[:12000]}"
     )
     try:
         result = await llm.generate(

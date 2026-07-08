@@ -84,6 +84,7 @@ async def _process_agent_async(
     force_fresh: bool = False,
     user_id: str | None = None,
     research_memory: Any = None,
+    search_type: str = "deep",
 ) -> None:
     settings = _get_worker_settings()
     redis_url = (
@@ -191,6 +192,7 @@ async def _process_agent_async(
             requested_model=requested_model,
             include_images=include_images,
             citation_style=cs,
+            search_type=search_type,
         )
         # Apply citation style to transform bare [N] markers to [N](url)
         # for compact style, or leave them unchanged for inline style.
