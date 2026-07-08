@@ -21,7 +21,7 @@ async def run_deep_search(
     searxng_url: str = "http://searxng:8080",
     llm_base_url: str = "https://api.openai.com/v1",
     llm_api_key: str = "",
-    llm_model: str = "gpt-4o-mini",
+    llm_model: str | None = None,
 ) -> dict:
     """Multi-pass search with LLM gap analysis and follow-up queries.
 
@@ -33,6 +33,8 @@ async def run_deep_search(
     5. Merges all results, URL-dedup (first occurrence wins)
     6. Returns SearchResult list + query_variations
     """
+    if llm_model is None:
+        raise ValueError("llm_model is required — set via LLM_MODEL env var")
     searxng = SearXNGClient(searxng_url)
     llm = LLMClient(llm_base_url, llm_api_key, llm_model)
 
@@ -143,7 +145,7 @@ async def run_rich_search(
     scraper_url: str = "http://scraper-svc:8001",
     llm_base_url: str = "https://api.openai.com/v1",
     llm_api_key: str = "",
-    llm_model: str = "gpt-4o-mini",
+    llm_model: str | None = None,
 ) -> dict[str, Any] | None:
     """Enrich search results with scraped content and optional structured extraction.
 
@@ -151,6 +153,8 @@ async def run_rich_search(
     or None if no results could be enriched.
     """
     start = time.monotonic()
+    if llm_model is None:
+        raise ValueError("llm_model is required — set via LLM_MODEL env var")
     scraper = ScraperClient(scraper_url)
     llm = LLMClient(llm_base_url, llm_api_key, llm_model)
 
@@ -283,7 +287,7 @@ async def run_search_stream(
     semantic_url: str = "http://semantic-svc:8003",
     llm_base_url: str = "https://api.openai.com/v1",
     llm_api_key: str = "",
-    llm_model: str = "gpt-4o-mini",
+    llm_model: str | None = None,
     max_searches_per_request: int = 5,
 ):
     """Streaming version of /v2/search. Yields SSE-suitable dicts.
@@ -299,6 +303,8 @@ async def run_search_stream(
       {"type": "error", "content": "..."}
     """
     start = time.monotonic()
+    if llm_model is None:
+        raise ValueError("llm_model is required — set via LLM_MODEL env var")
 
     searxng = SearXNGClient(searxng_url, max_searches=max_searches_per_request)
     scraper = ScraperClient(scraper_url)

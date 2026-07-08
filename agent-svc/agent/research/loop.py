@@ -34,7 +34,7 @@ async def run_research(
     scraper_url: str = "http://scraper-svc:8001",
     llm_base_url: str = "https://api.openai.com/v1",
     llm_api_key: str = "",
-    llm_model: str = "gpt-4o-mini",
+    llm_model: str | None = None,
     requested_model: str | None = None,
     max_searches_per_request: int = 5,
     include_images: bool = False,
@@ -51,8 +51,12 @@ async def run_research(
     and this is pass 1, a second pass searches the missing topics and re-synthesizes
     with the combined context. Capped at 2 passes.
     """
+    if llm_model is None:
+        raise ValueError("llm_model is required — set via LLM_MODEL env var")
     searxng = SearXNGClient(searxng_url, max_searches=max_searches_per_request)
     scraper = ScraperClient(scraper_url)
+    if llm_model is None:
+        raise ValueError("llm_model is required — set via LLM_MODEL env var")
     effective_model = (
         requested_model
         if requested_model and requested_model != "default"
@@ -181,7 +185,7 @@ async def run_research_stream(
     scraper_url: str = "http://scraper-svc:8001",
     llm_base_url: str = "https://api.openai.com/v1",
     llm_api_key: str = "",
-    llm_model: str = "gpt-4o-mini",
+    llm_model: str | None = None,
     requested_model: str | None = None,
     max_searches_per_request: int = 5,
     include_images: bool = False,
@@ -203,9 +207,13 @@ async def run_research_stream(
       {"type": "error", "content": "..."} — error
     """
     start = time.monotonic()
+    if llm_model is None:
+        raise ValueError("llm_model is required — set via LLM_MODEL env var")
 
     searxng = SearXNGClient(searxng_url, max_searches=max_searches_per_request)
     scraper = ScraperClient(scraper_url)
+    if llm_model is None:
+        raise ValueError("llm_model is required — set via LLM_MODEL env var")
     effective_model = (
         requested_model
         if requested_model and requested_model != "default"
@@ -441,9 +449,11 @@ async def run_extract(
     scraper_url: str = "http://scraper-svc:8001",
     llm_base_url: str = "https://api.openai.com/v1",
     llm_api_key: str = "",
-    llm_model: str = "gpt-4o-mini",
+    llm_model: str | None = None,
 ) -> dict:
     """Extract structured data from given URLs. No search step."""
+    if llm_model is None:
+        raise ValueError("llm_model is required — set via LLM_MODEL env var")
     scraper = ScraperClient(scraper_url)
     llm = LLMClient(llm_base_url, llm_api_key, llm_model)
 
@@ -488,7 +498,7 @@ async def run_answer(
     semantic_url: str = "http://semantic-svc:8003",
     llm_base_url: str = "https://api.openai.com/v1",
     llm_api_key: str = "",
-    llm_model: str = "gpt-4o-mini",
+    llm_model: str | None = None,
     requested_model: str | None = None,
     max_searches_per_request: int = 5,
     output_schema: dict | None = None,
@@ -509,6 +519,8 @@ async def run_answer(
 
     searxng = SearXNGClient(searxng_url, max_searches=max_searches_per_request)
     scraper = ScraperClient(scraper_url)
+    if llm_model is None:
+        raise ValueError("llm_model is required — set via LLM_MODEL env var")
     effective_model = (
         requested_model
         if requested_model and requested_model != "default"
@@ -602,7 +614,7 @@ async def run_answer_stream(
     semantic_url: str = "http://semantic-svc:8003",
     llm_base_url: str = "https://api.openai.com/v1",
     llm_api_key: str = "",
-    llm_model: str = "gpt-4o-mini",
+    llm_model: str | None = None,
     requested_model: str | None = None,
     max_searches_per_request: int = 5,
     output_schema: dict | None = None,
@@ -626,6 +638,8 @@ async def run_answer_stream(
 
     searxng = SearXNGClient(searxng_url, max_searches=max_searches_per_request)
     scraper = ScraperClient(scraper_url)
+    if llm_model is None:
+        raise ValueError("llm_model is required — set via LLM_MODEL env var")
     effective_model = (
         requested_model
         if requested_model and requested_model != "default"

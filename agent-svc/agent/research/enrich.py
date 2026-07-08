@@ -46,7 +46,7 @@ async def run_enrich_pipeline(
     scraper_url: str = "http://scraper-svc:8001",
     llm_base_url: str = "https://api.openai.com/v1",
     llm_api_key: str = "",
-    llm_model: str = "gpt-4o-mini",
+    llm_model: str | None = None,
 ) -> list[dict]:
     """Enrich a list of entities with web-sourced structured data.
 
@@ -69,6 +69,9 @@ async def run_enrich_pipeline(
         (dict of field_name → {value, source}).
     """
     search_limit = 3 if effort == "low" else 5
+    if llm_model is None:
+        raise ValueError("llm_model is required — set via LLM_MODEL env var")
+
     semaphore = asyncio.Semaphore(3)
 
     async def enrich_one(item: dict) -> dict:
