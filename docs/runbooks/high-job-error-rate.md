@@ -25,7 +25,7 @@ Critical
    ```bash
    curl -s http://localhost:8080/health
    ```
-   Look for any dependency in a non-ok state (valkey, searxng, scraper, browser, portal).
+   Look for any dependency in a non-ok state (valkey, slopsearx, scraper, browser, portal).
 5. **Pause job processing** if needed by setting the `FEATURE_AGENT_ENABLED` toggle to `false` and restarting agent-svc.
 
 ## Investigation Steps
@@ -34,7 +34,7 @@ Critical
    ```bash
    docker compose logs agent-svc --tail=200 | grep -i "error\|failed\|exception"
    ```
-2. **Correlate with dependency health** — check if upstream services (scraper-svc, search-svc, llm-svc) are healthy:
+2. **Correlate with dependency health** — check if upstream services (scraper-svc, llm-svc) are healthy:
    ```bash
    docker compose ps
    curl -s http://localhost:8001/health  # scraper-svc
