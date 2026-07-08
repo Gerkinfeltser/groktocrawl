@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-API_FILE = REPO_ROOT / "agent-svc" / "agent" / "api.py"
+API_DIR = REPO_ROOT / "agent-svc" / "agent" / "routes"
 CLI_FILE = REPO_ROOT / "groktocrawl"
 
 # Endpoints that don't need CLI coverage.
@@ -70,20 +70,23 @@ PATH_TO_CLI_COMMAND: dict[str, str] = {
 
 
 def extract_api_endpoints() -> list[str]:
-    """Return all /v2/... paths found in api.py route decorators."""
-    if not API_FILE.is_file():
-        print(f"ERROR: API file not found: {API_FILE}")
+    """Return all /v2/... paths found in route decorators across routes/."""
+    if not API_DIR.is_dir():
+        print(f"ERROR: Routes directory not found: {API_DIR}")
         sys.exit(1)
 
-    text = API_FILE.read_text()
     paths: list[str] = []
-    for m in re.finditer(
-        r'@router\.(?:get|post|put|patch|delete)\(\s*"([^"]+)"',
-        text,
-    ):
-        path = m.group(1)
-        if path.startswith("/v2/"):
-            paths.append(path)
+    for py_file in sorted(API_DIR.glob("*.py")):
+        if py_file.name.startswith("_"):
+            continue  # Skip __init__.py, _helpers.py
+        text = py_file.read_text()
+        for m in re.finditer(
+            r'@router\.(?:get|post|put|patch|delete)\s*\(\s*"([^"]+)"',
+            text,
+        ):
+            path = m.group(1)
+            if path.startswith("/v2/"):
+                paths.append(path)
     return sorted(set(paths))
 
 
