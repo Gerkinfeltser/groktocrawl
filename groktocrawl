@@ -743,8 +743,9 @@ class Client:
         urls: list[str] | None = None,
         schema: dict | None = None,
         include_images: bool = False,
+        search_type: str = "deep",
     ) -> dict[str, Any]:
-        data: dict[str, Any] = {"prompt": prompt}
+        data: dict[str, Any] = {"prompt": prompt, "search_type": search_type}
         if urls:
             data["urls"] = urls
         if schema:
@@ -758,12 +759,13 @@ class Client:
         prompt: str,
         urls: list[str] | None = None,
         include_images: bool = False,
+        search_type: str = "deep",
     ) -> dict[str, Any]:
         """Create an agent research job with SSE streaming.
 
         Returns a dict with ``_stream`` key containing the raw streaming response.
         """
-        data: dict[str, Any] = {"prompt": prompt, "stream": True}
+        data: dict[str, Any] = {"prompt": prompt, "stream": True, "search_type": search_type}
         if urls:
             data["urls"] = urls
         if include_images:
@@ -1357,6 +1359,7 @@ def cmd_agent(client: Client, args: argparse.Namespace) -> None:
 
     try:
         include_images = getattr(args, "include_images", False)
+        search_type = getattr(args, "search_type", "deep")
         if args.sync:
             # Non-streaming path: create job and poll
             result = client.create_agent(
@@ -1364,6 +1367,7 @@ def cmd_agent(client: Client, args: argparse.Namespace) -> None:
                 urls=args.urls,
                 schema=None,
                 include_images=include_images,
+                search_type=search_type,
             )
         else:
             # Streaming path (default)
@@ -1371,6 +1375,7 @@ def cmd_agent(client: Client, args: argparse.Namespace) -> None:
                 prompt=args.prompt,
                 urls=args.urls,
                 include_images=include_images,
+                search_type=search_type,
             )
     except ApiError as e:
         print(f"\nError: {e}", flush=True)
@@ -2603,6 +2608,12 @@ def make_parser() -> argparse.ArgumentParser:
         "--include-images",
         action="store_true",
         help="Include images in research (collects images from scraped sources)",
+    )
+    p_agent.add_argument(
+        "--search-type",
+        choices=["deep", "focused"],
+        default="deep",
+        help="Research depth: deep (multi-query, multi-pass, default) or focused (single-query, single-pass)",
     )
 
     p_download = subparsers.add_parser(

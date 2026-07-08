@@ -486,6 +486,10 @@ class AgentRequest(BaseModel):
         default=False,
         description="When True, bypass the research memory cache and run fresh research pipeline",
     )
+    search_type: str = Field(
+        default="deep",
+        description="Research depth: 'deep' (multi-query, multi-pass, default) or 'focused' (single-query, single-pass)",
+    )
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -510,6 +514,17 @@ class AgentRequest(BaseModel):
         if not isinstance(value, dict):
             raise ValueError(
                 f"schema must be a JSON Schema object (dict), got {type(value).__name__}"
+            )
+        return value
+
+    @field_validator("search_type")
+    @classmethod
+    def validate_search_type(cls, value: str) -> str:
+        """Reject invalid search_type values."""
+        allowed = {"deep", "focused"}
+        if value not in allowed:
+            raise ValueError(
+                f"search_type must be one of {allowed}, got '{value}'"
             )
         return value
 

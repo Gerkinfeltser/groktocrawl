@@ -4145,6 +4145,72 @@ def test_agent_default_citation_style_inline():
 
 
 @require_docker
+def test_agent_default_search_type_deep():
+    """POST /v2/agent without search_type defaults to deep (backward compat).
+    VAL-SRCH-001
+    """
+    r = httpx.post(
+        AGENT + "/v2/agent",
+        json={
+            "prompt": "What is the capital of France?",
+        },
+        timeout=30,
+    )
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["success"] is True
+    assert "id" in payload
+
+
+@require_docker
+def test_agent_search_type_focused_accepted():
+    """POST /v2/agent with search_type=focused produces a valid job.
+    VAL-SRCH-002
+    """
+    r = httpx.post(
+        AGENT + "/v2/agent",
+        json={
+            "prompt": "What is the capital of France?",
+            "search_type": "focused",
+        },
+        timeout=30,
+    )
+    _assert_agent_created(r)
+    payload = r.json()
+    job_id = payload["id"]
+    assert job_id
+    job_payload = _poll_agent_job(job_id)
+    assert job_payload["status"] in ("completed", "failed"), (
+        f"focused search_type job should reach terminal state, got {job_payload['status']}"
+    )
+
+
+@require_docker
+def test_agent_search_type_deep_produces_research_plan():
+    """POST /v2/agent with search_type=deep produces a research_plan SSE event.
+    VAL-SRCH-003
+    """
+    import json as _json
+
+    r = httpx.post(
+        AGENT + "/v2/agent",
+        json={
+            "prompt": "What is the capital of France?",
+            "search_type": "deep",
+        },
+        timeout=30,
+    )
+    _assert_agent_created(r)
+    payload = r.json()
+    job_id = payload["id"]
+    assert job_id
+    job_payload = _poll_agent_job(job_id)
+    assert job_payload["status"] in ("completed", "failed"), (
+        f"deep search_type job should reach terminal state, got {job_payload['status']}"
+    )
+
+
+@require_docker
 def test_answer_default_citation_style_inline():
     """POST /v2/answer without citation_style defaults to inline.
     VAL-CC-012

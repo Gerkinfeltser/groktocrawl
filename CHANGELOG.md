@@ -75,6 +75,21 @@ All notable changes to GroktoCrawl are documented in this file.
 
 ## [Unreleased]
 
+### Features
+
+* agent: `--search-type` flag for research depth control — deep (multi-query, multi-pass, default) or focused (single-query, single-pass) ([#418](https://github.com/groktopus/groktocrawl/issues/418))
+* agent: default research depth changed from auto-classified to `deep` — thorough multi-pass research is now the default for `groktocrawl agent`
+
+### Models & API
+
+* `AgentRequest.search_type`: `str` (default `"deep"`)
+* `search_type` override: user preference now overrides auto-classification from Query Intelligence
+
+### Fixes
+
+* Gap detection: increased context window from 4000 to 12000 chars, improved prompt to detect implicit coverage gaps relative to the original query
+* Research memory cache: deep requests now bypass cache (focused cached results don't satisfy deep requests)
+
 ## [0.11.0](https://github.com/groktopus/groktocrawl/compare/v0.10.1...v0.11.0) (2026-06-29)
 
 > _The One That Sees_ — images across the entire stack: scrape, search, crawl, agent, and CLI.
