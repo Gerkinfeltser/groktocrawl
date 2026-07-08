@@ -225,18 +225,18 @@ async def run_research_stream(
         strategy = research_plan["research_strategy"]
         reasoning = research_plan.get("reasoning", "")
 
+        # search_type user preference overrides auto-classification
+        if search_type == "deep":
+            strategy = "deep"
+        elif search_type == "focused":
+            strategy = "focused"
+
         yield {
             "type": "research_plan",
             "strategy": strategy,
             "queries": queries,
             "reasoning": reasoning,
         }
-
-        # search_type user preference overrides auto-classification
-        if search_type == "deep":
-            strategy = "deep"
-        elif search_type == "focused":
-            strategy = "focused"
 
         pass_count = 0
         max_passes = 2 if search_type == "deep" else 1
