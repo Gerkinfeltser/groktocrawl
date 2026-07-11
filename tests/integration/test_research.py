@@ -191,6 +191,7 @@ class TestRunResearch:
             result = await run_research(
                 prompt="What is AI?",
                 urls=["https://example.com/ai"],
+                llm_model="test-model",
             )
 
         assert result["result"] == "Here is the synthesized answer."
@@ -219,7 +220,7 @@ class TestRunResearch:
             patch("agent.research.loop.ScraperClient", return_value=scraper),
             patch("agent.research.loop.LLMClient", return_value=llm),
         ):
-            result = await run_research(prompt="Tell me about AI")
+            result = await run_research(prompt="Tell me about AI", llm_model="test-model")
 
         assert result["result"] == "Answer from search."
         searxng.search.assert_called_once()
@@ -243,6 +244,7 @@ class TestRunResearch:
             result = await run_research(
                 prompt="Anything?",
                 urls=["https://example.com/missing"],
+                llm_model="test-model",
             )
 
         assert "unable to find or scrape" in result["result"].lower()
@@ -276,6 +278,7 @@ class TestRunResearch:
                 prompt="Extract name",
                 urls=["https://example.com"],
                 schema=schema,
+                llm_model="test-model",
             )
 
         assert result["result"] == '{"name": "AI"}'
@@ -337,6 +340,7 @@ class TestRunResearch:
             result = await run_research(
                 prompt="test",
                 urls=["https://x.com", "https://y.com"],
+                llm_model="test-model",
             )
 
         assert isinstance(result["sources"], list)
@@ -393,7 +397,9 @@ class TestRunAnswer:
             patch("agent.research.loop.ScraperClient", return_value=scraper),
             patch("agent.research.loop.LLMClient", return_value=llm),
         ):
-            result = await run_answer(query="What is the answer?", num_sources=1)
+            result = await run_answer(
+                query="What is the answer?", num_sources=1, llm_model="test-model"
+            )
 
         assert "answer" in result
         assert "Based on" in result["answer"]
@@ -433,7 +439,7 @@ class TestRunAnswer:
             patch("agent.research.loop.ScraperClient", return_value=scraper),
             patch("agent.research.loop.LLMClient", return_value=llm),
         ):
-            result = await run_answer(query="Anything?")
+            result = await run_answer(query="Anything?", llm_model="test-model")
 
         assert "unable to find or scrape" in result["answer"].lower()
         assert result["sources"] == []
@@ -481,6 +487,7 @@ class TestRunExtract:
         ):
             result = await run_extract(
                 urls=["https://example.com"],
+                llm_model="test-model",
             )
 
         assert result["result"] == '{"name": "Extracted Data"}'
@@ -506,6 +513,7 @@ class TestRunExtract:
             result = await run_extract(
                 urls=["https://example.com"],
                 prompt="Extract the company name and revenue",
+                llm_model="test-model",
             )
 
         assert result["result"] == "Extracted info"
@@ -533,6 +541,7 @@ class TestRunExtract:
             result = await run_extract(
                 urls=["https://example.com"],
                 schema=schema,
+                llm_model="test-model",
             )
 
         assert result["result"] == '{"name": "test"}'
@@ -554,6 +563,7 @@ class TestRunExtract:
         ):
             result = await run_extract(
                 urls=["https://example.com/missing"],
+                llm_model="test-model",
             )
 
         assert "No content could be extracted" in result["result"]
@@ -613,7 +623,9 @@ class TestRunResearchStream:
             patch("agent.research.loop.LLMClient", return_value=llm),
         ):
             events = []
-            async for event in run_research_stream(prompt="What is AI?"):
+            async for event in run_research_stream(
+                prompt="What is AI?", llm_model="test-model"
+            ):
                 events.append(event)
 
         # Verify event sequence — Phase 0 planning → Phase 1 discovery → Phase 2 synthesis
@@ -686,7 +698,7 @@ class TestRunResearchStream:
         ):
             events = []
             async for event in run_research_stream(
-                prompt="Extract data", schema=schema
+                prompt="Extract data", schema=schema, llm_model="test-model"
             ):
                 events.append(event)
 
@@ -741,7 +753,9 @@ class TestRunResearchStream:
             patch("agent.research.loop.LLMClient", return_value=llm),
         ):
             events = []
-            async for event in run_research_stream(prompt="Anything?"):
+            async for event in run_research_stream(
+                prompt="Anything?", llm_model="test-model"
+            ):
                 events.append(event)
 
         types = [e["type"] for e in events]
@@ -796,7 +810,9 @@ class TestRunResearchStream:
             patch("agent.research.loop.LLMClient", return_value=llm),
         ):
             events = []
-            async for event in run_research_stream(prompt="Test"):
+            async for event in run_research_stream(
+                prompt="Test", llm_model="test-model"
+            ):
                 events.append(event)
 
         error_events = [e for e in events if e["type"] == "error"]
@@ -860,7 +876,7 @@ class TestRunAnswerStream:
         ):
             events = []
             async for event in run_answer_stream(
-                query="What is the answer?", num_sources=1
+                query="What is the answer?", num_sources=1, llm_model="test-model"
             ):
                 events.append(event)
 
@@ -899,7 +915,9 @@ class TestRunAnswerStream:
             patch("agent.research.loop.LLMClient", return_value=llm),
         ):
             events = []
-            async for event in run_answer_stream(query="Anything?"):
+            async for event in run_answer_stream(
+                query="Anything?", llm_model="test-model"
+            ):
                 events.append(event)
 
         done_event = next(e for e in events if e["type"] == "done")
@@ -966,7 +984,7 @@ class TestRunAnswerStream:
         ):
             events = []
             async for event in run_answer_stream(
-                query="Test with citations", num_sources=2
+                query="Test with citations", num_sources=2, llm_model="test-model"
             ):
                 events.append(event)
 
@@ -1022,7 +1040,7 @@ class TestRunAnswerStream:
         ):
             events = []
             async for event in run_answer_stream(
-                query="Test", retrieval_mode="keyword"
+                query="Test", retrieval_mode="keyword", llm_model="test-model"
             ):
                 events.append(event)
 
@@ -1074,7 +1092,7 @@ class TestRunAnswerStream:
         ):
             events = []
             async for event in run_answer_stream(
-                query="Test", retrieval_mode="semantic"
+                query="Test", retrieval_mode="semantic", llm_model="test-model"
             ):
                 events.append(event)
 
@@ -1125,6 +1143,7 @@ class TestRunRichSearch:
                 search_results=search_results,
                 query="test query",
                 limit=2,
+                llm_model="test-model",
             )
 
         assert result is not None
@@ -1174,6 +1193,7 @@ class TestRunRichSearch:
                 query="test",
                 limit=1,
                 output_schema=schema,
+                llm_model="test-model",
             )
 
         assert result is not None
@@ -1223,6 +1243,7 @@ class TestRunRichSearch:
                 query="test",
                 limit=1,
                 output_schema=schema,
+                llm_model="test-model",
             )
 
         assert result is not None
@@ -1248,6 +1269,7 @@ class TestRunRichSearch:
             result = await run_rich_search(
                 search_results=[],
                 query="test",
+                llm_model="test-model",
             )
 
         assert result is None
@@ -1293,6 +1315,7 @@ class TestRunRichSearch:
                 query="test",
                 limit=1,
                 system_prompt=custom_prompt,
+                llm_model="test-model",
             )
 
         assert result is not None

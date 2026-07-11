@@ -23,16 +23,16 @@ class TestLLMClientInit:
     def test_strips_trailing_slash(self):
         from agent.llm import LLMClient
 
-        client = LLMClient(base_url="http://example.com/v1/")
+        client = LLMClient(
+            base_url="http://example.com/v1/", model="test-model"
+        )
         assert client.base_url == "http://example.com/v1"
 
-    def test_defaults(self):
+    def test_constructing_without_model_raises_value_error(self):
         from agent.llm import LLMClient
 
-        client = LLMClient()
-        assert client.base_url == "https://api.openai.com/v1"
-        assert client.api_key == ""
-        assert client.model == "gpt-4o-mini"
+        with pytest.raises(ValueError, match="model is required"):
+            LLMClient()
 
 
 def _make_response(status_code=200, json_data=None, text=""):
@@ -160,7 +160,9 @@ class TestLLMClientGenerate:
     async def test_no_auth_when_key_empty(self):
         from agent.llm import LLMClient
 
-        no_key = LLMClient(base_url="http://test/v1", api_key="")
+        no_key = LLMClient(
+            base_url="http://test/v1", api_key="", model="test-model"
+        )
         with patch.object(
             no_key._client,
             "post",
