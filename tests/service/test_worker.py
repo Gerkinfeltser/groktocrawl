@@ -8,6 +8,61 @@ import pytest
 class TestProcessAgentAsync:
     """Test _process_agent_async — the main agent job handler."""
 
+    async def _run_worker_with(
+        self, result: dict, *, job_id: str = "test-job-helper"
+    ) -> dict:
+        """Run _process_agent_async with a canned *result* from run_research.
+
+        Returns mocks keyed by name: ``store``, ``research_memory``,
+        ``deliver_webhook``.
+        """
+        from agent.worker import _process_agent_async
+
+        mock_store = MagicMock()
+        mock_run_research = AsyncMock(return_value=result)
+        mock_research_memory = MagicMock()
+        mock_research_memory.query = AsyncMock(return_value={"hit": False})
+        mock_research_memory.store = AsyncMock(return_value="mem-helper")
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store),
+            patch("agent.worker.run_research", mock_run_research),
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey",
+                    valkey_port=6379,
+                    valkey_db=0,
+                    crawl_max_duration_seconds=1800,
+                    crawl_idle_timeout_seconds=300,
+                ),
+            ),
+        ):
+            await _process_agent_async(
+                job_id=job_id,
+                prompt="Test prompt",
+                urls=None,
+                schema_=None,
+                llm_base_url="http://llm:8000",
+                llm_api_key="test-key",
+                llm_model="gpt-4o-mini",
+                searxng_url="http://searxng:8080",
+                scraper_url="http://scraper:8001",
+                research_memory=mock_research_memory,
+            )
+
+        return {
+            "store": mock_store,
+            "research_memory": mock_research_memory,
+            "deliver_webhook": mock_deliver_webhook,
+        }
+
     @pytest.mark.asyncio
     async def test_success(self):
         """Verify success path: run_research returns result, job completed,
@@ -108,6 +163,38 @@ class TestProcessAgentAsync:
         call_args = mock_deliver_webhook.call_args[0]
         assert call_args[1] == "failed"
         assert "error" in call_args[3]
+
+    @pytest.mark.asyncio
+    async def test_llm_error_not_cached(self):
+        """LLM error results must not pollute the research memory cache (#432)."""
+        mocks = await self._run_worker_with(
+            {
+                "result": "Error: LLM call failed: Connection error",
+                "sources": ["https://a.com"],
+                "source_details": [
+                    {"url": "https://a.com", "title": "A", "source": "..."}
+                ],
+            },
+            job_id="test-job-llm-error",
+        )
+        mocks["research_memory"].store.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_success_result_cached(self):
+        """Valid results are stored in research memory cache (#432)."""
+        mocks = await self._run_worker_with(
+            {
+                "result": "This is a valid research result.",
+                "sources": ["https://a.com"],
+                "source_details": [
+                    {"url": "https://a.com", "title": "A", "source": "..."}
+                ],
+            },
+            job_id="test-job-success-cache",
+        )
+        mocks["research_memory"].store.assert_called_once()
+        call_args = mocks["research_memory"].store.call_args
+        assert call_args.kwargs["artifact"] == "This is a valid research result."
 
     @pytest.mark.asyncio
     async def test_default_valkey_url(self):

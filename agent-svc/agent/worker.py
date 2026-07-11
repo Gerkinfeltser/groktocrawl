@@ -229,31 +229,45 @@ async def _process_agent_async(
             store_sources = rich_source_details or result.get("sources", [])
             if not store_sources:
                 store_sources = result.get("sources", [])
-            metadata: dict[str, Any] = {
-                "model": llm_model,
-                "citation_style": cs.value,
-            }
-            if requested_model and requested_model != "default":
-                metadata["requested_model"] = requested_model
-            if hasattr(result, "get"):
-                metadata["latency_ms"] = result.get("latency_ms", 0)
 
-            memory_user_id = user_id if memory_scope == "per_user" else None
-            artifact_id = await research_memory.store(
-                prompt=prompt,
-                artifact=answer,
-                sources=store_sources,
-                model=llm_model,
-                user_id=memory_user_id,
-                metadata=metadata,
-            )
-            logger.info(
-                "Stored research memory artifact %s for agent %s (scope=%s)",
-                artifact_id,
-                job_id,
-                memory_scope,
-            )
-            result["research_memory_id"] = artifact_id
+            # ── Cache-admission guard ──────────────────────────
+            # Skip store for empty answers, handled LLM errors,
+            # or sourceless results (#432).
+            if answer and not answer.startswith("Error:") and store_sources:
+                metadata: dict[str, Any] = {
+                    "model": llm_model,
+                    "citation_style": cs.value,
+                }
+                if requested_model and requested_model != "default":
+                    metadata["requested_model"] = requested_model
+                if hasattr(result, "get"):
+                    metadata["latency_ms"] = result.get("latency_ms", 0)
+
+                memory_user_id = user_id if memory_scope == "per_user" else None
+                artifact_id = await research_memory.store(
+                    prompt=prompt,
+                    artifact=answer,
+                    sources=store_sources,
+                    model=llm_model,
+                    user_id=memory_user_id,
+                    metadata=metadata,
+                )
+                logger.info(
+                    "Stored research memory artifact %s for agent %s (scope=%s)",
+                    artifact_id,
+                    job_id,
+                    memory_scope,
+                )
+                result["research_memory_id"] = artifact_id
+            else:
+                logger.info(
+                    "Skipping research memory store for agent %s "
+                    "(empty=%s, error=%s, no_sources=%s)",
+                    job_id,
+                    not answer,
+                    answer.startswith("Error:") if answer else False,
+                    not store_sources,
+                )
         except Exception:
             logger.warning(
                 "Failed to store research memory for agent %s (service may be down)",
