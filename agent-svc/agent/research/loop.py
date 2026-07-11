@@ -55,8 +55,6 @@ async def run_research(
         raise ValueError("llm_model is required — set via LLM_MODEL env var")
     searxng = SearXNGClient(searxng_url, max_searches=max_searches_per_request)
     scraper = ScraperClient(scraper_url)
-    if llm_model is None:
-        raise ValueError("llm_model is required — set via LLM_MODEL env var")
     effective_model = (
         requested_model
         if requested_model and requested_model != "default"
@@ -212,8 +210,6 @@ async def run_research_stream(
 
     searxng = SearXNGClient(searxng_url, max_searches=max_searches_per_request)
     scraper = ScraperClient(scraper_url)
-    if llm_model is None:
-        raise ValueError("llm_model is required — set via LLM_MODEL env var")
     effective_model = (
         requested_model
         if requested_model and requested_model != "default"
@@ -376,15 +372,7 @@ async def run_research_stream(
                     schema=schema,
                 )
                 _validate_json_if_schema(answer, schema)
-
-                # ── Gap detection after pass 1 ──────────────────────
-                if pass_count == 1:
-                    gap_topics = await _detect_gaps(combined_context, llm, original_query=prompt)
-                    if not gap_topics:
-                        break  # Coverage is adequate, done
-                    max_passes = 2  # Enable second pass
-                    if pass_count == 1:
-                        continue
+            else:
                 # No schema — stream tokens from the LLM
                 yield {
                     "type": "sources",
@@ -406,14 +394,15 @@ async def run_research_stream(
                     elif event["type"] == "done":
                         full_answer = event["full_content"]
 
-                # ── Gap detection after pass 1 ──────────────────────
-                if pass_count == 1:
-                    gap_topics = await _detect_gaps(combined_context, llm, original_query=prompt)
-                    if not gap_topics:
-                        break  # Coverage is adequate, done
-                    max_passes = 2  # Enable second pass
-                    if pass_count == 1:
-                        continue
+            # ── Gap detection after pass 1 ──────────────────────
+            if pass_count == 1:
+                gap_topics = await _detect_gaps(
+                    combined_context, llm, original_query=prompt
+                )
+                if not gap_topics:
+                    break  # Coverage is adequate, done
+                max_passes = 2  # Enable second pass
+                continue
         # ── Final done event after all passes ───────────────────────
         source_list = [s["url"] for s in all_source_details]
         elapsed = int((time.monotonic() - start) * 1000)

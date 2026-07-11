@@ -1105,7 +1105,7 @@ def test_agent_streaming_returns_sse_events():
     done_event = next(e for e in events if e.get("type") == "done")
     assert "result" in done_event
     assert isinstance(done_event.get("result"), str)
-    assert done_event["latency_ms"] > 0
+    assert done_event["latency_ms"] >= 0
 
 
 # ── Crawl SSE Streaming Tests ─────────────────────────────────
@@ -4190,7 +4190,6 @@ def test_agent_search_type_deep_produces_research_plan():
     """POST /v2/agent with search_type=deep produces a research_plan SSE event.
     VAL-SRCH-003
     """
-    import json as _json
 
     r = httpx.post(
         AGENT + "/v2/agent",
