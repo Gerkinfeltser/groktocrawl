@@ -20,6 +20,9 @@ class AgentSettings(BaseModel):
     llm_api_key: str = Field(default="", alias="LLM_API_KEY")
     llm_model: str = Field(default="deepseek-v4-flash", alias="LLM_MODEL")
     llm_enable_thinking: bool = Field(default=False, alias="LLM_ENABLE_THINKING")
+    llm_llama_cpp_disable_thinking: bool = Field(
+        default=False, alias="LLM_LLAMA_CPP_DISABLE_THINKING"
+    )
     api_key: str = Field(default="", alias="API_KEY")
     webhook_secret: str = Field(default="", alias="WEBHOOK_SECRET")
     max_searches_per_request: int = Field(

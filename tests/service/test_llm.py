@@ -8,6 +8,7 @@ import os
 from unittest.mock import MagicMock, patch
 
 import pytest
+from agent.settings import load_settings
 
 
 @pytest.fixture
@@ -206,27 +207,37 @@ class TestLLMClientGenerate:
             await llm.generate(system_prompt="x", user_prompt="y")
             body = mock_post.call_args[1]["json"]
             assert "enable_thinking" not in body
+            assert "chat_template_kwargs" not in body
 
     @pytest.mark.asyncio
     async def test_thinking_enabled_via_env(self):
         from agent.settings import load_settings as agent_load_settings
 
-        agent_load_settings.cache_clear()
-        with patch.dict(os.environ, {"LLM_ENABLE_THINKING": "true"}, clear=False):
+        try:
             agent_load_settings.cache_clear()
-            from agent.llm import LLMClient
+            with patch.dict(
+                os.environ, {"LLM_ENABLE_THINKING": "true"}, clear=False
+            ):
+                agent_load_settings.cache_clear()
+                from agent.llm import LLMClient
 
-            client = LLMClient(base_url="http://test/v1", api_key="k", model="ds")
-            with patch.object(
-                client._client,
-                "post",
-                return_value=_make_response(
-                    json_data={"choices": [{"message": {"content": "ok"}}]}
-                ),
-            ) as mock_post:
-                await client.generate(system_prompt="x", user_prompt="y")
-                body = mock_post.call_args[1]["json"]
-                assert body.get("enable_thinking") is True
+                client = LLMClient(
+                    base_url="http://test/v1", api_key="k", model="ds"
+                )
+                with patch.object(
+                    client._client,
+                    "post",
+                    return_value=_make_response(
+                        json_data={
+                            "choices": [{"message": {"content": "ok"}}]
+                        }
+                    ),
+                ) as mock_post:
+                    await client.generate(system_prompt="x", user_prompt="y")
+                    body = mock_post.call_args[1]["json"]
+                    assert body.get("enable_thinking") is True
+        finally:
+            agent_load_settings.cache_clear()
 
     @pytest.mark.asyncio
     async def test_close(self, llm):
@@ -353,6 +364,7 @@ class TestLLMClientGenerateStream:
             body = mock_client.stream.call_args[1]["json"]
             user_msg = body["messages"][1]["content"]
             assert "Some context here." in user_msg
+            assert "chat_template_kwargs" not in body
 
     @pytest.mark.asyncio
     async def test_schema_mode_delegates_to_generate(self, llm):
@@ -423,3 +435,74 @@ class TestLLMClientGenerateStream:
             assert tokens[0]["type"] == "token"
             assert tokens[0]["content"] == "normal"
             assert tokens[1]["type"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_llama_cpp_disable_thinking_generate():
+    """When LLM_LLAMA_CPP_DISABLE_THINKING=true, chat_template_kwargs is set (generate)."""
+    from agent.llm import LLMClient
+
+    load_settings.cache_clear()
+    try:
+        with patch.dict(
+            os.environ,
+            {"LLM_LLAMA_CPP_DISABLE_THINKING": "true"},
+            clear=False,
+        ):
+            load_settings.cache_clear()
+            client = LLMClient(
+                base_url="http://test/v1", api_key="k", model="test-model"
+            )
+            with patch.object(
+                client._client,
+                "post",
+                return_value=_make_response(
+                    json_data={"choices": [{"message": {"content": "ok"}}]}
+                ),
+            ) as mock_post:
+                await client.generate(system_prompt="x", user_prompt="y")
+                body = mock_post.call_args[1]["json"]
+                assert body.get("chat_template_kwargs") == {
+                    "enable_thinking": False
+                }
+    finally:
+        load_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_llama_cpp_disable_thinking_stream():
+    """When LLM_LLAMA_CPP_DISABLE_THINKING=true, chat_template_kwargs is set (stream)."""
+    from agent.llm import LLMClient
+
+    load_settings.cache_clear()
+    try:
+        with patch.dict(
+            os.environ,
+            {"LLM_LLAMA_CPP_DISABLE_THINKING": "true"},
+            clear=False,
+        ):
+            load_settings.cache_clear()
+            client = LLMClient(
+                base_url="http://test/v1", api_key="k", model="test-model"
+            )
+            mock_client_cls, mock_client = (
+                TestLLMClientGenerateStream._setup_stream_mock(
+                    [
+                        'data: {"choices":[{"delta":{"content":"ok"}}]}',
+                        "data: [DONE]",
+                    ]
+                )
+            )
+
+            with patch("httpx.AsyncClient", mock_client_cls):
+                async for _event in client.generate_stream(
+                    system_prompt="x", user_prompt="y"
+                ):
+                    pass
+
+                body = mock_client.stream.call_args[1]["json"]
+                assert body.get("chat_template_kwargs") == {
+                    "enable_thinking": False
+                }
+    finally:
+        load_settings.cache_clear()

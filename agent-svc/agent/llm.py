@@ -103,6 +103,11 @@ class LLMClient:
         if _llm_settings.llm_enable_thinking:
             body["enable_thinking"] = True
 
+        # Disable template-level reasoning for llama.cpp Qwen-family models
+        # that ignore enable_thinking:false on the top-level body.
+        if _llm_settings.llm_llama_cpp_disable_thinking:
+            body["chat_template_kwargs"] = {"enable_thinking": False}
+
         headers = {
             "Content-Type": "application/json",
         }
@@ -196,6 +201,11 @@ class LLMClient:
         _llm_settings = load_settings()
         if _llm_settings.llm_enable_thinking:
             body["enable_thinking"] = True
+
+        # Disable template-level reasoning for llama.cpp Qwen-family models
+        # that ignore enable_thinking:false on the top-level body.
+        if _llm_settings.llm_llama_cpp_disable_thinking:
+            body["chat_template_kwargs"] = {"enable_thinking": False}
 
         # If schema is provided, request structured JSON output
         # Uses json_object mode (widely supported across providers) with
