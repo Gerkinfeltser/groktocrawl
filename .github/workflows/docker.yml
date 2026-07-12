@@ -274,9 +274,44 @@ jobs:
             agent-svc python3 -m pytest /app/tests/integration/ /app/tests/service/ --timeout=120 --ignore-glob='*observability*'
         timeout-minutes: 20
 
-      - name: Collect logs on failure
+      - name: Collect diagnostics on failure
         if: failure()
-        run: docker compose logs --tail 50
+        run: |
+          report="$GITHUB_WORKSPACE/integration-test-diagnostics.txt"
+          {
+            echo "Integration test failure diagnostics"
+            echo "Collected at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo
+            echo "=== docker compose ps -a ==="
+            docker compose ps -a || true
+            echo
+            echo "=== docker stats --no-stream ==="
+            docker stats --no-stream || true
+            echo
+            echo "=== host memory ==="
+            free -h || vm_stat || true
+            echo
+            echo "=== host filesystem ==="
+            df -h || true
+            echo
+            echo "=== project container state ==="
+            docker ps -aq --filter "name=groktocrawl" | while read -r container; do
+              docker inspect --format \
+                'Name={{.Name}} Status={{.State.Status}} ExitCode={{.State.ExitCode}} FinishedAt={{.State.FinishedAt}} Error={{.State.Error}} OOMKilled={{.State.OOMKilled}}' \
+                "$container" || true
+            done || true
+            echo
+            echo "=== docker compose logs (last 50 lines) ==="
+            docker compose logs --tail 50 || true
+          } > "$report" 2>&1 || true
+
+      - name: Upload integration test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-diagnostics
+          path: integration-test-diagnostics.txt
+          if-no-files-found: warn
 
       - name: Tear down stack
         if: always()
