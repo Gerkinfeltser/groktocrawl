@@ -10,6 +10,14 @@ Run the repository CLI as `./groktocrawl`. It requires `requests`; `uv run ./gro
 ./groktocrawl --server http://localhost:8080 --json search "web extraction" --limit 3
 ```
 
+## Authentication
+
+Set `API_KEY` on the server to require API authentication. The CLI sends `Authorization: Bearer <key>` when `GROKTOCRAWL_API_KEY` is set; this preferred client setting falls back to `API_KEY` when it is not set.
+
+When the server has no `API_KEY`, it intentionally accepts unauthenticated requests and returns an `X-Security-Warning` header. The CLI reports that warning once on stderr, so JSON output on stdout remains valid. This warning means server authentication is disabled, not that a supplied credential is missing or invalid; an enabled server rejects missing or invalid credentials.
+
+`BRAVE_API_KEY` is independent of API authentication. It configures the search provider, and search failures identify it separately.
+
 ## Commands
 
 | Command | Purpose |

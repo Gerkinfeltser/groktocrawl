@@ -14,15 +14,17 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 # ── Load the CLI script ──────────────────────────────────────────────────────
 
-_CLI_PATH = os.path.join(os.path.dirname(__file__), "..", "groktocrawl")
-if not os.path.isfile(_CLI_PATH):
+_CLI_PATH = Path(__file__).resolve().parents[2] / "groktocrawl"
+if not _CLI_PATH.is_file():
     pytest.skip("groktocrawl CLI not found at project root", allow_module_level=True)
+_CLI_PATH = str(_CLI_PATH)
 
 # Load the CLI module by executing it with a namespace dict
 _cli_ns: dict = {}
@@ -42,6 +44,50 @@ def client():
 
 
 # ── Client.crawl() tests ─────────────────────────────────────────────────────
+
+
+class TestClientAuthentication:
+    """Tests for Client._request() authentication headers."""
+
+    def test_namespaced_key_takes_precedence_and_sends_bearer_auth(
+        self, client, monkeypatch
+    ):
+        """GROKTOCRAWL_API_KEY takes precedence over API_KEY."""
+        monkeypatch.setenv("GROKTOCRAWL_API_KEY", "namespaced-test-key")
+        monkeypatch.setenv("API_KEY", "fallback-test-key")
+
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"success": True}
+        response.headers = {}
+        response.url = "http://test-server:8080/v2/health"
+
+        import requests as requests_module
+
+        with patch.object(requests_module, "request", return_value=response) as request:
+            client._request("GET", "/health")
+
+        assert request.call_args.kwargs["headers"] == {
+            "Authorization": "Bearer namespaced-test-key"
+        }
+
+    def test_no_key_sends_no_authorization_header(self, client, monkeypatch):
+        """Client requests without configured credentials omit Authorization."""
+        monkeypatch.delenv("GROKTOCRAWL_API_KEY", raising=False)
+        monkeypatch.delenv("API_KEY", raising=False)
+
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"success": True}
+        response.headers = {}
+        response.url = "http://test-server:8080/v2/health"
+
+        import requests as requests_module
+
+        with patch.object(requests_module, "request", return_value=response) as request:
+            client._request("GET", "/health")
+
+        assert "Authorization" not in request.call_args.kwargs["headers"]
 
 
 class TestClientCrawl:
@@ -1242,6 +1288,7 @@ class TestImageSupport:
         mock_args.pyramid = False
         mock_args.output_dir = ""
         mock_args.include_images = True
+        mock_args.search_type = "deep"
 
         # Mock a stream response that returns one "done" event
         mock_resp = MagicMock()
@@ -1268,6 +1315,7 @@ class TestImageSupport:
             prompt="research images",
             urls=None,
             include_images=True,
+            search_type="deep",
         )
 
     def test_search_type_images_in_choices(self):
