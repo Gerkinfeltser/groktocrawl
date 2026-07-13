@@ -113,6 +113,12 @@ services:
       - ACTIVE_EMBED_MODEL=${ACTIVE_EMBED_MODEL:-v_bge-m3}
     volumes:
       - hf-cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json, urllib.request; response = urllib.request.urlopen('http://localhost:8003/health', timeout=5); assert json.load(response)['status'] == 'ok'"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 25
 
   qdrant:
     image: qdrant/qdrant:v1.18.2
@@ -142,7 +148,7 @@ services:
       scraper-svc:
         condition: service_started
       semantic-svc:
-        condition: service_started
+        condition: service_healthy
     environment:
       - VALKEY_URL=${VALKEY_URL:-redis://valkey:6379/0}
       - SEARXNG_URL=${SEARXNG_URL:-http://slopsearx:8080}
