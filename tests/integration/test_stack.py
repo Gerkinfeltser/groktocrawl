@@ -7684,14 +7684,15 @@ def test_deepen_cross_session_isolation_val_dpn_003():
     r2 = httpx.post(AGENT + "/v2/session/create", json={"ttl": 600}, timeout=10)
     s1_id = r1.json()["sessionId"]
     s2_id = r2.json()["sessionId"]
-    # Add search to session 1
+    # Seed session 1 with a deterministic content-backed ref.
     s1 = httpx.post(
         AGENT + f"/v2/session/{s1_id}/step",
-        json={"action": "search", "params": {"query": "Rust programming", "limit": 1}},
-        timeout=30,
+        json={"action": "scrape", "params": {"urls": ["http://example.com"]}},
+        timeout=120,
     )
-    refs = s1.json()["result"].get("top_refs", [])
-    assert len(refs) > 0
+    assert s1.status_code == 200, s1.text
+    refs = s1.json()["result"]["refs"]
+    assert len(refs) > 0, "Need at least one scraped ref"
     ref_from_s1 = refs[0]["ref_id"]
     # Try to deepen on session 2 using ref from session 1
     s2 = httpx.post(
