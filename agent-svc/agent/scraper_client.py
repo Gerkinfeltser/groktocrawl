@@ -182,17 +182,22 @@ class ScraperClient:
         """
         import asyncio as _asyncio
 
+        last_failure: dict | None = None
+
         # ── Try generic (fast path) ───────────────────────────
         try:
             result = await _asyncio.wait_for(
                 self.scrape(url, force_browser=False, scrape_options=scrape_options),
                 timeout=generic_timeout,
             )
-            if (
-                result.get("success")
-                and result.get("data", {}).get("markdown", "").strip()
+            data = result.get("data") or {}
+            if result.get("success") and (
+                data.get("markdown", "").strip() or data.get("download")
             ):
                 return result
+            if result.get("error_code") == "CAPTCHA_UNRESOLVED":
+                return result
+            last_failure = result
         except TimeoutError:
             logger.info("Generic scrape timed out for %s, trying browser fallback", url)
         except Exception as e:
@@ -206,14 +211,20 @@ class ScraperClient:
                 self.scrape(url, force_browser=True, scrape_options=scrape_options),
                 timeout=browser_timeout,
             )
-            if (
-                result.get("success")
-                and result.get("data", {}).get("markdown", "").strip()
+            data = result.get("data") or {}
+            if result.get("success") and (
+                data.get("markdown", "").strip() or data.get("download")
             ):
                 return result
+            if result.get("error_code") == "CAPTCHA_UNRESOLVED":
+                return result
+            last_failure = result
         except TimeoutError:
             logger.warning("Browser fallback also timed out for %s", url)
         except Exception as e:
             logger.warning("Browser fallback failed for %s: %s", url, e)
 
-        return {"success": False, "error": f"All scrape methods failed for {url}"}
+        return last_failure or {
+            "success": False,
+            "error": f"All scrape methods failed for {url}",
+        }

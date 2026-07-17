@@ -39,6 +39,9 @@ class ScraperSettings(BaseModel):
         default="{}", alias="SCRAPE_CACHE_DOMAIN_TTLS"
     )
     scraper_proxy_url: str = Field(default="", alias="SCRAPER_PROXY_URL")
+    scraper_private_url_allowlist: str = Field(
+        default="", alias="SCRAPER_PRIVATE_URL_ALLOWLIST"
+    )
     browser_svc_url: str = Field(
         default="http://browser-svc:8012", alias="BROWSER_SVC_URL"
     )
@@ -60,6 +63,12 @@ class ScraperSettings(BaseModel):
     )
     recovery_llm_api_key: str = Field(default="", alias="LLM_API_KEY")
     recovery_llm_model: str = Field(default="gpt-4o-mini", alias="LLM_MODEL")
+    captcha_vision_base_url: str = Field(default="", alias="CAPTCHA_VISION_BASE_URL")
+    captcha_vision_api_key: str = Field(default="", alias="CAPTCHA_VISION_API_KEY")
+    captcha_vision_model: str = Field(default="", alias="CAPTCHA_VISION_MODEL")
+    captcha_vision_timeout: int = Field(
+        default=60, alias="CAPTCHA_VISION_TIMEOUT", gt=0
+    )
 
     section_filter_default_include: str = Field(
         default="", alias="SECTION_FILTER_DEFAULT_INCLUDE"
