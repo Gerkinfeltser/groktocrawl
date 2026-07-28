@@ -13,8 +13,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 # Ensure the browser-svc module is importable
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "browser-svc"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "browser-svc"))
 
+import browser_svc.app as browser_app
 from browser_svc.app import (
     CLOUDFLARE_INDICATORS,
     COOKIE_STORE_PREFIX,
@@ -543,7 +544,7 @@ class TestSessionData:
         browser = MagicMock()
         context = MagicMock()
         page = MagicMock()
-        session = SessionData(browser, context, page, ttl)
+        session = SessionData(browser, context, page, ttl, MagicMock())
         # Override timestamps for deterministic testing
         now = time.time()
         session.created_at = now - age_offset
@@ -581,6 +582,80 @@ class TestSessionData:
         """idle_seconds is near zero immediately after use."""
         session = self.create_session(ttl=300, idle_offset=0)
         assert session.idle_seconds < 1.0
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 8. Playwright controller lifecycle
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestPlaywrightControllerLifecycle:
+    """Browser sessions retain and clean up their Playwright controller."""
+
+    @pytest.fixture(autouse=True)
+    def clear_sessions(self):
+        browser_app._sessions.clear()
+        yield
+        browser_app._sessions.clear()
+
+    @pytest.mark.asyncio
+    async def test_destroy_session_stops_controller_after_resources(self):
+        """Normal destruction closes resources before stopping Playwright."""
+        events = []
+        page = MagicMock(close=AsyncMock(side_effect=lambda: events.append("page")))
+        context = MagicMock(
+            close=AsyncMock(side_effect=lambda: events.append("context"))
+        )
+        browser = MagicMock(
+            close=AsyncMock(side_effect=lambda: events.append("browser"))
+        )
+        controller = MagicMock(
+            stop=AsyncMock(side_effect=lambda: events.append("controller"))
+        )
+        session = SessionData(browser, context, page, ttl=300, playwright=controller)
+        browser_app._sessions["session-id"] = session
+
+        await browser_app._destroy_session("session-id")
+
+        assert events == ["page", "context", "browser", "controller"]
+
+    @pytest.mark.asyncio
+    async def test_destroy_session_stops_controller_when_resource_close_fails(self):
+        """A close failure does not prevent later resources from being cleaned up."""
+        page = MagicMock(close=AsyncMock(side_effect=RuntimeError("page close failed")))
+        context = MagicMock(close=AsyncMock())
+        browser = MagicMock(close=AsyncMock())
+        controller = MagicMock(stop=AsyncMock())
+        session = SessionData(browser, context, page, ttl=300, playwright=controller)
+        browser_app._sessions["session-id"] = session
+
+        await browser_app._destroy_session("session-id")
+
+        context.close.assert_awaited_once()
+        browser.close.assert_awaited_once()
+        controller.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_create_failure_stops_started_controller_without_registering_session(
+        self, monkeypatch
+    ):
+        """A failure after startup releases Playwright before returning HTTP 500."""
+        controller = MagicMock()
+        controller.chromium.launch = AsyncMock(
+            side_effect=RuntimeError("launch failed")
+        )
+        controller.stop = AsyncMock()
+        playwright_factory = MagicMock()
+        playwright_factory.start = AsyncMock(return_value=controller)
+        monkeypatch.setattr(
+            browser_app, "async_playwright", MagicMock(return_value=playwright_factory)
+        )
+
+        with pytest.raises(browser_app.HTTPException, match="launch failed"):
+            await browser_app.create_browser(BrowserCreateRequest())
+
+        controller.stop.assert_awaited_once()
+        assert browser_app._sessions == {}
 
 
 # ═══════════════════════════════════════════════════════════════════
