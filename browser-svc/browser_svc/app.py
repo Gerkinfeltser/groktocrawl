@@ -144,10 +144,11 @@ _CLEANUP_INTERVAL = 30  # seconds
 class SessionData:
     """Holds Playwright objects for a single session."""
 
-    def __init__(self, browser, context, page, ttl: int):
+    def __init__(self, browser, context, page, ttl: int, playwright):
         self.browser = browser
         self.context = context
         self.page = page
+        self.playwright = playwright
         self.created_at = time.time()
         self.ttl = ttl
         self.last_used = time.time()
@@ -232,12 +233,31 @@ async def _destroy_session(session_id: str) -> None:
     session = _sessions.pop(session_id, None)
     if session is None:
         return
-    try:
-        await session.page.close()
-        await session.context.close()
-        await session.browser.close()
-    except Exception as e:
-        logger.warning("Error closing session %s: %s", session_id, e)
+    await _cleanup_resources(
+        session_id,
+        session.page,
+        session.context,
+        session.browser,
+        session.playwright,
+    )
+
+
+async def _cleanup_resources(
+    session_id: str, page, context, browser, playwright
+) -> None:
+    """Close session resources independently so one failure cannot leak another."""
+    for name, resource, method in (
+        ("page", page, "close"),
+        ("context", context, "close"),
+        ("browser", browser, "close"),
+        ("Playwright controller", playwright, "stop"),
+    ):
+        if resource is None:
+            continue
+        try:
+            await getattr(resource, method)()
+        except Exception as e:
+            logger.warning("Error closing %s for session %s: %s", name, session_id, e)
 
 
 @app.get("/health")
@@ -258,6 +278,7 @@ async def metrics():
 async def create_browser(req: BrowserCreateRequest):
     """Create a new headless browser session."""
     session_id = str(uuid.uuid4())
+    p = browser = context = page = None
 
     try:
         p = await async_playwright().start()
@@ -321,13 +342,14 @@ async def create_browser(req: BrowserCreateRequest):
                 return getParameter.call(this, parameter);
             };
         }""")
-        session = SessionData(browser, context, page, req.ttl)
+        session = SessionData(browser, context, page, req.ttl, p)
         _sessions[session_id] = session
         logger.info("Created browser session %s (TTL: %ds)", session_id, req.ttl)
         return BrowserCreateResponse(id=session_id)
     except Exception as e:
+        await _cleanup_resources(session_id, page, context, browser, p)
         logger.error("Failed to create browser session: %s", e)
-        raise HTTPException(  # noqa: B904
+        raise HTTPException(
             status_code=500, detail=f"Failed to create browser session: {e}"
         )
 
