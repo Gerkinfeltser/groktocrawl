@@ -250,6 +250,7 @@ def _is_qdrant_ready() -> bool:
     temporary_client = client is None
     if temporary_client:
         client = QdrantClient(url=QDRANT_URL, timeout=5)
+    assert client is not None
     try:
         client.get_collections()
     except Exception:
