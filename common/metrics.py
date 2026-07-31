@@ -186,7 +186,6 @@ class MetricsCollector:
 
     def generate_openmetrics(self) -> str:
         lines: list[str] = []
-        now_ms = int(time.time() * 1000)
 
         with self._lock:
             for family, counter in self._counters.values():
@@ -194,20 +193,20 @@ class MetricsCollector:
                 lines.append(f"# TYPE {family.name} counter")
                 for key, val in counter._collect():
                     label_str = _format_labels(key)
-                    lines.append(f"{family.name}{label_str} {val} {now_ms}")
+                    lines.append(f"{family.name}{label_str} {val}")
 
             for family, histogram in self._histograms.values():
                 lines.append(f"# HELP {family.name} {family.help}")
                 lines.append(f"# TYPE {family.name} histogram")
                 for key, sum_val, count, bucket_map in histogram._collect():
                     label_str = _format_labels(key)
-                    lines.append(f"{family.name}_sum{label_str} {sum_val} {now_ms}")
-                    lines.append(f"{family.name}_count{label_str} {count} {now_ms}")
+                    lines.append(f"{family.name}_sum{label_str} {sum_val}")
+                    lines.append(f"{family.name}_count{label_str} {count}")
                     for b, bcount in bucket_map.items():
                         ble = _format_labels(key, {"le": str(b)})
-                        lines.append(f"{family.name}_bucket{ble} {bcount} {now_ms}")
+                        lines.append(f"{family.name}_bucket{ble} {bcount}")
                     lines.append(
-                        f"{family.name}_bucket{_format_labels(key, {'le': '+Inf'})} {count} {now_ms}"
+                        f"{family.name}_bucket{_format_labels(key, {'le': '+Inf'})} {count}"
                     )
 
             for family, gauge in self._gauges.values():
@@ -215,7 +214,7 @@ class MetricsCollector:
                 lines.append(f"# TYPE {family.name} gauge")
                 for key, val in gauge._collect():
                     label_str = _format_labels(key)
-                    lines.append(f"{family.name}{label_str} {val} {now_ms}")
+                    lines.append(f"{family.name}{label_str} {val}")
 
         lines.append("# EOF")
         return "\n".join(lines) + "\n"
