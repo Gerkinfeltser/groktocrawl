@@ -174,7 +174,7 @@ class TestLogErrorsTotal:
         initial_count = 0
         for line in initial_lines:
             if 'log_errors_total{service="test_svc"}' in line:
-                initial_count = float(line.split()[-2])
+                initial_count = float(line.split()[-1])
 
         # Log an ERROR
         logger.error("This is a test error")
@@ -184,7 +184,7 @@ class TestLogErrorsTotal:
         new_count = 0
         for line in new_lines:
             if 'log_errors_total{service="test_svc"}' in line:
-                new_count = float(line.split()[-2])
+                new_count = float(line.split()[-1])
 
         assert new_count >= initial_count + 1, (
             f"Expected counter >= {initial_count + 1}, got {new_count}"
@@ -220,7 +220,7 @@ class TestLogErrorsTotal:
         initial_count = 0
         for line in initial_lines:
             if 'log_errors_total{service="test_noinc"}' in line:
-                initial_count = float(line.split()[-2])
+                initial_count = float(line.split()[-1])
 
         # Log at non-ERROR levels
         logger.warning("Warning message")
@@ -232,7 +232,7 @@ class TestLogErrorsTotal:
         new_count = 0
         for line in new_lines:
             if 'log_errors_total{service="test_noinc"}' in line:
-                new_count = float(line.split()[-2])
+                new_count = float(line.split()[-1])
 
         assert new_count == initial_count, (
             f"Expected count unchanged ({initial_count}), got {new_count}"
@@ -276,7 +276,7 @@ class TestFeatureToggleObservability:
             metrics_text = METRICS.generate_openmetrics()
             for line in metrics_text.split("\n"):
                 if 'groktocrawl_feature_enabled{feature="myfeature"}' in line:
-                    val = float(line.split()[-2])
+                    val = float(line.split()[-1])
                     assert val == 1.0, f"Expected 1.0, got {val}"
                     return
             pytest.fail("Expected groktocrawl_feature_enabled for myfeature")
@@ -298,7 +298,7 @@ class TestFeatureToggleObservability:
             metrics_text = METRICS.generate_openmetrics()
             for line in metrics_text.split("\n"):
                 if 'groktocrawl_feature_enabled{feature="offfeature"}' in line:
-                    val = float(line.split()[-2])
+                    val = float(line.split()[-1])
                     assert val == 0.0, f"Expected 0.0, got {val}"
                     return
             pytest.fail("Expected groktocrawl_feature_enabled for offreature")
@@ -365,7 +365,7 @@ class TestAnalyticsCounterPrometheusExport:
         metrics_text = METRICS.generate_openmetrics()
         for line in metrics_text.split("\n"):
             if f"groktocrawl_analytics_{name}" in line and not line.startswith("#"):
-                val = float(line.split()[-2])
+                val = float(line.split()[-1])
                 assert val == 7.0, f"Expected 7.0, got {val}"
                 return
         pytest.fail(f"Expected groktocrawl_analytics_{name} in metrics output")
@@ -385,6 +385,6 @@ class TestAnalyticsCounterPrometheusExport:
 
         for line in metrics_text.split("\n"):
             if "groktocrawl_analytics_reqs" in line and not line.startswith("#"):
-                assert float(line.split()[-2]) == 10.0
+                assert float(line.split()[-1]) == 10.0
             if "groktocrawl_analytics_errors" in line and not line.startswith("#"):
-                assert float(line.split()[-2]) == 3.0
+                assert float(line.split()[-1]) == 3.0
