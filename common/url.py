@@ -110,14 +110,34 @@ def is_same_origin(url1: str, url2: str) -> bool:
     )
 
 
+def _unmap_ipv4_mapped(
+    addr: IPv4Address | IPv6Address,
+) -> IPv4Address | IPv6Address:
+    """Unwrap IPv4-mapped IPv6 addresses to their embedded IPv4 form.
+
+    ``::ffff:a.b.c.d`` addresses (RFC 4291 section 2.2) represent IPv4
+    destinations, so they must be checked against IPv4 private ranges —
+    e.g. ``::ffff:127.0.0.1`` is loopback. Without unmapping, the
+    address matches no IPv6 private network and the SSRF guard is
+    bypassed.
+    """
+    if isinstance(addr, IPv6Address) and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped
+    return addr
+
+
 def _resolve_to_ips(hostname: str) -> list[IPv4Address | IPv6Address]:
-    """Resolve a hostname to all IP addresses (IPv4 and IPv6)."""
+    """Resolve a hostname to all IP addresses (IPv4 and IPv6).
+
+    IPv4-mapped IPv6 results are unwrapped so downstream checks evaluate
+    the embedded IPv4 address against IPv4 private ranges.
+    """
     try:
         addrinfo = socket.getaddrinfo(hostname, None)
         ips: set[IPv4Address | IPv6Address] = set()
         for _family, _stype, _proto, _canonname, sockaddr in addrinfo:
             try:
-                ips.add(ip_address(sockaddr[0]))
+                ips.add(_unmap_ipv4_mapped(ip_address(sockaddr[0])))
             except ValueError:
                 continue
         return list(ips)
@@ -151,7 +171,7 @@ def is_private_host(url: str) -> bool:
 
     # Check if hostname is itself a private IP literal
     try:
-        addr = ip_address(hostname)
+        addr = _unmap_ipv4_mapped(ip_address(hostname))
         for net in _PRIVATE_NETWORKS:
             if addr in net:
                 return True
@@ -167,6 +187,7 @@ def is_private_host(url: str) -> bool:
         return True
 
     for addr in ips:
+        addr = _unmap_ipv4_mapped(addr)
         for net in _PRIVATE_NETWORKS:
             if addr in net:
                 return True

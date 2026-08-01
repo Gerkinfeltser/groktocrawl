@@ -48,7 +48,9 @@ link-local, IPv6 ULA/loopback, multicast, cloud metadata endpoints,
 `.docker.internal`, DNS names resolving to restricted addresses, and
 unresolvable DNS fail closed). The multicast ranges `224.0.0.0/4` and
 `ff00::/8` were added to the shared private-network definitions to close the
-multicast gap.
+multicast gap. IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) are unwrapped to
+their embedded IPv4 form before checks, so `::ffff:127.0.0.1` (loopback) and
+`::ffff:169.254.169.254` (metadata) are rejected rather than treated as public.
 
 The validator is called before every webhook dispatch:
 

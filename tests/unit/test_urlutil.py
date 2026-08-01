@@ -109,6 +109,20 @@ class TestIsPrivateHost:
     def test_relative_url(self):
         assert is_private_host("/relative/path")
 
+    def test_ipv4_mapped_loopback(self):
+        assert is_private_host("http://[::ffff:127.0.0.1]/test")
+
+    def test_ipv4_mapped_rfc1918(self):
+        assert is_private_host("http://[::ffff:10.0.0.1]/test")
+        assert is_private_host("http://[::ffff:172.16.5.5]/test")
+        assert is_private_host("http://[::ffff:192.168.1.1]/test")
+
+    def test_ipv4_mapped_metadata(self):
+        assert is_private_host("http://[::ffff:169.254.169.254]/")
+
+    def test_ipv4_mapped_public(self):
+        assert not is_private_host("http://[::ffff:93.184.216.34]/test")
+
 
 class TestConstants:
     """Verify module-level constants are well-formed."""
@@ -192,6 +206,31 @@ class TestValidateOutboundWebhookUrl:
             validate_outbound_webhook_url("http://239.255.255.250/hook")
         with pytest.raises(ValueError):
             validate_outbound_webhook_url("https://[ff02::1]/hook")
+
+    def test_rejects_ipv4_mapped_private(self):
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://[::ffff:127.0.0.1]:8080/hook")
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://[::ffff:10.0.0.1]/hook")
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://[::ffff:192.168.1.1]/hook")
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://[::ffff:169.254.169.254]/hook")
+
+    def test_accepts_ipv4_mapped_public(self):
+        assert (
+            validate_outbound_webhook_url("https://[::ffff:93.184.216.34]/hook") is None
+        )
+
+    def test_rejects_hostname_resolving_to_ipv4_mapped_private(self, monkeypatch):
+        from ipaddress import ip_address
+
+        monkeypatch.setattr(
+            "common.url._resolve_to_ips",
+            lambda hostname: [ip_address("::ffff:10.0.0.7")],
+        )
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://public.example.com/hook")
 
     def test_rejects_docker_internal_hostname(self, monkeypatch):
         monkeypatch.setattr("common.url._resolve_to_ips", lambda hostname: [])

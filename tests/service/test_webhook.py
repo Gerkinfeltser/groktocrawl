@@ -703,6 +703,20 @@ class TestWebhookSsrfGuard:
             mock_client_cls.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_rejects_ipv4_mapped_loopback_destination(self):
+        """An IPv4-mapped IPv6 loopback destination is never posted to."""
+        from agent.webhook import deliver_webhook
+
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            await deliver_webhook(
+                {"url": "http://[::ffff:127.0.0.1]:8080/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_rejects_non_http_scheme(self):
         """Non-HTTP(S) webhook destinations are never posted to."""
         from agent.webhook import deliver_webhook
