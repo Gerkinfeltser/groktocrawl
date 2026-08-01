@@ -198,7 +198,7 @@ Query → SearXNG search (parallel) + Qdrant search (parallel)
 ### Risks
 
 * **Qdrant operational unfamiliarity:** Team hasn't run Qdrant before. Mitigated: Qdrant is a single binary with REST + gRPC APIs, health endpoint, and Prometheus metrics. Documentation is excellent.
-* **RAM pressure:** Qdrant loads vectors into memory for search. At 250K docs × 1024-dim × 4 bytes = ~1GB. hal2000 needs this headroom alongside existing services (~8GB total with BGE-M3 + Qdrant + SearXNG + others).
+* **RAM pressure:** Qdrant loads vectors into memory for search. At 250K docs × 1024-dim × 4 bytes = ~1GB. The deployment host needs this headroom alongside existing services (~8GB total with BGE-M3 + Qdrant + SearXNG + others).
 * **Indexing during high-throughput crawls:** A crawl of 500 pages generates 500 index writes. Qdrant handles this fine (it's designed for batch ingestion), but the scrape latency increase is per-document (~100ms embedding time). Mitigated: indexing is fire-and-forget — failed index writes don't block the scrape job.
 * **URL as point ID collisions:** Qdrant uses point IDs for upserts. SHA-256 URL hash truncated to uint64 means re-scraping the same URL updates the existing vector rather than creating a duplicate. Good for staleness, but means the `indexed_at` timestamp updates each time. Hash truncation collision risk is 1 in 2^64 — negligible for this index size.
 
@@ -240,19 +240,19 @@ flowchart TD
     A -->|existing| S
     A -->|embed & search| E
     E -->|qdrant-client<br/>async| Q
-    
+
     subgraph Phase 1 [Phase 1 — existing]
         E1[POST /embed]
         E2[POST /rerank]
     end
-    
+
     subgraph Phase 2 [Phase 2 — new]
         E3[POST /index]
         E4[POST /search/vector]
         E5[DELETE /index/:url_hash]
         E6[GET /index/stats]
     end
-    
+
     E -.-> Phase 1
     E -.-> Phase 2
 ```
@@ -420,7 +420,7 @@ Query → SearXNG search (parallel) + Qdrant search (parallel)
 ### Risks
 
 * **Qdrant operational unfamiliarity:** Team hasn't run Qdrant before. Mitigated: Qdrant is a single binary with REST + gRPC APIs, health endpoint, and Prometheus metrics. Documentation is excellent.
-* **RAM pressure:** Qdrant loads vectors into memory for search. At 250K docs × 1024-dim × 4 bytes = ~1GB. hal2000 needs this headroom alongside existing services (~8GB total with BGE-M3 + Qdrant + SearXNG + others).
+* **RAM pressure:** Qdrant loads vectors into memory for search. At 250K docs × 1024-dim × 4 bytes = ~1GB. The deployment host needs this headroom alongside existing services (~8GB total with BGE-M3 + Qdrant + SearXNG + others).
 * **Indexing during high-throughput crawls:** A crawl of 500 pages generates 500 index writes. Qdrant handles this fine (it's designed for batch ingestion), but the scrape latency increase is per-document (~100ms embedding time). Mitigated: indexing is fire-and-forget — failed index writes don't block the scrape job.
 * **URL as point ID collisions:** Qdrant uses point IDs for upserts. SHA-256 URL hash truncated to uint64 means re-scraping the same URL updates the existing vector rather than creating a duplicate. Good for staleness, but means the `indexed_at` timestamp updates each time. Hash truncation collision risk is 1 in 2^64 — negligible for this index size.
 
