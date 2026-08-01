@@ -6,7 +6,7 @@
 # Tags:
 #   - main branch → latest, unstable
 #   - vX.Y.Z tag  → stable, X, X.Y, X.Y.Z
-#   - PR to main  → build-only (no push)
+#   - PR to main  → runtime integration only when changed paths require it
 
 name: Docker Build & Publish
 
@@ -22,8 +22,44 @@ env:
   REGISTRY_OWNER: groktopus
 
 jobs:
+  changes:
+    name: Classify runtime changes
+    runs-on: ubuntu-latest
+    outputs:
+      requires_full_runtime: ${{ steps.classify.outputs.requires_full_runtime }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Test change classifier
+        run: python3 tests/service/test_ci_change_classification.py
+
+      - name: Classify changed paths
+        id: classify
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            head="${{ github.event.pull_request.head.sha }}"
+            merge_base=$(git merge-base "$base" "$head")
+            changed_paths=$(git diff --name-only "$merge_base" "$head")
+          else
+            base="${{ github.event.before }}"
+            head="${{ github.sha }}"
+            if [ "$base" = "0000000000000000000000000000000000000000" ]; then
+              changed_paths=$(git diff-tree --no-commit-id --name-only -r "$head")
+            else
+              changed_paths=$(git diff --name-only "$base" "$head")
+            fi
+          fi
+
+          requires_full_runtime=$(printf '%s\n' "$changed_paths" | python3 scripts/classify_ci_changes.py)
+          echo "requires_full_runtime=$requires_full_runtime" >> "$GITHUB_OUTPUT"
+
   build-and-push:
     name: ${{ matrix.service }}
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -119,7 +155,11 @@ jobs:
 
   integration-tests:
     name: Integration Tests
-    needs: build-and-push
+    needs: [changes, build-and-push]
+    if: >-
+      always() && ((github.event_name == 'pull_request' && needs.changes.result == 'success' &&
+      needs.changes.outputs.requires_full_runtime == 'true') ||
+      (github.event_name == 'push' && needs.build-and-push.result == 'success'))
     runs-on: [self-hosted, groktopus, docker]
     concurrency:
       group: groktocrawl-integration-${{ github.repository }}
@@ -262,6 +302,10 @@ jobs:
           docker compose exec -T agent-svc mkdir -p /app/tests
           docker cp tests/. "$svc":/app/tests/
           docker cp docker-compose.yml "$svc":/app/docker-compose.yml
+          docker compose exec -T agent-svc mkdir -p /app/scripts
+          docker cp scripts/classify_ci_changes.py "$svc":/app/scripts/classify_ci_changes.py
+          docker compose exec -T agent-svc mkdir -p /app/.github/workflows
+          docker cp .github/workflows/docker.yml "$svc":/app/.github/workflows/docker.yml
           # Copy service source packages so tests can import them
           # Each package_dir (e.g. scraper-svc/scraper) becomes /app/<package_dir>/
           for pkg in agent-svc/agent scraper-svc/scraper parse-svc/parse_svc portal-svc/portal browser-svc/browser_svc llm-svc/llm_svc; do
@@ -348,3 +392,40 @@ jobs:
       - name: Tear down stack
         if: always()
         run: docker compose down --remove-orphans --timeout 30
+
+  runtime-gate:
+    name: Runtime Gate
+    needs: [changes, integration-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize docs-only pull request
+        if: >-
+          github.event_name == 'pull_request' && needs.changes.result == 'success' &&
+          needs.changes.outputs.requires_full_runtime == 'false'
+        run: echo "Runtime integration was intentionally not needed for this docs-only pull request."
+
+      - name: Summarize successful runtime validation
+        if: >-
+          github.event_name == 'pull_request' && needs.changes.result == 'success' &&
+          needs.changes.outputs.requires_full_runtime == 'true' &&
+          needs.integration-tests.result == 'success'
+        run: echo "Runtime integration completed successfully for this pull request."
+
+      - name: Fail when change classification fails
+        if: >-
+          github.event_name == 'pull_request' &&
+          needs.changes.result != 'success'
+        run: |
+          echo "Change classification did not complete; no runtime-validation conclusion was made."
+          exit 1
+
+      - name: Fail when required runtime validation fails
+        if: >-
+          needs.changes.result == 'success' &&
+          !(github.event_name == 'pull_request' &&
+          needs.changes.outputs.requires_full_runtime == 'false') &&
+          needs.integration-tests.result != 'success'
+        run: |
+          echo "Required runtime integration did not complete successfully."
+          exit 1
