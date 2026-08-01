@@ -30,9 +30,11 @@ _PRIVATE_NETWORKS: list[IPv4Network | IPv6Network] = [
     ip_network("100.64.0.0/10"),  # Carrier-grade NAT (RFC 6598)
     ip_network("198.18.0.0/15"),  # Benchmarking (RFC 2544)
     ip_network("240.0.0.0/4"),  # Reserved / future use
+    ip_network("224.0.0.0/4"),  # Multicast (RFC 5771)
     ip_network("::1/128"),  # IPv6 loopback
     ip_network("fc00::/7"),  # IPv6 unique-local (ULA)
     ip_network("fe80::/10"),  # IPv6 link-local
+    ip_network("ff00::/8"),  # IPv6 multicast
 ]
 
 _METADATA_IPS: list[IPv4Address | IPv6Address] = [
@@ -172,3 +174,35 @@ def is_private_host(url: str) -> bool:
             return True
 
     return False
+
+
+def validate_outbound_webhook_url(url: str) -> None:
+    """Validate a user-supplied webhook destination before delivery.
+
+    Enforces the shared SSRF policy for outbound webhook POSTs: only
+    explicit ``http``/``https`` schemes are allowed, and the host must
+    resolve to a public, non-restricted address. Raises ``ValueError``
+    with a human-readable reason when the URL is not deliverable, so
+    callers can reject it without attempting a request.
+
+    DNS resolution and host checks use the same private/hostile network
+    definitions as :func:`is_private_host` (RFC 1918, loopback,
+    link-local, multicast, metadata endpoints, Docker internal
+    hostnames), and unresolvable hostnames fail closed.
+
+    Raises:
+        ValueError: If the URL is missing, uses a non-HTTP(S) scheme,
+            has no hostname, or its host is private/restricted.
+    """
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("webhook URL is missing")
+
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise ValueError(f"webhook URL must use http or https, got {parsed.scheme!r}")
+
+    if not parsed.hostname:
+        raise ValueError("webhook URL has no hostname")
+
+    if is_private_host(url):
+        raise ValueError("webhook URL resolves to a private or restricted destination")

@@ -25,6 +25,8 @@ import uuid
 
 import httpx
 
+from common.url import validate_outbound_webhook_url
+
 from .settings import load_settings
 
 logger = logging.getLogger(__name__)
@@ -100,6 +102,19 @@ async def deliver_webhook(
     if events_filter and event not in events_filter:
         return
 
+    # SSRF guard: reject webhook destinations that are not public HTTP(S)
+    # hosts before any request is attempted (issue #469).
+    try:
+        await asyncio.to_thread(validate_outbound_webhook_url, url)
+    except ValueError as e:
+        logger.warning(
+            "Webhook skipped for job %s: %s (url=%r)",
+            job_id,
+            e,
+            url,
+        )
+        return
+
     webhook_id = _next_webhook_id()
 
     payload = {
@@ -122,7 +137,11 @@ async def deliver_webhook(
     async def _do_deliver() -> None:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
+                # Redirects are disabled so a validated public destination
+                # can never be redirected to a restricted host (issue #469).
+                async with httpx.AsyncClient(
+                    timeout=TIMEOUT_SECONDS, follow_redirects=False
+                ) as client:
                     resp = await client.post(url, content=body, headers=headers)
                     if resp.status_code < 500:
                         logger.info(

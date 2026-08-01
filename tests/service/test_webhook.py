@@ -19,6 +19,22 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _public_dns(monkeypatch):
+    """Make DNS resolution hermetic: every hostname resolves to a public IP.
+
+    Webhook destination validation (issue #469) resolves hostnames via
+    ``common.url._resolve_to_ips``. Real lookups would be slow and
+    nondeterministic in CI, so tests stub them to a public address.
+    """
+    from ipaddress import ip_address
+
+    monkeypatch.setattr(
+        "common.url._resolve_to_ips",
+        lambda hostname: [ip_address("93.184.216.34")],
+    )
+
+
 class TestSignBody:
     def test_signs_body_correctly(self):
         from agent.webhook import _sign_body
@@ -624,3 +640,146 @@ class TestDeliverWebhook:
             assert body["success"] is True
             assert body["error"] is None
             assert body["data"] == {"pages": [{"url": "https://example.com"}]}
+
+
+class TestWebhookSsrfGuard:
+    """SSRF guard for webhook destinations (issue #469)."""
+
+    def _mock_client_cls(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+
+        mock_client = MagicMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client_cls = MagicMock()
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+
+        async def _post(*a, **kw):
+            return mock_resp
+
+        mock_client.post = MagicMock(side_effect=_post)
+        return mock_client_cls, mock_client
+
+    @pytest.mark.asyncio
+    async def test_rejects_loopback_destination(self):
+        """A loopback webhook destination is never posted to."""
+        from agent.webhook import deliver_webhook
+
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            await deliver_webhook(
+                {"url": "http://127.0.0.1:8080/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_rfc1918_destination(self):
+        """A private RFC 1918 webhook destination is never posted to."""
+        from agent.webhook import deliver_webhook
+
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            await deliver_webhook(
+                {"url": "http://10.0.0.5/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_link_local_destination(self):
+        """A link-local webhook destination is never posted to."""
+        from agent.webhook import deliver_webhook
+
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            await deliver_webhook(
+                {"url": "http://169.254.169.254/latest/meta-data/"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_http_scheme(self):
+        """Non-HTTP(S) webhook destinations are never posted to."""
+        from agent.webhook import deliver_webhook
+
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            await deliver_webhook(
+                {"url": "ftp://example.com/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_hostname_resolving_to_private_ip(self, monkeypatch):
+        """A public-looking hostname resolving to a private IP is rejected."""
+        from ipaddress import ip_address
+
+        from agent.webhook import deliver_webhook
+
+        monkeypatch.setattr(
+            "common.url._resolve_to_ips",
+            lambda hostname: [ip_address("192.168.1.99")],
+        )
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            await deliver_webhook(
+                {"url": "https://public.example.com/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fails_closed_on_dns_failure(self, monkeypatch):
+        """An unresolvable webhook hostname is rejected (fail closed)."""
+        from agent.webhook import deliver_webhook
+
+        monkeypatch.setattr("common.url._resolve_to_ips", lambda hostname: [])
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            await deliver_webhook(
+                {"url": "https://unresolvable.example.invalid/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_public_ip_literal_still_delivers(self):
+        """A public IP-literal webhook destination still delivers."""
+        from agent.webhook import deliver_webhook
+
+        mock_client_cls, mock_client = self._mock_client_cls()
+        with patch("agent.webhook.httpx.AsyncClient", mock_client_cls):
+            await deliver_webhook(
+                {"url": "http://93.184.216.34/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+        mock_client.post.assert_called_once()
+        args, _kwargs = mock_client.post.call_args
+        assert args[0] == "http://93.184.216.34/hook"
+
+    @pytest.mark.asyncio
+    async def test_redirects_disabled(self):
+        """Redirects are disabled on the webhook HTTP client."""
+        from agent.webhook import deliver_webhook
+
+        mock_client_cls, _ = self._mock_client_cls()
+        with patch("agent.webhook.httpx.AsyncClient", mock_client_cls):
+            await deliver_webhook(
+                {"url": "https://hook.example.com"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+        kwargs = mock_client_cls.call_args.kwargs
+        assert kwargs["follow_redirects"] is False

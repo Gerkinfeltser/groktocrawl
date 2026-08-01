@@ -1,5 +1,7 @@
 """Unit tests for the shared URL utility module (common/url.py)."""
 
+import pytest
+
 from common.url import (
     _METADATA_IPS,
     _PRIVATE_HOSTNAME_SUFFIXES,
@@ -8,6 +10,7 @@ from common.url import (
     is_private_host,
     is_same_origin,
     normalize_url,
+    validate_outbound_webhook_url,
 )
 
 
@@ -120,3 +123,111 @@ class TestConstants:
 
     def test_docker_hostname_suffixes(self):
         assert ".docker.internal" in _PRIVATE_HOSTNAME_SUFFIXES
+
+
+class TestValidateOutboundWebhookUrl:
+    """SSRF guard for outbound webhook destinations (issue #469)."""
+
+    def test_accepts_public_https(self):
+        assert validate_outbound_webhook_url("https://example.com/hook") is None
+
+    def test_accepts_public_http(self):
+        assert validate_outbound_webhook_url("http://example.com/hook") is None
+
+    def test_accepts_public_ip(self):
+        assert validate_outbound_webhook_url("https://93.184.216.34/hook") is None
+
+    def test_rejects_missing_url(self):
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("")
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url(None)  # type: ignore[arg-type]
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("   ")
+
+    def test_rejects_non_http_schemes(self):
+        for bad in (
+            "ftp://example.com/hook",
+            "file:///etc/passwd",
+            "gopher://example.com/hook",
+            "//example.com/hook",  # scheme-less
+            "example.com/hook",  # not a URL
+        ):
+            with pytest.raises(ValueError):
+                validate_outbound_webhook_url(bad)
+
+    def test_rejects_malformed_without_hostname(self):
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("https:///path")
+
+    def test_rejects_loopback(self):
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://127.0.0.1:8080/hook")
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://localhost/hook")
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("https://[::1]/hook")
+
+    def test_rejects_rfc1918(self):
+        for host in ("10.0.0.1", "172.16.0.1", "192.168.1.1"):
+            with pytest.raises(ValueError):
+                validate_outbound_webhook_url(f"http://{host}/hook")
+
+    def test_rejects_link_local_and_metadata(self):
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://169.254.1.1/hook")
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://169.254.169.254/latest/meta-data/")
+
+    def test_rejects_ipv6_ula_and_link_local(self):
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("https://[fd00::1]/hook")
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("https://[fe80::1]/hook")
+
+    def test_rejects_multicast(self):
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://224.0.0.1/hook")
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://239.255.255.250/hook")
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("https://[ff02::1]/hook")
+
+    def test_rejects_docker_internal_hostname(self, monkeypatch):
+        monkeypatch.setattr("common.url._resolve_to_ips", lambda hostname: [])
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://host.docker.internal:8080/hook")
+
+    def test_rejects_hostname_resolving_to_private_ip(self, monkeypatch):
+        from ipaddress import ip_address
+
+        monkeypatch.setattr(
+            "common.url._resolve_to_ips",
+            lambda hostname: [ip_address("10.0.0.7")],
+        )
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://public.example.com/hook")
+
+    def test_rejects_hostname_resolving_to_metadata(self, monkeypatch):
+        from ipaddress import ip_address
+
+        monkeypatch.setattr(
+            "common.url._resolve_to_ips",
+            lambda hostname: [ip_address("169.254.169.254")],
+        )
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://metadata.example.com/hook")
+
+    def test_fails_closed_on_dns_failure(self, monkeypatch):
+        monkeypatch.setattr("common.url._resolve_to_ips", lambda hostname: [])
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://unresolvable.example.invalid/hook")
+
+    def test_accepts_hostname_resolving_to_public_ip(self, monkeypatch):
+        from ipaddress import ip_address
+
+        monkeypatch.setattr(
+            "common.url._resolve_to_ips",
+            lambda hostname: [ip_address("93.184.216.34")],
+        )
+        assert validate_outbound_webhook_url("http://public.example.com/hook") is None
