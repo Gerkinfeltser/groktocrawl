@@ -161,6 +161,11 @@ def _resolve_to_ips_with_transient(
     except socket.gaierror as exc:
         logger.warning("DNS resolution failed for %s — treating as private", hostname)
         return [], exc.errno == getattr(socket, "EAI_AGAIN", -3)
+    except UnicodeError:
+        # Non-IDNA hostnames (e.g. >63-char labels) are permanently
+        # unresolvable, not transiently failing.
+        logger.warning("DNS resolution failed for %s — treating as private", hostname)
+        return [], False
 
 
 def _addr_is_restricted(addr: IPv4Address | IPv6Address) -> bool:
@@ -235,6 +240,11 @@ def validate_outbound_webhook_url(url: str) -> None:
     explicit ``http``/``https`` schemes are allowed, and the host must
     resolve to a public, non-restricted address.
 
+    This function never raises exceptions other than the documented
+    contract below; malformed URLs (bad IPv6 brackets, non-IDNA
+    hostnames, etc.) are treated as permanent rejections rather than
+    leaking parser or resolver errors to callers.
+
     Raises:
         WebhookDestinationValidationError: If the URL is missing, uses a
             non-HTTP(S) scheme, has no hostname, or its host is
@@ -249,6 +259,24 @@ def validate_outbound_webhook_url(url: str) -> None:
     link-local, multicast, metadata endpoints, Docker internal
     hostnames), and unresolvable hostnames fail closed.
     """
+    try:
+        _validate_outbound_webhook_url_inner(url)
+    except WebhookDestinationValidationError:
+        raise
+    except Exception as exc:  # pragma: no cover - defense in depth
+        raise WebhookDestinationValidationError(
+            f"webhook URL could not be validated: {exc}"
+        ) from exc
+
+
+def _validate_outbound_webhook_url_inner(url: str) -> None:
+    """Implementation of :func:`validate_outbound_webhook_url`.
+
+    Raises ``WebhookDestinationValidationError`` /
+    ``WebhookDestinationDNSRetryableError`` for every rejection; the
+    public wrapper converts any unexpected exception to the permanent
+    rejection contract.
+    """
     if not isinstance(url, str) or not url.strip():
         raise WebhookDestinationValidationError("webhook URL is missing")
 
@@ -258,7 +286,12 @@ def validate_outbound_webhook_url(url: str) -> None:
             f"webhook URL must use http or https, got {parsed.scheme!r}"
         )
 
-    hostname = parsed.hostname
+    try:
+        hostname = parsed.hostname
+    except ValueError:
+        raise WebhookDestinationValidationError(
+            "webhook URL has an invalid host"
+        ) from None
     if not hostname:
         raise WebhookDestinationValidationError("webhook URL has no hostname")
 

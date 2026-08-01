@@ -18,6 +18,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Captured before the autouse _public_dns fixture patches the resolver, so
+# tests that need the real DNS behavior can restore it.
+from common import url as _common_url
+
+_REAL_RESOLVE = _common_url._resolve_to_ips_with_transient
+
 
 @pytest.fixture(autouse=True)
 def _public_dns(monkeypatch):
@@ -762,6 +768,39 @@ class TestWebhookSsrfGuard:
         with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
             await deliver_webhook(
                 {"url": "https://unresolvable.example.invalid/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_malformed_destination_does_not_crash_delivery(self):
+        """Malformed destinations are skipped without leaking parser errors."""
+        from agent.webhook import deliver_webhook
+
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            # Malformed IPv6 brackets: must not raise out of deliver_webhook
+            await deliver_webhook(
+                {"url": "http://[::1/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_overlong_label_destination_does_not_crash_delivery(
+        self, monkeypatch
+    ):
+        """A >63-char hostname label is skipped without leaking UnicodeError."""
+        from agent.webhook import deliver_webhook
+
+        # Restore real resolution so the IDNA label-too-long path is exercised
+        monkeypatch.setattr("common.url._resolve_to_ips_with_transient", _REAL_RESOLVE)
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            await deliver_webhook(
+                {"url": f"http://{'a' * 64}.example.com/hook"},
                 "crawl.completed",
                 "job-1",
                 data=[],

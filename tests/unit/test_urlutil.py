@@ -299,3 +299,31 @@ class TestValidateOutboundWebhookUrl:
             lambda hostname: ([ip_address("93.184.216.34")], False),
         )
         assert validate_outbound_webhook_url("http://public.example.com/hook") is None
+
+    def test_malformed_ipv6_brackets_rejected_cleanly(self):
+        """Malformed IPv6 brackets never leak a raw ValueError."""
+        from common.url import WebhookDestinationValidationError
+
+        with pytest.raises(WebhookDestinationValidationError):
+            validate_outbound_webhook_url("http://[::1/hook")
+
+    def test_overlong_hostname_label_rejected_cleanly(self):
+        """A >63-char label never leaks a UnicodeError."""
+        from common.url import WebhookDestinationValidationError
+
+        with pytest.raises(WebhookDestinationValidationError):
+            validate_outbound_webhook_url(f"http://{'a' * 64}.example.com/hook")
+
+    def test_unexpected_errors_become_permanent_rejection(self, monkeypatch):
+        """The public wrapper converts any unexpected error to a rejection."""
+        from common.url import (
+            WebhookDestinationValidationError,
+            validate_outbound_webhook_url,
+        )
+
+        def _boom(url):
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr("common.url._validate_outbound_webhook_url_inner", _boom)
+        with pytest.raises(WebhookDestinationValidationError):
+            validate_outbound_webhook_url("https://example.com/hook")
