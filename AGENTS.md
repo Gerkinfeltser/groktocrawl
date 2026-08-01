@@ -176,3 +176,13 @@ Rules:
 - If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
 - Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
 - After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+
+### Query tuning for this repo
+
+The graph's node labels are code identifiers and doc headings, not natural language. `graphify query` matches labels one-directionally, so wording mismatches return noise. Verified patterns (see `graphify-out/memory/` for seeded Q&As):
+
+- **Expand vocabulary to graph labels first.** The label set is small; grep it before querying when a question uses non-identifier words. Examples: "deduplication" → `dedup` / `DedupManager`; "crawl engine" → `CrawlEngine`; "link extraction" → `extract_links()`. Ask `graphify explain "<symbol>"` to confirm exact names.
+- **Avoid generic terms that exact-match endpoint names.** `crawl()`, `search()`, `map()`, `agent()` in `mcp-svc/mcp_server.py` get an exact-match bonus and flood results with the whole MCP endpoint community. Prefer file/module names (`crawler.py`) or specific classes (`CrawlEngine`).
+- **`--context import` for dependency questions** (edges filtered to imports only; e.g. `graphify query "dedup manager" --context import` returns ~19 focused nodes instead of 400+). `--context call` works for call chains.
+- **`--dfs` traces a chain; `--budget N` raises the output cap** (default 2000 tokens). Neither fixes bad seeds — fix seeds first via vocabulary.
+- **After answering a graph question, run `graphify save-result --question "<verbatim question>" --answer "<answer>" --nodes <labels cited>`** so the Q&A becomes a node on the next `graphify update` (feedback loop, no API cost).
