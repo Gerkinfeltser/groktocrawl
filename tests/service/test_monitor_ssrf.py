@@ -17,8 +17,8 @@ def _public_dns(monkeypatch):
     from ipaddress import ip_address
 
     monkeypatch.setattr(
-        "common.url._resolve_to_ips",
-        lambda hostname: [ip_address("93.184.216.34")],
+        "common.url._resolve_to_ips_with_transient",
+        lambda hostname: ([ip_address("93.184.216.34")], False),
     )
 
 

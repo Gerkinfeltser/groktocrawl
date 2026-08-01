@@ -24,14 +24,15 @@ def _public_dns(monkeypatch):
     """Make DNS resolution hermetic: every hostname resolves to a public IP.
 
     Webhook destination validation (issue #469) resolves hostnames via
-    ``common.url._resolve_to_ips``. Real lookups would be slow and
-    nondeterministic in CI, so tests stub them to a public address.
+    ``common.url._resolve_to_ips_with_transient``. Real lookups would be
+    slow and nondeterministic in CI, so tests stub them to a public
+    address.
     """
     from ipaddress import ip_address
 
     monkeypatch.setattr(
-        "common.url._resolve_to_ips",
-        lambda hostname: [ip_address("93.184.216.34")],
+        "common.url._resolve_to_ips_with_transient",
+        lambda hostname: ([ip_address("93.184.216.34")], False),
     )
 
 
@@ -738,8 +739,8 @@ class TestWebhookSsrfGuard:
         from agent.webhook import deliver_webhook
 
         monkeypatch.setattr(
-            "common.url._resolve_to_ips",
-            lambda hostname: [ip_address("192.168.1.99")],
+            "common.url._resolve_to_ips_with_transient",
+            lambda hostname: ([ip_address("192.168.1.99")], False),
         )
         with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
             await deliver_webhook(
@@ -755,7 +756,9 @@ class TestWebhookSsrfGuard:
         """An unresolvable webhook hostname is rejected (fail closed)."""
         from agent.webhook import deliver_webhook
 
-        monkeypatch.setattr("common.url._resolve_to_ips", lambda hostname: [])
+        monkeypatch.setattr(
+            "common.url._resolve_to_ips_with_transient", lambda hostname: ([], False)
+        )
         with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
             await deliver_webhook(
                 {"url": "https://unresolvable.example.invalid/hook"},
@@ -764,6 +767,63 @@ class TestWebhookSsrfGuard:
                 data=[],
             )
             mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_transient_dns_failure_retries_validation(self, monkeypatch):
+        """A transient DNS failure retries instead of dropping the webhook."""
+        from agent.webhook import deliver_webhook
+
+        calls = {"n": 0}
+
+        def _flaky_resolve(hostname):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # First attempt: transient resolver failure
+                return ([], True)
+            from ipaddress import ip_address
+
+            return ([ip_address("93.184.216.34")], False)
+
+        monkeypatch.setattr("common.url._resolve_to_ips_with_transient", _flaky_resolve)
+
+        mock_client_cls, mock_client = self._mock_client_cls()
+        with patch("agent.webhook.httpx.AsyncClient", mock_client_cls):
+            await deliver_webhook(
+                {"url": "https://hook.example.com"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+        # Transient failure was retried; the second attempt delivered
+        assert calls["n"] >= 2
+        mock_client.post.assert_called_once()
+        assert mock_client.post.call_args.args[0] == "https://hook.example.com"
+
+    @pytest.mark.asyncio
+    async def test_persistent_transient_dns_failure_gives_up_after_retries(
+        self, monkeypatch
+    ):
+        """A persistent transient DNS failure retries, then gives up silently."""
+        from agent.webhook import deliver_webhook
+
+        calls = {"n": 0}
+
+        def _always_fail(hostname):
+            calls["n"] += 1
+            return ([], True)
+
+        monkeypatch.setattr("common.url._resolve_to_ips_with_transient", _always_fail)
+
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            await deliver_webhook(
+                {"url": "https://hook.example.com"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+        # One validation per attempt; no HTTP request was ever made
+        assert calls["n"] == 3
+        mock_client_cls.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_public_ip_literal_still_delivers(self):

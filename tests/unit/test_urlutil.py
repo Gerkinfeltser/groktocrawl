@@ -226,14 +226,16 @@ class TestValidateOutboundWebhookUrl:
         from ipaddress import ip_address
 
         monkeypatch.setattr(
-            "common.url._resolve_to_ips",
-            lambda hostname: [ip_address("::ffff:10.0.0.7")],
+            "common.url._resolve_to_ips_with_transient",
+            lambda hostname: ([ip_address("::ffff:10.0.0.7")], False),
         )
         with pytest.raises(ValueError):
             validate_outbound_webhook_url("http://public.example.com/hook")
 
     def test_rejects_docker_internal_hostname(self, monkeypatch):
-        monkeypatch.setattr("common.url._resolve_to_ips", lambda hostname: [])
+        monkeypatch.setattr(
+            "common.url._resolve_to_ips_with_transient", lambda hostname: ([], False)
+        )
         with pytest.raises(ValueError):
             validate_outbound_webhook_url("http://host.docker.internal:8080/hook")
 
@@ -241,8 +243,8 @@ class TestValidateOutboundWebhookUrl:
         from ipaddress import ip_address
 
         monkeypatch.setattr(
-            "common.url._resolve_to_ips",
-            lambda hostname: [ip_address("10.0.0.7")],
+            "common.url._resolve_to_ips_with_transient",
+            lambda hostname: ([ip_address("10.0.0.7")], False),
         )
         with pytest.raises(ValueError):
             validate_outbound_webhook_url("http://public.example.com/hook")
@@ -251,22 +253,49 @@ class TestValidateOutboundWebhookUrl:
         from ipaddress import ip_address
 
         monkeypatch.setattr(
-            "common.url._resolve_to_ips",
-            lambda hostname: [ip_address("169.254.169.254")],
+            "common.url._resolve_to_ips_with_transient",
+            lambda hostname: ([ip_address("169.254.169.254")], False),
         )
         with pytest.raises(ValueError):
             validate_outbound_webhook_url("http://metadata.example.com/hook")
 
     def test_fails_closed_on_dns_failure(self, monkeypatch):
-        monkeypatch.setattr("common.url._resolve_to_ips", lambda hostname: [])
+        monkeypatch.setattr(
+            "common.url._resolve_to_ips_with_transient", lambda hostname: ([], False)
+        )
         with pytest.raises(ValueError):
             validate_outbound_webhook_url("http://unresolvable.example.invalid/hook")
+
+    def test_transient_dns_failure_raises_retryable_error(self, monkeypatch):
+        from common.url import WebhookDestinationDNSRetryableError
+
+        monkeypatch.setattr(
+            "common.url._resolve_to_ips_with_transient", lambda hostname: ([], True)
+        )
+        with pytest.raises(WebhookDestinationDNSRetryableError):
+            validate_outbound_webhook_url("http://public.example.com/hook")
+
+    def test_transient_dns_failure_is_validation_error(self, monkeypatch):
+        from common.url import (
+            WebhookDestinationDNSRetryableError,
+            WebhookDestinationValidationError,
+        )
+
+        monkeypatch.setattr(
+            "common.url._resolve_to_ips_with_transient", lambda hostname: ([], True)
+        )
+        try:
+            validate_outbound_webhook_url("http://public.example.com/hook")
+        except WebhookDestinationDNSRetryableError as exc:
+            assert isinstance(exc, WebhookDestinationValidationError)
+        else:
+            raise AssertionError("expected retryable DNS error")
 
     def test_accepts_hostname_resolving_to_public_ip(self, monkeypatch):
         from ipaddress import ip_address
 
         monkeypatch.setattr(
-            "common.url._resolve_to_ips",
-            lambda hostname: [ip_address("93.184.216.34")],
+            "common.url._resolve_to_ips_with_transient",
+            lambda hostname: ([ip_address("93.184.216.34")], False),
         )
         assert validate_outbound_webhook_url("http://public.example.com/hook") is None
