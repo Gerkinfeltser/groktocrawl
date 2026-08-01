@@ -2,6 +2,9 @@
 
 **A self-hosted, API-compatible Firecrawl alternative. MIT licensed. Architecture so simple it fits in your head.**
 
+> [!NOTE]
+> **Historical vision document.** This records the project's founding intent and original MVP plan; it does not describe the current implementation or architecture. The [ADR index](docs/adr/README.md) is the system of record for architectural decisions. For a current service overview, see [Architecture](docs/architecture.md).
+
 ---
 
 ## The Vision
