@@ -59,16 +59,19 @@ def _sign_body(body: bytes, secret: str) -> str:
 
 
 def _redact_webhook_url(url: str) -> str:
-    """Mask the path and query of a webhook URL for log messages.
+    """Mask the path, query, and credentials of a webhook URL for logs.
 
     Webhook URLs commonly embed secret tokens in the path or query (e.g.
-    Slack/Discord hooks), so logs must only expose ``scheme://host``.
+    Slack/Discord hooks) and may carry userinfo credentials, so logs must
+    only expose ``scheme://host[:port]``.
     """
     try:
         parsed = urlparse(url)
         if not parsed.hostname:
             return "<redacted>"
-        return f"{parsed.scheme}://{parsed.netloc}/***"
+        host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+        port = f":{parsed.port}" if parsed.port is not None else ""
+        return f"{parsed.scheme}://{host}{port}/***"
     except Exception:
         return "<redacted>"
 

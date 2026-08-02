@@ -930,3 +930,14 @@ class TestWebhookSsrfGuard:
         assert "hooks.slack.com" in redacted
         assert redacted.endswith("/***")
         assert _redact_webhook_url("not-a-url") == "<redacted>"
+
+    def test_redact_webhook_url_masks_userinfo(self):
+        from agent.webhook import _redact_webhook_url
+
+        redacted = _redact_webhook_url(
+            "https://user:supersecret@hooks.example.com:8443/path/token"
+        )
+        assert "user" not in redacted
+        assert "supersecret" not in redacted
+        assert "token" not in redacted
+        assert "hooks.example.com:8443" in redacted
