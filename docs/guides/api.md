@@ -24,6 +24,8 @@ Persistent state is not restart-safe execution. Valkey preserves job status and 
 
 Every asynchronous creation request accepts webhook configuration. Completion and failure delivery is best effort and is not persisted for retry after process loss; verify the endpoint’s OpenAPI model for the exact field shape and sign requests with `WEBHOOK_SECRET` where configured.
 
+Webhook destinations are validated before delivery: only `http`/`https` URLs resolving to public hosts are accepted, and private, loopback, link-local, multicast, metadata, and other restricted destinations are skipped with a warning in the service log. Redirects are not followed during delivery, so a validated destination cannot be redirected to a restricted host. Monitor webhooks follow the same policy.
+
 ## Common workflows
 
 ### Research or answer

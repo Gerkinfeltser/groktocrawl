@@ -13,13 +13,13 @@ import difflib
 import json
 import logging
 import os
-import sys
-from datetime import datetime, timezone
 from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 from redis import Redis
+
+from .webhook import ensure_deliverable_webhook_destination
 
 logger = logging.getLogger(__name__)
 
@@ -144,20 +144,31 @@ async def check_monitor(monitor_id: str, config: dict) -> dict:
 
     # Notify via webhook
     if webhook_url and result.get("changed"):
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                await client.post(
-                    webhook_url,
-                    json={
-                        "event": "monitor.changed",
-                        "monitor_id": monitor_id,
-                        "url": url,
-                        "diff": result["diff"],
-                        "checked_at": result["checked_at"],
-                    },
+        # SSRF guard (issue #469): same validation policy as job webhooks —
+        # public HTTP(S) destinations only, transient DNS failures retried.
+        if await ensure_deliverable_webhook_destination(
+            webhook_url, context=f"monitor {monitor_id}"
+        ):
+            try:
+                # Redirects disabled so a validated public destination
+                # cannot be redirected to a restricted host.
+                async with httpx.AsyncClient(
+                    timeout=10, follow_redirects=False
+                ) as client:
+                    await client.post(
+                        webhook_url,
+                        json={
+                            "event": "monitor.changed",
+                            "monitor_id": monitor_id,
+                            "url": url,
+                            "diff": result["diff"],
+                            "checked_at": result["checked_at"],
+                        },
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Webhook delivery failed for monitor %s: %s", monitor_id, e
                 )
-        except Exception as e:
-            logger.warning("Webhook delivery failed for monitor %s: %s", monitor_id, e)
 
     _store_check(monitor_id, result)
     return result
@@ -188,7 +199,7 @@ async def run_search_monitor(monitor_id: str, config: dict) -> dict:
     r = _get_redis()
     searxng = SearXNGClient(SEARXNG_URL)
     try:
-        search_results, health = await searxng.search(
+        search_results, _ = await searxng.search(
             query=query,
             limit=num_results,
             categories=categories,
@@ -235,29 +246,47 @@ async def run_search_monitor(monitor_id: str, config: dict) -> dict:
 
     # Update stored config
     config["last_checked"] = _now_iso()
-    config["last_result"] = f"{len(new_urls)} new results" if new_urls else "no new results"
+    config["last_result"] = (
+        f"{len(new_urls)} new results" if new_urls else "no new results"
+    )
     save_monitor(monitor_id, config)
 
     # Notify via webhook (only new results)
     if webhook_url and new_urls:
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                await client.post(webhook_url, json={
-                    "event": "monitor.changed",
-                    "monitor_id": monitor_id,
-                    "monitor_type": "search",
-                    "query": query,
-                    "new_results": result["new_results"],
-                    "checked_at": result["checked_at"],
-                })
-        except Exception as e:
-            logger.warning("Webhook delivery failed for search monitor %s: %s", monitor_id, e)
+        # SSRF guard (issue #469): same validation policy as job webhooks —
+        # public HTTP(S) destinations only, transient DNS failures retried.
+        if await ensure_deliverable_webhook_destination(
+            webhook_url, context=f"search monitor {monitor_id}"
+        ):
+            try:
+                # Redirects disabled so a validated public destination
+                # cannot be redirected to a restricted host.
+                async with httpx.AsyncClient(
+                    timeout=10, follow_redirects=False
+                ) as client:
+                    await client.post(
+                        webhook_url,
+                        json={
+                            "event": "monitor.changed",
+                            "monitor_id": monitor_id,
+                            "monitor_type": "search",
+                            "query": query,
+                            "new_results": result["new_results"],
+                            "checked_at": result["checked_at"],
+                        },
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Webhook delivery failed for search monitor %s: %s", monitor_id, e
+                )
 
     _store_check(monitor_id, result)
     return result
 
 
-async def run_monitor(monitor_id: str, scraper_url: str = "http://scraper-svc:8001") -> dict:
+async def run_monitor(
+    monitor_id: str, scraper_url: str = "http://scraper-svc:8001"
+) -> dict:
     """Run a single monitor check immediately, regardless of schedule.
 
     Loads the monitor config, dispatches to the appropriate check function
@@ -281,12 +310,20 @@ async def check_all_async() -> list[dict]:
     for mid, config in monitors.items():
         mt = config.get("monitor_type", "scrape")
         if mt == "search":
-            logger.info("Checking search monitor %s: %s", mid, config.get("search_config", {}).get("query"))
+            logger.info(
+                "Checking search monitor %s: %s",
+                mid,
+                config.get("search_config", {}).get("query"),
+            )
             try:
                 result = await run_search_monitor(mid, config)
                 results.append(result)
                 if result.get("changed"):
-                    logger.info("Search monitor %s: %d new results", mid, result.get("new_count", 0))
+                    logger.info(
+                        "Search monitor %s: %d new results",
+                        mid,
+                        result.get("new_count", 0),
+                    )
             except Exception as e:
                 logger.error("Search monitor %s failed: %s", mid, e)
         else:
@@ -316,7 +353,9 @@ def check_all() -> None:
         )
         for r in changed:
             if r.get("monitor_type") == "search":
-                print(f"  NEW RESULTS: {r.get('query', '?')} ({r['monitor_id']}) — {r.get('new_count', 0)} new")
+                print(
+                    f"  NEW RESULTS: {r.get('query', '?')} ({r['monitor_id']}) — {r.get('new_count', 0)} new"
+                )
             else:
                 print(f"  CHANGED: {r['url']} ({r['monitor_id']})")
             logger.info("  CHANGED: %s (%s)", r["url"], r["monitor_id"])

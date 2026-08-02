@@ -30,9 +30,12 @@ _PRIVATE_NETWORKS: list[IPv4Network | IPv6Network] = [
     ip_network("100.64.0.0/10"),  # Carrier-grade NAT (RFC 6598)
     ip_network("198.18.0.0/15"),  # Benchmarking (RFC 2544)
     ip_network("240.0.0.0/4"),  # Reserved / future use
+    ip_network("224.0.0.0/4"),  # Multicast (RFC 5771)
     ip_network("::1/128"),  # IPv6 loopback
     ip_network("fc00::/7"),  # IPv6 unique-local (ULA)
     ip_network("fe80::/10"),  # IPv6 link-local
+    ip_network("ff00::/8"),  # IPv6 multicast
+    ip_network("64:ff9b::/32"),  # NAT64 WKP + local-use (RFC 6052/7050)
 ]
 
 _METADATA_IPS: list[IPv4Address | IPv6Address] = [
@@ -44,6 +47,11 @@ _METADATA_IPS: list[IPv4Address | IPv6Address] = [
 _PRIVATE_HOSTNAME_SUFFIXES: list[str] = [
     ".docker.internal",
 ]
+
+# IPv6 networks that embed an IPv4 destination (RFC 4291, RFC 3056, RFC 4380)
+_IPV4_COMPATIBLE_NET = ip_network("::/96")  # deprecated IPv4-compatible
+_6TO4_NET = ip_network("2002::/16")  # 6to4 relay prefix
+_TEREDO_NET = ip_network("2001::/32")  # Teredo service prefix
 
 
 # ── Public API ─────────────────────────────────────────────────────
@@ -108,8 +116,66 @@ def is_same_origin(url1: str, url2: str) -> bool:
     )
 
 
+def _unmap_embedded_ipv4(
+    addr: IPv4Address | IPv6Address,
+) -> IPv4Address | IPv6Address:
+    """Unwrap IPv6 forms that embed an IPv4 destination to their IPv4 address.
+
+    Handles the encapsulation forms that carry an IPv4 destination and
+    can reach it with the right routing, so the embedded address is
+    checked against IPv4 private ranges instead of passing as a
+    non-private IPv6 literal:
+
+    * ``::ffff:a.b.c.d`` — IPv4-mapped (RFC 4291 section 2.2)
+    * ``::a.b.c.d`` — deprecated IPv4-compatible (RFC 4291 section 2.5.5.1)
+    * ``2002:a.b.c.d::/48`` — 6to4 (RFC 3056)
+    * ``2001:0000::/32`` — Teredo, de-obfuscated client IPv4 (RFC 4380)
+
+    Without unmapping, e.g. ``::ffff:127.0.0.1`` or ``2002:0a00:0001::``
+    matches no IPv6 private network and the SSRF guard is bypassed.
+    NAT64 addresses (``64:ff9b::/32``) are rejected outright as a
+    special-purpose range in :data:`_PRIVATE_NETWORKS`; no extraction is
+    needed for them.
+    """
+    if not isinstance(addr, IPv6Address):
+        return addr
+    if addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped
+    int_addr = int(addr)
+    if addr in _IPV4_COMPATIBLE_NET:
+        return IPv4Address(int_addr & 0xFFFFFFFF)
+    if addr in _6TO4_NET:
+        # IPv4 occupies hextets 2-3 (int bits 80-111)
+        return IPv4Address((int_addr >> 80) & 0xFFFFFFFF)
+    if addr in _TEREDO_NET:
+        # Destination is the Teredo client IPv4 (low 32 bits, XOR-obscured)
+        return IPv4Address((int_addr & 0xFFFFFFFF) ^ 0xFFFFFFFF)
+    return addr
+
+
 def _resolve_to_ips(hostname: str) -> list[IPv4Address | IPv6Address]:
-    """Resolve a hostname to all IP addresses (IPv4 and IPv6)."""
+    """Resolve a hostname to all IP addresses (IPv4 and IPv6).
+
+    Addresses are returned raw; :func:`_addr_is_restricted` handles
+    embedded-IPv4 forms when checked.
+    """
+    ips, _transient = _resolve_to_ips_with_transient(hostname)
+    return ips
+
+
+def _resolve_to_ips_with_transient(
+    hostname: str,
+) -> tuple[list[IPv4Address | IPv6Address], bool]:
+    """Resolve a hostname, reporting whether the failure was transient.
+
+    Returns ``(ips, transient)``. ``transient`` is True when DNS failed
+    with a temporary resolver error (``EAI_AGAIN``) that may succeed on
+    retry, so callers can distinguish retryable failures from permanent
+    ones (NXDOMAIN, misconfigured resolver, etc.).
+
+    Addresses are returned raw; :func:`_addr_is_restricted` handles
+    IPv4-embedded forms when checked.
+    """
     try:
         addrinfo = socket.getaddrinfo(hostname, None)
         ips: set[IPv4Address | IPv6Address] = set()
@@ -118,10 +184,38 @@ def _resolve_to_ips(hostname: str) -> list[IPv4Address | IPv6Address]:
                 ips.add(ip_address(sockaddr[0]))
             except ValueError:
                 continue
-        return list(ips)
-    except socket.gaierror:
+        return list(ips), False
+    except socket.gaierror as exc:
         logger.warning("DNS resolution failed for %s — treating as private", hostname)
-        return []
+        return [], exc.errno == getattr(socket, "EAI_AGAIN", -3)
+    except UnicodeError:
+        # Non-IDNA hostnames (e.g. >63-char labels) are permanently
+        # unresolvable, not transiently failing.
+        logger.warning("DNS resolution failed for %s — treating as private", hostname)
+        return [], False
+
+
+def _addr_is_restricted(addr: IPv4Address | IPv6Address) -> bool:
+    """Return True when an IP address is private or otherwise restricted.
+
+    Checks the raw address first (covers special-purpose ranges like the
+    NAT64 ``64:ff9b::/32`` block and multicast), then unwraps IPv6 forms
+    that embed an IPv4 destination and checks the embedded address
+    against the same ranges.
+    """
+    for net in _PRIVATE_NETWORKS:
+        if addr in net:
+            return True
+    if addr in _METADATA_IPS:
+        return True
+    unmapped = _unmap_embedded_ipv4(addr)
+    if unmapped is not addr:
+        for net in _PRIVATE_NETWORKS:
+            if unmapped in net:
+                return True
+        if unmapped in _METADATA_IPS:
+            return True
+    return False
 
 
 def is_private_host(url: str) -> bool:
@@ -149,12 +243,7 @@ def is_private_host(url: str) -> bool:
 
     # Check if hostname is itself a private IP literal
     try:
-        addr = ip_address(hostname)
-        for net in _PRIVATE_NETWORKS:
-            if addr in net:
-                return True
-        # It's a valid, non-private IP literal — safe to navigate
-        return addr in _METADATA_IPS
+        return _addr_is_restricted(ip_address(hostname))
     except ValueError:
         pass  # Not an IP literal, treat as hostname
 
@@ -164,11 +253,111 @@ def is_private_host(url: str) -> bool:
         # Can't resolve — _resolve_to_ips already logged at WARNING
         return True
 
-    for addr in ips:
-        for net in _PRIVATE_NETWORKS:
-            if addr in net:
-                return True
-        if addr in _METADATA_IPS:
-            return True
+    return any(_addr_is_restricted(addr) for addr in ips)
 
-    return False
+
+class WebhookDestinationValidationError(ValueError):
+    """A webhook destination was permanently rejected by the SSRF guard."""
+
+
+class WebhookDestinationDNSRetryableError(WebhookDestinationValidationError):
+    """Webhook destination validation failed due to a transient DNS error.
+
+    Raised when the hostname could not be resolved because of a
+    temporary resolver failure (``EAI_AGAIN``). Callers should retry
+    rather than treat the destination as permanently rejected.
+    """
+
+
+def validate_outbound_webhook_url(url: str) -> None:
+    """Validate a user-supplied webhook destination before delivery.
+
+    Enforces the shared SSRF policy for outbound webhook POSTs: only
+    explicit ``http``/``https`` schemes are allowed, and the host must
+    resolve to a public, non-restricted address.
+
+    This function never raises exceptions other than the documented
+    contract below; malformed URLs (bad IPv6 brackets, non-IDNA
+    hostnames, etc.) are treated as permanent rejections rather than
+    leaking parser or resolver errors to callers.
+
+    Raises:
+        WebhookDestinationValidationError: If the URL is missing, uses a
+            non-HTTP(S) scheme, has no hostname, or its host is
+            private/restricted — a permanent rejection.
+        WebhookDestinationDNSRetryableError: If the hostname could not
+            be resolved due to a transient DNS failure (``EAI_AGAIN``);
+            a subclass of ``WebhookDestinationValidationError`` so
+            callers may retry or treat it as a rejection.
+
+    DNS resolution and host checks use the same private/hostile network
+    definitions as :func:`is_private_host` (RFC 1918, loopback,
+    link-local, multicast, metadata endpoints, Docker internal
+    hostnames), and unresolvable hostnames fail closed.
+    """
+    try:
+        _validate_outbound_webhook_url_inner(url)
+    except WebhookDestinationValidationError:
+        raise
+    except Exception as exc:  # pragma: no cover - defense in depth
+        raise WebhookDestinationValidationError(
+            f"webhook URL could not be validated: {exc}"
+        ) from exc
+
+
+def _validate_outbound_webhook_url_inner(url: str) -> None:
+    """Implementation of :func:`validate_outbound_webhook_url`.
+
+    Raises ``WebhookDestinationValidationError`` /
+    ``WebhookDestinationDNSRetryableError`` for every rejection; the
+    public wrapper converts any unexpected exception to the permanent
+    rejection contract.
+    """
+    if not isinstance(url, str) or not url.strip():
+        raise WebhookDestinationValidationError("webhook URL is missing")
+
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise WebhookDestinationValidationError(
+            f"webhook URL must use http or https, got {parsed.scheme!r}"
+        )
+
+    try:
+        hostname = parsed.hostname
+    except ValueError:
+        raise WebhookDestinationValidationError(
+            "webhook URL has an invalid host"
+        ) from None
+    if not hostname:
+        raise WebhookDestinationValidationError("webhook URL has no hostname")
+
+    hostname_lower = hostname.lower()
+    for suffix in _PRIVATE_HOSTNAME_SUFFIXES:
+        if hostname_lower.endswith(suffix):
+            raise WebhookDestinationValidationError(
+                "webhook URL resolves to a private or restricted destination"
+            )
+
+    # IP literal (deterministic — includes IPv4-embedding IPv6 literals)
+    try:
+        addr = ip_address(hostname)
+    except ValueError:
+        addr = None
+    if addr is not None:
+        if _addr_is_restricted(addr):
+            raise WebhookDestinationValidationError(
+                "webhook URL resolves to a private or restricted destination"
+            )
+        return
+
+    # Hostname: resolve and check every address; transient DNS failures
+    # are retryable rather than permanent rejections.
+    ips, transient = _resolve_to_ips_with_transient(hostname)
+    if transient:
+        raise WebhookDestinationDNSRetryableError(
+            "webhook URL DNS resolution temporarily failed"
+        )
+    if not ips or any(_addr_is_restricted(addr) for addr in ips):
+        raise WebhookDestinationValidationError(
+            "webhook URL resolves to a private or restricted destination"
+        )

@@ -18,6 +18,29 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Captured before the autouse _public_dns fixture patches the resolver, so
+# tests that need the real DNS behavior can restore it.
+from common import url as _common_url
+
+_REAL_RESOLVE = _common_url._resolve_to_ips_with_transient
+
+
+@pytest.fixture(autouse=True)
+def _public_dns(monkeypatch):
+    """Make DNS resolution hermetic: every hostname resolves to a public IP.
+
+    Webhook destination validation (issue #469) resolves hostnames via
+    ``common.url._resolve_to_ips_with_transient``. Real lookups would be
+    slow and nondeterministic in CI, so tests stub them to a public
+    address.
+    """
+    from ipaddress import ip_address
+
+    monkeypatch.setattr(
+        "common.url._resolve_to_ips_with_transient",
+        lambda hostname: ([ip_address("93.184.216.34")], False),
+    )
+
 
 class TestSignBody:
     def test_signs_body_correctly(self):
@@ -624,3 +647,297 @@ class TestDeliverWebhook:
             assert body["success"] is True
             assert body["error"] is None
             assert body["data"] == {"pages": [{"url": "https://example.com"}]}
+
+
+class TestWebhookSsrfGuard:
+    """SSRF guard for webhook destinations (issue #469)."""
+
+    def _mock_client_cls(self):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+
+        mock_client = MagicMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client_cls = MagicMock()
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+
+        async def _post(*a, **kw):
+            return mock_resp
+
+        mock_client.post = MagicMock(side_effect=_post)
+        return mock_client_cls, mock_client
+
+    @pytest.mark.asyncio
+    async def test_rejects_loopback_destination(self):
+        """A loopback webhook destination is never posted to."""
+        from agent.webhook import deliver_webhook
+
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            await deliver_webhook(
+                {"url": "http://127.0.0.1:8080/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_rfc1918_destination(self):
+        """A private RFC 1918 webhook destination is never posted to."""
+        from agent.webhook import deliver_webhook
+
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            await deliver_webhook(
+                {"url": "http://10.0.0.5/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_link_local_destination(self):
+        """A link-local webhook destination is never posted to."""
+        from agent.webhook import deliver_webhook
+
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            await deliver_webhook(
+                {"url": "http://169.254.169.254/latest/meta-data/"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_ipv4_mapped_loopback_destination(self):
+        """An IPv4-mapped IPv6 loopback destination is never posted to."""
+        from agent.webhook import deliver_webhook
+
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            await deliver_webhook(
+                {"url": "http://[::ffff:127.0.0.1]:8080/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_http_scheme(self):
+        """Non-HTTP(S) webhook destinations are never posted to."""
+        from agent.webhook import deliver_webhook
+
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            await deliver_webhook(
+                {"url": "ftp://example.com/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_hostname_resolving_to_private_ip(self, monkeypatch):
+        """A public-looking hostname resolving to a private IP is rejected."""
+        from ipaddress import ip_address
+
+        from agent.webhook import deliver_webhook
+
+        monkeypatch.setattr(
+            "common.url._resolve_to_ips_with_transient",
+            lambda hostname: ([ip_address("192.168.1.99")], False),
+        )
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            await deliver_webhook(
+                {"url": "https://public.example.com/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fails_closed_on_dns_failure(self, monkeypatch):
+        """An unresolvable webhook hostname is rejected (fail closed)."""
+        from agent.webhook import deliver_webhook
+
+        monkeypatch.setattr(
+            "common.url._resolve_to_ips_with_transient", lambda hostname: ([], False)
+        )
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            await deliver_webhook(
+                {"url": "https://unresolvable.example.invalid/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_malformed_destination_does_not_crash_delivery(self):
+        """Malformed destinations are skipped without leaking parser errors."""
+        from agent.webhook import deliver_webhook
+
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            # Malformed IPv6 brackets: must not raise out of deliver_webhook
+            await deliver_webhook(
+                {"url": "http://[::1/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_overlong_label_destination_does_not_crash_delivery(
+        self, monkeypatch
+    ):
+        """A >63-char hostname label is skipped without leaking UnicodeError."""
+        from agent.webhook import deliver_webhook
+
+        # Restore real resolution so the IDNA label-too-long path is exercised
+        monkeypatch.setattr("common.url._resolve_to_ips_with_transient", _REAL_RESOLVE)
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            await deliver_webhook(
+                {"url": f"http://{'a' * 64}.example.com/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_transient_dns_failure_retries_validation(self, monkeypatch):
+        """A transient DNS failure retries instead of dropping the webhook."""
+        from agent.webhook import deliver_webhook
+
+        calls = {"n": 0}
+
+        def _flaky_resolve(hostname):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # First attempt: transient resolver failure
+                return ([], True)
+            from ipaddress import ip_address
+
+            return ([ip_address("93.184.216.34")], False)
+
+        monkeypatch.setattr("common.url._resolve_to_ips_with_transient", _flaky_resolve)
+
+        mock_client_cls, mock_client = self._mock_client_cls()
+        with patch("agent.webhook.httpx.AsyncClient", mock_client_cls):
+            await deliver_webhook(
+                {"url": "https://hook.example.com"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+        # Transient failure was retried; the second attempt delivered
+        assert calls["n"] >= 2
+        mock_client.post.assert_called_once()
+        assert mock_client.post.call_args.args[0] == "https://hook.example.com"
+
+    @pytest.mark.asyncio
+    async def test_persistent_transient_dns_failure_gives_up_after_retries(
+        self, monkeypatch
+    ):
+        """A persistent transient DNS failure retries, then gives up silently."""
+        from agent.webhook import deliver_webhook
+
+        calls = {"n": 0}
+
+        def _always_fail(hostname):
+            calls["n"] += 1
+            return ([], True)
+
+        monkeypatch.setattr("common.url._resolve_to_ips_with_transient", _always_fail)
+
+        with patch("agent.webhook.httpx.AsyncClient") as mock_client_cls:
+            await deliver_webhook(
+                {"url": "https://hook.example.com"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+        # One validation per attempt; no HTTP request was ever made
+        assert calls["n"] == 3
+        mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_public_ip_literal_still_delivers(self):
+        """A public IP-literal webhook destination still delivers."""
+        from agent.webhook import deliver_webhook
+
+        mock_client_cls, mock_client = self._mock_client_cls()
+        with patch("agent.webhook.httpx.AsyncClient", mock_client_cls):
+            await deliver_webhook(
+                {"url": "http://93.184.216.34/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+        mock_client.post.assert_called_once()
+        args, _kwargs = mock_client.post.call_args
+        assert args[0] == "http://93.184.216.34/hook"
+
+    @pytest.mark.asyncio
+    async def test_redirects_disabled(self):
+        """Redirects are disabled on the webhook HTTP client."""
+        from agent.webhook import deliver_webhook
+
+        mock_client_cls, _ = self._mock_client_cls()
+        with patch("agent.webhook.httpx.AsyncClient", mock_client_cls):
+            await deliver_webhook(
+                {"url": "https://hook.example.com"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+        kwargs = mock_client_cls.call_args.kwargs
+        assert kwargs["follow_redirects"] is False
+
+    @pytest.mark.asyncio
+    async def test_rejection_logs_redact_path_tokens(self, caplog):
+        """Rejected webhook URLs are logged without their path/query tokens."""
+        import logging
+
+        from agent.webhook import deliver_webhook
+
+        with (
+            patch("agent.webhook.httpx.AsyncClient") as mock_client_cls,
+            caplog.at_level(logging.WARNING, logger="agent.webhook"),
+        ):
+            await deliver_webhook(
+                {"url": "http://127.0.0.1:8080/services/T0000/secret-token/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+        assert "secret-token" not in caplog.text
+        assert "services" not in caplog.text
+        assert "127.0.0.1:8080" in caplog.text  # host is still useful in logs
+
+    def test_redact_webhook_url_masks_path_and_query(self):
+        from agent.webhook import _redact_webhook_url
+
+        redacted = _redact_webhook_url(
+            "https://hooks.slack.com/services/T0000/B0000/token123?x=1"
+        )
+        assert "token123" not in redacted
+        assert "hooks.slack.com" in redacted
+        assert redacted.endswith("/***")
+        assert _redact_webhook_url("not-a-url") == "<redacted>"
+
+    def test_redact_webhook_url_masks_userinfo(self):
+        from agent.webhook import _redact_webhook_url
+
+        redacted = _redact_webhook_url(
+            "https://user:supersecret@hooks.example.com:8443/path/token"
+        )
+        assert "user" not in redacted
+        assert "supersecret" not in redacted
+        assert "token" not in redacted
+        assert "hooks.example.com:8443" in redacted

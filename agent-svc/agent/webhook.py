@@ -22,8 +22,15 @@ import hmac
 import json
 import logging
 import uuid
+from urllib.parse import urlparse
 
 import httpx
+
+from common.url import (
+    WebhookDestinationDNSRetryableError,
+    WebhookDestinationValidationError,
+    validate_outbound_webhook_url,
+)
 
 from .settings import load_settings
 
@@ -49,6 +56,86 @@ def _next_webhook_id() -> str:
 def _sign_body(body: bytes, secret: str) -> str:
     """HMAC-SHA256 sign the request body."""
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+def _redact_webhook_url(url: str) -> str:
+    """Mask the path, query, and credentials of a webhook URL for logs.
+
+    Webhook URLs commonly embed secret tokens in the path or query (e.g.
+    Slack/Discord hooks) and may carry userinfo credentials, so logs must
+    only expose ``scheme://host[:port]``.
+    """
+    try:
+        parsed = urlparse(url)
+        if not parsed.hostname:
+            return "<redacted>"
+        host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+        port = f":{parsed.port}" if parsed.port is not None else ""
+        return f"{parsed.scheme}://{host}{port}/***"
+    except Exception:
+        return "<redacted>"
+
+
+async def ensure_deliverable_webhook_destination(
+    url: str,
+    *,
+    context: str = "",
+    max_retries: int = MAX_RETRIES,
+) -> bool:
+    """Validate a webhook destination, retrying transient DNS failures.
+
+    Shared by the job delivery path (``deliver_webhook``) and the monitor
+    notify paths (``agent.monitor``) so every outbound webhook POST is
+    gated by the same policy (issue #469): public HTTP(S) destinations
+    only, transient DNS failures retried with exponential backoff, and
+    permanent rejections skipped without attempting a request.
+
+    Args:
+        url: The webhook destination URL.
+        context: Optional label (e.g. ``"job abc"`` / ``"monitor m1"``)
+            included in log messages.
+        max_retries: Number of validation attempts for transient DNS
+            failures (backoff ``2**attempt`` seconds between attempts).
+
+    Returns:
+        ``True`` when the destination passed validation and may be posted
+        to; ``False`` when it was permanently rejected or validation gave
+        up after exhausting retries on transient DNS failures. Never
+        raises.
+    """
+    prefix = f"{context}: " if context else ""
+    for attempt in range(1, max_retries + 1):
+        try:
+            await asyncio.to_thread(validate_outbound_webhook_url, url)
+            return True
+        except WebhookDestinationDNSRetryableError:
+            if attempt < max_retries:
+                logger.warning(
+                    "%sWebhook attempt %d/%d: DNS resolution temporarily "
+                    "failed (url=%s)",
+                    prefix,
+                    attempt,
+                    max_retries,
+                    _redact_webhook_url(url),
+                )
+                await asyncio.sleep(2**attempt)
+            else:
+                logger.error(
+                    "%sWebhook delivery failed after %d attempts: DNS "
+                    "resolution temporarily failed (url=%s)",
+                    prefix,
+                    max_retries,
+                    _redact_webhook_url(url),
+                )
+        except WebhookDestinationValidationError as e:
+            logger.warning(
+                "%sWebhook skipped: %s (url=%s)",
+                prefix,
+                e,
+                _redact_webhook_url(url),
+            )
+            return False
+    return False
 
 
 async def deliver_webhook(
@@ -120,9 +207,20 @@ async def deliver_webhook(
         )
 
     async def _do_deliver() -> None:
+        # SSRF guard (issue #469): skip permanently rejected destinations;
+        # transient DNS failures are retried inside the shared validator.
+        if not await ensure_deliverable_webhook_destination(
+            url, context=f"job {job_id}"
+        ):
+            return
+
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
+                # Redirects are disabled so a validated public destination
+                # can never be redirected to a restricted host (issue #469).
+                async with httpx.AsyncClient(
+                    timeout=TIMEOUT_SECONDS, follow_redirects=False
+                ) as client:
                     resp = await client.post(url, content=body, headers=headers)
                     if resp.status_code < 500:
                         logger.info(
