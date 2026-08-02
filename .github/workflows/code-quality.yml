@@ -26,7 +26,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install tooling
-        run: pip install vulture deptry mypy ruff
+        run: pip install vulture mypy ruff
 
       - name: Run vulture (dead code detection)
         run: |
@@ -36,10 +36,19 @@ jobs:
 
       - name: Run deptry per service (unused dependency detection)
         run: |
-          for svc in agent-svc scraper-svc semantic-svc browser-svc parse-svc portal-svc; do
-            echo "=== $svc ==="
-            pip install -e "$svc" 2>/dev/null || true
-            deptry "$svc" --per-rule-ignores '{"DEP002":["pytest","pytest-cov","pytest-xdist","httpx","vulture","deptry"]}' || true
+          set -euo pipefail
+          deptry_root="$(mktemp -d "${RUNNER_TEMP:?}/deptry.XXXXXX")"
+          trap 'rm -rf "$deptry_root"' EXIT
+          for svc in agent-svc scraper-svc semantic-svc browser-svc parse-svc portal-svc llm-svc mcp-svc; do
+            service_venv="$deptry_root/$svc"
+            echo "=== $svc: create isolated environment ==="
+            python3 -m venv "$service_venv"
+            echo "=== $svc: install deptry and service ==="
+            "$service_venv/bin/python" -m pip install deptry==0.25.1
+            (cd "$svc" && "$service_venv/bin/python" -m pip install -e .)
+            echo "=== $svc: deptry ==="
+            # All services import the repository's shared common package.
+            (cd "$svc" && "$service_venv/bin/deptry" . --known-first-party common --extend-exclude ".*/tests/")
           done
 
       - name: Run mypy (type checking)

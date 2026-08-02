@@ -8,3 +8,7 @@ dependencies = [
     "uvicorn[standard]>=0.34.0",
     "pydantic>=2.10.0",
 ]
+
+[tool.deptry.per_rule_ignores]
+# Uvicorn is the container entry point.
+DEP002 = ["uvicorn"]

@@ -12,3 +12,7 @@ dependencies = [
     "beautifulsoup4>=4.13.0",
     "python-multipart>=0.0.20",
 ]
+
+[tool.deptry.per_rule_ignores]
+# Uvicorn is the container entry point; FastAPI loads multipart support dynamically.
+DEP002 = ["uvicorn", "python-multipart"]
