@@ -16,3 +16,8 @@ py-modules = [
     'groktocrawl_client',
     'session_store',
 ]
+
+[tool.deptry.per_rule_ignores]
+# Uvicorn is the container entry point. Pydantic is pinned explicitly to satisfy
+# mcp==1.27.0's pydantic>=2.11.0,<3.0.0 compatibility constraint.
+DEP002 = ['uvicorn', 'pydantic']

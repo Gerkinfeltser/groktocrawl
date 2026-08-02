@@ -143,7 +143,7 @@ The `POST /v2/answer` endpoint emits four event types when `stream: true`. The p
 ### Container Details
 
 - **Base image:** `python:3.13-slim`
-- **Dependencies:** fastapi, uvicorn, httpx, jinja2, aiofiles
+- **Dependencies:** fastapi, uvicorn, httpx, jinja2, python-multipart
 - **Internal port:** 8081
 - **External port:** 8081 (mapped in docker-compose.yml)
 - **Health check:** GET /health (always returns 200 when portal-svc is up)

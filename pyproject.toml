@@ -126,7 +126,6 @@ module = [
     "pydantic.*",
     "numpy.*",
     "jinja2.*",
-    "aiofiles.*",
     "markitdown.*",
     "pypdf.*",
     "python_docx.*",
@@ -135,7 +134,6 @@ module = [
     "tabulate.*",
     "pillow.*",
     "youtube_transcript_api.*",
-    "crawl4ai.*",
     "python_multipart.*",
 ]
 ignore_missing_imports = true
