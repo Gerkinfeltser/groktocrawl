@@ -35,6 +35,7 @@ _PRIVATE_NETWORKS: list[IPv4Network | IPv6Network] = [
     ip_network("fc00::/7"),  # IPv6 unique-local (ULA)
     ip_network("fe80::/10"),  # IPv6 link-local
     ip_network("ff00::/8"),  # IPv6 multicast
+    ip_network("64:ff9b::/32"),  # NAT64 WKP + local-use (RFC 6052/7050)
 ]
 
 _METADATA_IPS: list[IPv4Address | IPv6Address] = [
@@ -47,12 +48,10 @@ _PRIVATE_HOSTNAME_SUFFIXES: list[str] = [
     ".docker.internal",
 ]
 
-# IPv6 networks that embed an IPv4 destination (RFC 4291, RFC 3056, RFC 4380,
-# RFC 6052)
+# IPv6 networks that embed an IPv4 destination (RFC 4291, RFC 3056, RFC 4380)
 _IPV4_COMPATIBLE_NET = ip_network("::/96")  # deprecated IPv4-compatible
 _6TO4_NET = ip_network("2002::/16")  # 6to4 relay prefix
 _TEREDO_NET = ip_network("2001::/32")  # Teredo service prefix
-_NAT64_NET = ip_network("64:ff9b::/96")  # NAT64 well-known prefix (RFC 6052)
 
 
 # ── Public API ─────────────────────────────────────────────────────
@@ -131,10 +130,12 @@ def _unmap_embedded_ipv4(
     * ``::a.b.c.d`` — deprecated IPv4-compatible (RFC 4291 section 2.5.5.1)
     * ``2002:a.b.c.d::/48`` — 6to4 (RFC 3056)
     * ``2001:0000::/32`` — Teredo, de-obfuscated client IPv4 (RFC 4380)
-    * ``64:ff9b::/96`` — NAT64 well-known prefix (RFC 6052)
 
     Without unmapping, e.g. ``::ffff:127.0.0.1`` or ``2002:0a00:0001::``
     matches no IPv6 private network and the SSRF guard is bypassed.
+    NAT64 addresses (``64:ff9b::/32``) are rejected outright as a
+    special-purpose range in :data:`_PRIVATE_NETWORKS`; no extraction is
+    needed for them.
     """
     if not isinstance(addr, IPv6Address):
         return addr
@@ -146,9 +147,6 @@ def _unmap_embedded_ipv4(
     if addr in _6TO4_NET:
         # IPv4 occupies hextets 2-3 (int bits 80-111)
         return IPv4Address((int_addr >> 80) & 0xFFFFFFFF)
-    if addr in _NAT64_NET:
-        # IPv4 occupies the low 32 bits
-        return IPv4Address(int_addr & 0xFFFFFFFF)
     if addr in _TEREDO_NET:
         # Destination is the Teredo client IPv4 (low 32 bits, XOR-obscured)
         return IPv4Address((int_addr & 0xFFFFFFFF) ^ 0xFFFFFFFF)
@@ -158,8 +156,8 @@ def _unmap_embedded_ipv4(
 def _resolve_to_ips(hostname: str) -> list[IPv4Address | IPv6Address]:
     """Resolve a hostname to all IP addresses (IPv4 and IPv6).
 
-    IPv4-mapped IPv6 results are unwrapped so downstream checks evaluate
-    the embedded IPv4 address against IPv4 private ranges.
+    Addresses are returned raw; :func:`_addr_is_restricted` handles
+    embedded-IPv4 forms when checked.
     """
     ips, _transient = _resolve_to_ips_with_transient(hostname)
     return ips
@@ -175,15 +173,15 @@ def _resolve_to_ips_with_transient(
     retry, so callers can distinguish retryable failures from permanent
     ones (NXDOMAIN, misconfigured resolver, etc.).
 
-    IPv4-mapped IPv6 results are unwrapped so downstream checks evaluate
-    the embedded IPv4 address against IPv4 private ranges.
+    Addresses are returned raw; :func:`_addr_is_restricted` handles
+    IPv4-embedded forms when checked.
     """
     try:
         addrinfo = socket.getaddrinfo(hostname, None)
         ips: set[IPv4Address | IPv6Address] = set()
         for _family, _stype, _proto, _canonname, sockaddr in addrinfo:
             try:
-                ips.add(_unmap_embedded_ipv4(ip_address(sockaddr[0])))
+                ips.add(ip_address(sockaddr[0]))
             except ValueError:
                 continue
         return list(ips), False
@@ -200,14 +198,24 @@ def _resolve_to_ips_with_transient(
 def _addr_is_restricted(addr: IPv4Address | IPv6Address) -> bool:
     """Return True when an IP address is private or otherwise restricted.
 
-    IPv4-mapped IPv6 addresses are unwrapped first so their embedded
-    IPv4 address is checked against IPv4 private ranges.
+    Checks the raw address first (covers special-purpose ranges like the
+    NAT64 ``64:ff9b::/32`` block and multicast), then unwraps IPv6 forms
+    that embed an IPv4 destination and checks the embedded address
+    against the same ranges.
     """
-    addr = _unmap_embedded_ipv4(addr)
     for net in _PRIVATE_NETWORKS:
         if addr in net:
             return True
-    return addr in _METADATA_IPS
+    if addr in _METADATA_IPS:
+        return True
+    unmapped = _unmap_embedded_ipv4(addr)
+    if unmapped is not addr:
+        for net in _PRIVATE_NETWORKS:
+            if unmapped in net:
+                return True
+        if unmapped in _METADATA_IPS:
+            return True
+    return False
 
 
 def is_private_host(url: str) -> bool:
@@ -235,8 +243,7 @@ def is_private_host(url: str) -> bool:
 
     # Check if hostname is itself a private IP literal
     try:
-        addr = _unmap_embedded_ipv4(ip_address(hostname))
-        return _addr_is_restricted(addr)
+        return _addr_is_restricted(ip_address(hostname))
     except ValueError:
         pass  # Not an IP literal, treat as hostname
 
@@ -333,7 +340,7 @@ def _validate_outbound_webhook_url_inner(url: str) -> None:
 
     # IP literal (deterministic — includes IPv4-embedding IPv6 literals)
     try:
-        addr = _unmap_embedded_ipv4(ip_address(hostname))
+        addr = ip_address(hostname)
     except ValueError:
         addr = None
     if addr is not None:

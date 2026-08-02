@@ -145,8 +145,17 @@ class TestIsPrivateHost:
         assert is_private_host("http://[64:ff9b::7f00:1]/test")
         assert is_private_host("http://[64:ff9b::a9fe:a9fe]/test")
 
-    def test_nat64_public(self):
-        assert not is_private_host("http://[64:ff9b::5db8:d822]/test")
+    def test_nat64_range_always_rejected(self):
+        """The whole 64:ff9b::/32 special-purpose range is rejected.
+
+        Covers the /96 well-known prefix, the /48 local-use prefix, and
+        /64-length prefixes regardless of where IPv4 is embedded, since
+        no legitimate public host lives in this IANA-reserved block.
+        """
+        assert is_private_host("http://[64:ff9b::5db8:d822]/test")
+        assert is_private_host("http://[64:ff9b:1::1]/test")
+        assert is_private_host("http://[64:ff9b:1::a00:1]/test")
+        assert is_private_host("http://[64:ff9b::1:a00:1]/test")
 
 
 class TestConstants:
@@ -261,12 +270,18 @@ class TestValidateOutboundWebhookUrl:
         with pytest.raises(ValueError):
             validate_outbound_webhook_url("http://[64:ff9b::a9fe:a9fe]/hook")
 
+    def test_rejects_nat64_range_at_validator_level(self):
+        """Every 64:ff9b::/32 address is rejected, regardless of form."""
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://[64:ff9b::5db8:d822]/hook")
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://[64:ff9b:1::1]/hook")
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://[64:ff9b:1::a00:1]/hook")
+
     def test_accepts_encapsulated_ipv4_public(self):
         assert validate_outbound_webhook_url("https://[2002:5db8:d822::]/hook") is None
         assert validate_outbound_webhook_url("https://[2001::a247:27dd]/hook") is None
-        assert (
-            validate_outbound_webhook_url("https://[64:ff9b::5db8:d822]/hook") is None
-        )
 
     def test_rejects_hostname_resolving_to_ipv4_mapped_private(self, monkeypatch):
         from ipaddress import ip_address

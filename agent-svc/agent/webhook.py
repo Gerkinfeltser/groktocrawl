@@ -22,6 +22,7 @@ import hmac
 import json
 import logging
 import uuid
+from urllib.parse import urlparse
 
 import httpx
 
@@ -55,6 +56,21 @@ def _next_webhook_id() -> str:
 def _sign_body(body: bytes, secret: str) -> str:
     """HMAC-SHA256 sign the request body."""
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+def _redact_webhook_url(url: str) -> str:
+    """Mask the path and query of a webhook URL for log messages.
+
+    Webhook URLs commonly embed secret tokens in the path or query (e.g.
+    Slack/Discord hooks), so logs must only expose ``scheme://host``.
+    """
+    try:
+        parsed = urlparse(url)
+        if not parsed.hostname:
+            return "<redacted>"
+        return f"{parsed.scheme}://{parsed.netloc}/***"
+    except Exception:
+        return "<redacted>"
 
 
 async def ensure_deliverable_webhook_destination(
@@ -93,27 +109,27 @@ async def ensure_deliverable_webhook_destination(
             if attempt < max_retries:
                 logger.warning(
                     "%sWebhook attempt %d/%d: DNS resolution temporarily "
-                    "failed (url=%r)",
+                    "failed (url=%s)",
                     prefix,
                     attempt,
                     max_retries,
-                    url,
+                    _redact_webhook_url(url),
                 )
                 await asyncio.sleep(2**attempt)
             else:
                 logger.error(
                     "%sWebhook delivery failed after %d attempts: DNS "
-                    "resolution temporarily failed (url=%r)",
+                    "resolution temporarily failed (url=%s)",
                     prefix,
                     max_retries,
-                    url,
+                    _redact_webhook_url(url),
                 )
         except WebhookDestinationValidationError as e:
             logger.warning(
-                "%sWebhook skipped: %s (url=%r)",
+                "%sWebhook skipped: %s (url=%s)",
                 prefix,
                 e,
-                url,
+                _redact_webhook_url(url),
             )
             return False
     return False

@@ -896,3 +896,37 @@ class TestWebhookSsrfGuard:
             )
         kwargs = mock_client_cls.call_args.kwargs
         assert kwargs["follow_redirects"] is False
+
+    @pytest.mark.asyncio
+    async def test_rejection_logs_redact_path_tokens(self, caplog):
+        """Rejected webhook URLs are logged without their path/query tokens."""
+        import logging
+
+        from agent.webhook import deliver_webhook
+
+        with (
+            patch("agent.webhook.httpx.AsyncClient") as mock_client_cls,
+            caplog.at_level(logging.WARNING, logger="agent.webhook"),
+        ):
+            await deliver_webhook(
+                {"url": "http://127.0.0.1:8080/services/T0000/secret-token/hook"},
+                "crawl.completed",
+                "job-1",
+                data=[],
+            )
+            mock_client_cls.assert_not_called()
+
+        assert "secret-token" not in caplog.text
+        assert "services" not in caplog.text
+        assert "127.0.0.1:8080" in caplog.text  # host is still useful in logs
+
+    def test_redact_webhook_url_masks_path_and_query(self):
+        from agent.webhook import _redact_webhook_url
+
+        redacted = _redact_webhook_url(
+            "https://hooks.slack.com/services/T0000/B0000/token123?x=1"
+        )
+        assert "token123" not in redacted
+        assert "hooks.slack.com" in redacted
+        assert redacted.endswith("/***")
+        assert _redact_webhook_url("not-a-url") == "<redacted>"
