@@ -50,11 +50,11 @@ unresolvable DNS fail closed). The multicast ranges `224.0.0.0/4` and
 `ff00::/8` were added to the shared private-network definitions to close the
 multicast gap. IPv6 forms that embed an IPv4 destination are unwrapped to
 their embedded IPv4 before checks — IPv4-mapped (`::ffff:a.b.c.d`),
-deprecated IPv4-compatible (`::a.b.c.d`), 6to4 (`2002::/16`), and Teredo
-(`2001:0000::/32`) — so `::ffff:127.0.0.1`, `2002:0a00:0001::`, and
-`::169.254.169.254`-style destinations are rejected rather than treated as
-public, while public embedded destinations (e.g. `2002:5db8:d822::`) remain
-allowed.
+deprecated IPv4-compatible (`::a.b.c.d`), 6to4 (`2002::/16`), Teredo
+(`2001:0000::/32`, de-obfuscated client IPv4), and NAT64 well-known prefix
+(`64:ff9b::/96`) — so `::ffff:127.0.0.1`, `2002:0a00:0001::`, and
+`64:ff9b::a9fe:a9fe` (metadata) are rejected rather than treated as public,
+while public embedded destinations (e.g. `2002:5db8:d822::`) remain allowed.
 
 The validator is called before every webhook dispatch:
 

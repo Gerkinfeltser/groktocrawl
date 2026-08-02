@@ -47,10 +47,12 @@ _PRIVATE_HOSTNAME_SUFFIXES: list[str] = [
     ".docker.internal",
 ]
 
-# IPv6 networks that embed an IPv4 destination (RFC 4291, RFC 3056, RFC 4380)
+# IPv6 networks that embed an IPv4 destination (RFC 4291, RFC 3056, RFC 4380,
+# RFC 6052)
 _IPV4_COMPATIBLE_NET = ip_network("::/96")  # deprecated IPv4-compatible
 _6TO4_NET = ip_network("2002::/16")  # 6to4 relay prefix
 _TEREDO_NET = ip_network("2001::/32")  # Teredo service prefix
+_NAT64_NET = ip_network("64:ff9b::/96")  # NAT64 well-known prefix (RFC 6052)
 
 
 # ── Public API ─────────────────────────────────────────────────────
@@ -128,7 +130,8 @@ def _unmap_embedded_ipv4(
     * ``::ffff:a.b.c.d`` — IPv4-mapped (RFC 4291 section 2.2)
     * ``::a.b.c.d`` — deprecated IPv4-compatible (RFC 4291 section 2.5.5.1)
     * ``2002:a.b.c.d::/48`` — 6to4 (RFC 3056)
-    * ``2001:0000:server:v4:...::/64`` — Teredo server IPv4 (RFC 4380)
+    * ``2001:0000::/32`` — Teredo, de-obfuscated client IPv4 (RFC 4380)
+    * ``64:ff9b::/96`` — NAT64 well-known prefix (RFC 6052)
 
     Without unmapping, e.g. ``::ffff:127.0.0.1`` or ``2002:0a00:0001::``
     matches no IPv6 private network and the SSRF guard is bypassed.
@@ -143,9 +146,12 @@ def _unmap_embedded_ipv4(
     if addr in _6TO4_NET:
         # IPv4 occupies hextets 2-3 (int bits 80-111)
         return IPv4Address((int_addr >> 80) & 0xFFFFFFFF)
+    if addr in _NAT64_NET:
+        # IPv4 occupies the low 32 bits
+        return IPv4Address(int_addr & 0xFFFFFFFF)
     if addr in _TEREDO_NET:
-        # Teredo server IPv4 occupies hextets 3-4 (int bits 64-95)
-        return IPv4Address((int_addr >> 64) & 0xFFFFFFFF)
+        # Destination is the Teredo client IPv4 (low 32 bits, XOR-obscured)
+        return IPv4Address((int_addr & 0xFFFFFFFF) ^ 0xFFFFFFFF)
     return addr
 
 

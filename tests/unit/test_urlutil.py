@@ -133,10 +133,20 @@ class TestIsPrivateHost:
         assert not is_private_host("http://[2002:5db8:d822::]/test")
 
     def test_teredo_private(self):
-        assert is_private_host("http://[2001:0000:0a00:0001::]/test")
+        # Client IPv4 is XOR-obscured: 10.0.0.1 -> f5ff:fffe
+        assert is_private_host("http://[2001::f5ff:fffe]/test")
 
     def test_teredo_public(self):
-        assert not is_private_host("http://[2001:0000:5db8:d822::]/test")
+        # Client IPv4 is XOR-obscured: 93.184.216.34 -> a247:27dd
+        assert not is_private_host("http://[2001::a247:27dd]/test")
+
+    def test_nat64_private(self):
+        assert is_private_host("http://[64:ff9b::a00:1]/test")
+        assert is_private_host("http://[64:ff9b::7f00:1]/test")
+        assert is_private_host("http://[64:ff9b::a9fe:a9fe]/test")
+
+    def test_nat64_public(self):
+        assert not is_private_host("http://[64:ff9b::5db8:d822]/test")
 
 
 class TestConstants:
@@ -243,15 +253,19 @@ class TestValidateOutboundWebhookUrl:
         with pytest.raises(ValueError):
             validate_outbound_webhook_url("http://[2002:0a00:0001::]/hook")
         with pytest.raises(ValueError):
-            validate_outbound_webhook_url("http://[2001:0000:0a00:0001::]/hook")
+            validate_outbound_webhook_url("http://[2001::f5ff:fffe]/hook")
         with pytest.raises(ValueError):
             validate_outbound_webhook_url("http://[2002:7f00:0001::]/hook")
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://[64:ff9b::a00:1]/hook")
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://[64:ff9b::a9fe:a9fe]/hook")
 
     def test_accepts_encapsulated_ipv4_public(self):
         assert validate_outbound_webhook_url("https://[2002:5db8:d822::]/hook") is None
+        assert validate_outbound_webhook_url("https://[2001::a247:27dd]/hook") is None
         assert (
-            validate_outbound_webhook_url("https://[2001:0000:5db8:d822::]/hook")
-            is None
+            validate_outbound_webhook_url("https://[64:ff9b::5db8:d822]/hook") is None
         )
 
     def test_rejects_hostname_resolving_to_ipv4_mapped_private(self, monkeypatch):
