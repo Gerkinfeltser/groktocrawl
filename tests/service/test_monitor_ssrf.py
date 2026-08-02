@@ -123,6 +123,75 @@ class TestScrapeMonitorWebhookSsrf:
         assert len(calls) == 2
         assert calls[1].kwargs["follow_redirects"] is False
 
+    @pytest.mark.asyncio
+    async def test_transient_dns_retried_then_delivers(self, monkeypatch):
+        """Transient DNS is retried by the shared validator before delivery."""
+        from agent.monitor import check_monitor
+
+        # Skip the exponential backoff so the test does not sleep
+        monkeypatch.setattr("agent.webhook.asyncio.sleep", AsyncMock())
+
+        calls = {"n": 0}
+
+        def _flaky_resolve(hostname):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return ([], True)  # transient failure on first attempt
+            from ipaddress import ip_address
+
+            return ([ip_address("93.184.216.34")], False)
+
+        monkeypatch.setattr("common.url._resolve_to_ips_with_transient", _flaky_resolve)
+
+        config = _changed_config("https://hook.example.com/changed")
+        with (
+            patch("agent.monitor._get_redis", return_value=_fake_redis()),
+            patch("agent.monitor.httpx.AsyncClient") as mock_client_cls,
+        ):
+            mock_client = MagicMock()
+            mock_client.__aenter__.return_value = mock_client
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            mock_client.post = AsyncMock(return_value=_scrape_response())
+
+            result = await check_monitor("m1", config)
+
+        assert result["changed"] is True
+        # DNS was retried, then the webhook was delivered (scrape + webhook)
+        assert calls["n"] >= 2
+        assert mock_client.post.await_count == 2
+        assert mock_client.post.await_args.args[0] == "https://hook.example.com/changed"
+
+    @pytest.mark.asyncio
+    async def test_persistent_transient_dns_gives_up_without_posting(
+        self,
+        monkeypatch,
+    ):
+        """Persistent transient DNS never posts; the check still succeeds."""
+        from agent.monitor import check_monitor
+
+        monkeypatch.setattr("agent.webhook.asyncio.sleep", AsyncMock())
+        monkeypatch.setattr(
+            "common.url._resolve_to_ips_with_transient", lambda hostname: ([], True)
+        )
+
+        config = _changed_config("https://hook.example.com/changed")
+        with (
+            patch("agent.monitor._get_redis", return_value=_fake_redis()),
+            patch("agent.monitor.httpx.AsyncClient") as mock_client_cls,
+        ):
+            mock_client = MagicMock()
+            mock_client.__aenter__.return_value = mock_client
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            mock_client.post = AsyncMock(return_value=_scrape_response())
+
+            result = await check_monitor("m1", config)
+
+        assert result["changed"] is True
+        # Only the scrape POST happened; the webhook validation gave up
+        mock_client.post.assert_awaited_once()
+        call_args = mock_client.post.await_args.args[0]
+        assert call_args.endswith("/scrape")
+
 
 class TestSearchMonitorWebhookSsrf:
     def _search_results(self):

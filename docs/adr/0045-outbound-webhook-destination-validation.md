@@ -56,19 +56,22 @@ deprecated IPv4-compatible (`::a.b.c.d`), 6to4 (`2002::/16`), Teredo
 `64:ff9b::a9fe:a9fe` (metadata) are rejected rather than treated as public,
 while public embedded destinations (e.g. `2002:5db8:d822::`) remain allowed.
 
-The validator is called before every webhook dispatch:
+One shared async gate, `ensure_deliverable_webhook_destination()`, is used
+before every webhook dispatch, so both paths share identical validation
+behavior:
 
-* `agent/webhook.py` — `deliver_webhook()` validates after the events filter and
-  before payload construction; a `ValueError` logs a warning and returns without
-  delivering (no retries, since a rejected configuration is not transient).
-* `agent/monitor.py` — both `check_monitor()` and `run_search_monitor()` validate
-  before the notify POST; a `ValueError` logs a warning and skips delivery while
-  the check result is stored normally.
+* `agent/webhook.py` — `deliver_webhook()` gates the delivery retry loop on the
+  shared gate.
+* `agent/monitor.py` — both `check_monitor()` and `run_search_monitor()` gate
+  the notify POST on the shared gate; the check result is stored normally even
+  when delivery is skipped.
 
-Because validation resolves DNS, it runs in a worker thread via
-`asyncio.to_thread()` so the event loop is not blocked. Redirects are disabled
-(`follow_redirects=False`) on all webhook HTTP clients so a validated public
-destination can never be redirected to a restricted host.
+The gate runs validation in a worker thread via `asyncio.to_thread()` so the
+event loop is not blocked; transient DNS failures (`EAI_AGAIN`) are retried
+with exponential backoff inside the gate, while permanent rejections
+(private/restricted destinations, malformed URLs) skip immediately. Redirects
+are disabled (`follow_redirects=False`) on all webhook HTTP clients so a
+validated public destination can never be redirected to a restricted host.
 
 ## Consequences
 

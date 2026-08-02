@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 from redis import Redis
 
-from common.url import validate_outbound_webhook_url
+from .webhook import ensure_deliverable_webhook_destination
 
 logger = logging.getLogger(__name__)
 
@@ -144,18 +144,11 @@ async def check_monitor(monitor_id: str, config: dict) -> dict:
 
     # Notify via webhook
     if webhook_url and result.get("changed"):
-        try:
-            # SSRF guard: reject private/restricted webhook destinations
-            # before attempting delivery (issue #469).
-            await asyncio.to_thread(validate_outbound_webhook_url, webhook_url)
-        except ValueError as e:
-            logger.warning(
-                "Webhook skipped for monitor %s: %s (url=%r)",
-                monitor_id,
-                e,
-                webhook_url,
-            )
-        else:
+        # SSRF guard (issue #469): same validation policy as job webhooks —
+        # public HTTP(S) destinations only, transient DNS failures retried.
+        if await ensure_deliverable_webhook_destination(
+            webhook_url, context=f"monitor {monitor_id}"
+        ):
             try:
                 # Redirects disabled so a validated public destination
                 # cannot be redirected to a restricted host.
@@ -260,18 +253,11 @@ async def run_search_monitor(monitor_id: str, config: dict) -> dict:
 
     # Notify via webhook (only new results)
     if webhook_url and new_urls:
-        try:
-            # SSRF guard: reject private/restricted webhook destinations
-            # before attempting delivery (issue #469).
-            await asyncio.to_thread(validate_outbound_webhook_url, webhook_url)
-        except ValueError as e:
-            logger.warning(
-                "Webhook skipped for search monitor %s: %s (url=%r)",
-                monitor_id,
-                e,
-                webhook_url,
-            )
-        else:
+        # SSRF guard (issue #469): same validation policy as job webhooks —
+        # public HTTP(S) destinations only, transient DNS failures retried.
+        if await ensure_deliverable_webhook_destination(
+            webhook_url, context=f"search monitor {monitor_id}"
+        ):
             try:
                 # Redirects disabled so a validated public destination
                 # cannot be redirected to a restricted host.

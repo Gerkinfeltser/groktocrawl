@@ -57,6 +57,68 @@ def _sign_body(body: bytes, secret: str) -> str:
     return hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
+async def ensure_deliverable_webhook_destination(
+    url: str,
+    *,
+    context: str = "",
+    max_retries: int = MAX_RETRIES,
+) -> bool:
+    """Validate a webhook destination, retrying transient DNS failures.
+
+    Shared by the job delivery path (``deliver_webhook``) and the monitor
+    notify paths (``agent.monitor``) so every outbound webhook POST is
+    gated by the same policy (issue #469): public HTTP(S) destinations
+    only, transient DNS failures retried with exponential backoff, and
+    permanent rejections skipped without attempting a request.
+
+    Args:
+        url: The webhook destination URL.
+        context: Optional label (e.g. ``"job abc"`` / ``"monitor m1"``)
+            included in log messages.
+        max_retries: Number of validation attempts for transient DNS
+            failures (backoff ``2**attempt`` seconds between attempts).
+
+    Returns:
+        ``True`` when the destination passed validation and may be posted
+        to; ``False`` when it was permanently rejected or validation gave
+        up after exhausting retries on transient DNS failures. Never
+        raises.
+    """
+    prefix = f"{context}: " if context else ""
+    for attempt in range(1, max_retries + 1):
+        try:
+            await asyncio.to_thread(validate_outbound_webhook_url, url)
+            return True
+        except WebhookDestinationDNSRetryableError:
+            if attempt < max_retries:
+                logger.warning(
+                    "%sWebhook attempt %d/%d: DNS resolution temporarily "
+                    "failed (url=%r)",
+                    prefix,
+                    attempt,
+                    max_retries,
+                    url,
+                )
+                await asyncio.sleep(2**attempt)
+            else:
+                logger.error(
+                    "%sWebhook delivery failed after %d attempts: DNS "
+                    "resolution temporarily failed (url=%r)",
+                    prefix,
+                    max_retries,
+                    url,
+                )
+        except WebhookDestinationValidationError as e:
+            logger.warning(
+                "%sWebhook skipped: %s (url=%r)",
+                prefix,
+                e,
+                url,
+            )
+            return False
+    return False
+
+
 async def deliver_webhook(
     webhook_config: dict | None,
     event: str,
@@ -126,72 +188,55 @@ async def deliver_webhook(
         )
 
     async def _do_deliver() -> None:
+        # SSRF guard (issue #469): skip permanently rejected destinations;
+        # transient DNS failures are retried inside the shared validator.
+        if not await ensure_deliverable_webhook_destination(
+            url, context=f"job {job_id}"
+        ):
+            return
+
         for attempt in range(1, MAX_RETRIES + 1):
-            # SSRF guard: reject destinations that are not public HTTP(S)
-            # hosts before any request is attempted (issue #469). Permanent
-            # rejections skip delivery; transient DNS failures retry so a
-            # momentary resolver error does not drop the webhook.
             try:
-                await asyncio.to_thread(validate_outbound_webhook_url, url)
-            except WebhookDestinationDNSRetryableError:
+                # Redirects are disabled so a validated public destination
+                # can never be redirected to a restricted host (issue #469).
+                async with httpx.AsyncClient(
+                    timeout=TIMEOUT_SECONDS, follow_redirects=False
+                ) as client:
+                    resp = await client.post(url, content=body, headers=headers)
+                    if resp.status_code < 500:
+                        logger.info(
+                            "Webhook delivered %s for job %s (webhookId=%s, status %d)",
+                            event,
+                            job_id,
+                            webhook_id,
+                            resp.status_code,
+                        )
+                        return
+                    logger.warning(
+                        "Webhook attempt %d/%d returned %d for job %s (webhookId=%s)",
+                        attempt,
+                        MAX_RETRIES,
+                        resp.status_code,
+                        job_id,
+                        webhook_id,
+                    )
+            except httpx.TimeoutException:
                 logger.warning(
-                    "Webhook attempt %d/%d: DNS resolution temporarily failed "
-                    "for job %s (url=%r)",
+                    "Webhook attempt %d/%d timed out for job %s (webhookId=%s)",
                     attempt,
                     MAX_RETRIES,
                     job_id,
-                    url,
+                    webhook_id,
                 )
-            except WebhookDestinationValidationError as e:
+            except Exception as e:
                 logger.warning(
-                    "Webhook skipped for job %s: %s (url=%r)",
+                    "Webhook attempt %d/%d failed for job %s: %s (webhookId=%s)",
+                    attempt,
+                    MAX_RETRIES,
                     job_id,
                     e,
-                    url,
+                    webhook_id,
                 )
-                return
-            else:
-                try:
-                    # Redirects are disabled so a validated public destination
-                    # can never be redirected to a restricted host (issue #469).
-                    async with httpx.AsyncClient(
-                        timeout=TIMEOUT_SECONDS, follow_redirects=False
-                    ) as client:
-                        resp = await client.post(url, content=body, headers=headers)
-                        if resp.status_code < 500:
-                            logger.info(
-                                "Webhook delivered %s for job %s (webhookId=%s, status %d)",
-                                event,
-                                job_id,
-                                webhook_id,
-                                resp.status_code,
-                            )
-                            return
-                        logger.warning(
-                            "Webhook attempt %d/%d returned %d for job %s (webhookId=%s)",
-                            attempt,
-                            MAX_RETRIES,
-                            resp.status_code,
-                            job_id,
-                            webhook_id,
-                        )
-                except httpx.TimeoutException:
-                    logger.warning(
-                        "Webhook attempt %d/%d timed out for job %s (webhookId=%s)",
-                        attempt,
-                        MAX_RETRIES,
-                        job_id,
-                        webhook_id,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "Webhook attempt %d/%d failed for job %s: %s (webhookId=%s)",
-                        attempt,
-                        MAX_RETRIES,
-                        job_id,
-                        e,
-                        webhook_id,
-                    )
 
             if attempt < MAX_RETRIES:
                 await asyncio.sleep(2**attempt)  # 2s, 4s
