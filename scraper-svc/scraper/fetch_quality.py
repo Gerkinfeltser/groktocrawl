@@ -153,13 +153,29 @@ def html_to_markdown(html: str) -> str:
     sites where the non-JS HTML shell lacks article-like structure).
     """
     try:
+        from bs4 import BeautifulSoup
         from markdownify import markdownify as md
         from readability import Document
 
         doc = Document(html)
         summary = doc.summary()
+        summary_soup = BeautifulSoup(summary, "html.parser")
+        for tag in summary_soup(["script", "style"]):
+            tag.decompose()
+        # Readability can retain site-level navigation in its fragment. Remove
+        # only nav elements that are direct children of Readability's root body;
+        # nested div-based article content may contain its own navigation.
+        fragment_root = summary_soup.find("body", id="readabilityBody")
+        if fragment_root is None:
+            fragment_root = summary_soup.find("body")
+        for tag in summary_soup.find_all("nav"):
+            if fragment_root is not None and tag.parent is fragment_root:
+                tag.decompose()
+        # The summary is Readability's selected content fragment. Keep its
+        # structural tags because headers and footers may be article metadata;
+        # page-level chrome is filtered above before markdown conversion.
         # Clean up readability's artifacts
-        markdown = md(summary, heading_style="ATX", strip=["script", "style"])
+        markdown = md(str(summary_soup), heading_style="ATX", strip=["script", "style"])
         # Collapse multiple blank lines
         markdown = re.sub(r"\n{3,}", "\n\n", markdown)
         result = markdown.strip()

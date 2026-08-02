@@ -36,6 +36,7 @@ fallback chains. Never fail-fast.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -182,6 +183,26 @@ TEXT_FILENAMES: set[str] = {
     "Gemfile.lock",
 }
 
+# GitHub's Readme API matches these names case-insensitively. The raw CDN does
+# not, so historical case variants stay ahead of newer AsciiDoc variants: the
+# bounded multi-branch probe plan can otherwise silently omit them.
+README_CANDIDATES: tuple[str, ...] = (
+    "README.md",
+    "README.rst",
+    "README",
+    "readme",
+    "Readme.md",
+    "readme.md",
+    "README.adoc",
+    "README.asc",
+)
+README_COMMON_CANDIDATES: tuple[str, ...] = ("README.md", "README.rst")
+RAW_ENDPOINT_BURST_LIMIT = 10
+RAW_README_RESERVED_CALLS = 2
+RAW_README_PROBE_LIMIT = RAW_ENDPOINT_BURST_LIMIT - RAW_README_RESERVED_CALLS
+RAW_README_REQUEST_TIMEOUT_SECONDS = 5.0
+RAW_README_DEADLINE_SECONDS = 20.0
+
 # ── API endpoint constants ───────────────────────────────────────
 API_BASE = "https://api.github.com"
 RAW_BASE = "https://raw.githubusercontent.com"
@@ -208,20 +229,17 @@ _TREE_URL_PATTERN = re.compile(
 
 # github.com repo root (no blob/tree/issue/pull suffix)
 _REPO_URL_PATTERN = re.compile(
-    r"^https?://(?:www\.)?github\.com/"
-    r"(?P<owner>[^/]+)/(?P<repo>[^/]+)$"
+    r"^https?://(?:www\.)?github\.com/" r"(?P<owner>[^/]+)/(?P<repo>[^/]+)$"
 )
 
 # github.com issue URLs — matched but NOT handled (falls through)
 _ISSUE_URL_PATTERN = re.compile(
-    r"^https?://(?:www\.)?github\.com/"
-    r"(?P<owner>[^/]+)/(?P<repo>[^/]+)/issues/\d+"
+    r"^https?://(?:www\.)?github\.com/" r"(?P<owner>[^/]+)/(?P<repo>[^/]+)/issues/\d+"
 )
 
 # github.com PR URLs — matched but NOT handled (falls through)
 _PULL_URL_PATTERN = re.compile(
-    r"^https?://(?:www\.)?github\.com/"
-    r"(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/\d+"
+    r"^https?://(?:www\.)?github\.com/" r"(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/\d+"
 )
 
 
@@ -240,7 +258,7 @@ class _RateLimitTracker:
         self._endpoints: dict[str, list[float]] = {}
         # Default burst limits per endpoint type
         self._burst_limits: dict[str, int] = {
-            "raw": 10,  # raw.githubusercontent.com — generous
+            "raw": RAW_ENDPOINT_BURST_LIMIT,  # raw.githubusercontent.com — generous
             "contents": 5,  # /repos/*/contents endpoint
             "repo": 5,  # /repos/* endpoint
             "readme": 5,  # /repos/*/readme endpoint
@@ -519,7 +537,12 @@ async def _fetch_via_contents_api(
 async def _fetch_readme(owner: str, repo: str) -> dict | None:
     """Fetch the repo README via the GitHub Readme API.
 
-    Returns {markdown, source, metadata} or None on failure.
+    Returns a result dict on every 200 response, including an empty README;
+    ``metadata.size`` distinguishes a confirmed zero-byte file from a decode
+    or response anomaly. Returns ``None`` on non-404 failure, or the internal
+    ``{"_not_found": True}`` sentinel when GitHub confirms that no README
+    exists. Callers must inspect the sentinel and must not rely on truthiness
+    alone to interpret the result.
     """
     url = f"{API_BASE}/repos/{owner}/{repo}/readme"
     headers = _api_headers()
@@ -529,7 +552,7 @@ async def _fetch_readme(owner: str, repo: str) -> dict | None:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 404:
                 logger.debug("No README for %s/%s", owner, repo)
-                return None
+                return {"_not_found": True}
             if resp.status_code != 200:
                 logger.debug(
                     "Readme API returned %d for %s/%s", resp.status_code, owner, repo
@@ -564,6 +587,80 @@ async def _fetch_readme(owner: str, repo: str) -> dict | None:
             }
     except Exception as exc:
         logger.debug("Readme API failed for %s/%s: %s", owner, repo, exc)
+    return None
+
+
+async def _fetch_raw_readme(owner: str, repo: str, branches: list[str]) -> dict | None:
+    """Fetch README markdown from the raw content CDN without API quota.
+
+    The raw CDN is case-sensitive, unlike GitHub's Readme API. Common filename
+    variants are tried on every supplied branch first; remaining variants are
+    tried only on the primary branch within an eight-probe per-scrape budget.
+    This keeps common variants covered across branches while intentionally
+    leaving rare variants on secondary branches outside the bounded budget.
+    The cap reserves two raw calls for ordinary file/blob fallback work in the
+    same process, including when earlier raw calls already consumed capacity.
+    """
+    unique_branches = list(dict.fromkeys(branches))
+    if not unique_branches:
+        return None
+
+    # Probe common names on every branch before trying rarer names on the
+    # primary branch, preserving useful coverage within the bounded plan.
+    probe_plan = [
+        (branch, filename)
+        for branch in unique_branches
+        for filename in README_COMMON_CANDIDATES
+    ][:RAW_README_PROBE_LIMIT]
+    probe_plan.extend(
+        (unique_branches[0], filename)
+        for filename in README_CANDIDATES
+        if filename not in README_COMMON_CANDIDATES
+    )
+    probe_plan = probe_plan[:RAW_README_PROBE_LIMIT]
+
+    try:
+        async with asyncio.timeout(RAW_README_DEADLINE_SECONDS):
+            async with httpx.AsyncClient(
+                follow_redirects=True, timeout=RAW_README_REQUEST_TIMEOUT_SECONDS
+            ) as client:
+                for branch, filename in probe_plan:
+                    if (
+                        _rate_tracker.remaining_budget.get("raw", 0)
+                        <= RAW_README_RESERVED_CALLS
+                    ):
+                        logger.debug(
+                            "GitHub adapter: preserving raw budget for file/blob fallback"
+                        )
+                        return None
+                    _rate_tracker.record_call("raw")
+                    url = f"{RAW_BASE}/{owner}/{repo}/{branch}/{filename}"
+                    try:
+                        resp = await client.get(
+                            url, headers={"User-Agent": "GroktoCrawl/0.6.0"}
+                        )
+                        if resp.status_code in (403, 429):
+                            logger.warning(
+                                "GitHub adapter: raw README rate-limited for %s/%s",
+                                owner,
+                                repo,
+                            )
+                            return None
+                        if resp.status_code == 200 and resp.text:
+                            return {
+                                "markdown": resp.text,
+                                "source": "github-raw-readme",
+                                "metadata": {
+                                    "file": filename,
+                                    "size": len(resp.content),
+                                },
+                            }
+                    except Exception as exc:
+                        logger.debug(
+                            "Raw README fetch failed for %s/%s: %s", owner, repo, exc
+                        )
+    except Exception as exc:
+        logger.debug("Raw README client failed for %s/%s: %s", owner, repo, exc)
     return None
 
 
@@ -877,6 +974,7 @@ class GitHubAdapter(SiteAdapter):
 
         # Tier 2: Repo metadata (runs in parallel or after)
         repo_meta = None
+        default_branch = ""
         if _rate_tracker.can_call("repo"):
             _rate_tracker.record_call("repo")
             repo_meta = await _fetch_repo_metadata(owner, repo)
@@ -884,7 +982,18 @@ class GitHubAdapter(SiteAdapter):
         # Build markdown
         md_parts = []
         readme_md = ""
-        if readme:
+        # Preserve the explicit 404 sentinel so later logic can distinguish
+        # "no README on the default branch" from a generic API failure.
+        readme_not_found = bool(readme and readme.get("_not_found"))
+        readme_confirmed_empty = bool(
+            readme
+            and readme.get("source") == "github-readme-api"
+            and not readme.get("markdown")
+            and readme.get("metadata", {}).get("size", 0) == 0
+        )
+        if readme_not_found:
+            readme = None
+        elif readme:
             readme_md = readme.get("markdown", "")
 
         if repo_meta:
@@ -917,6 +1026,22 @@ class GitHubAdapter(SiteAdapter):
         else:
             md_parts.append(f"# {owner}/{repo}")
             md_parts.append("")
+
+        if not readme_md and not readme_confirmed_empty:
+            if readme_not_found and default_branch in {"main", "master"}:
+                # A definitive 404 on a known standard default branch is not
+                # evidence that the unconfirmed alternate branch exists.
+                branches = []
+            elif readme_not_found:
+                branches = ["main", "master"]
+            elif default_branch:
+                branches = list(dict.fromkeys([default_branch, "main", "master"]))
+            else:
+                branches = ["main", "master"]
+            if branches:
+                readme = await _fetch_raw_readme(owner, repo, branches)
+            if readme:
+                readme_md = readme.get("markdown", "")
 
         if readme_md:
             md_parts.append("---")

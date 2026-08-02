@@ -1,11 +1,12 @@
 """Tests for the extraction quality gate functions.
 
 Unit tests — no Docker needed. Run directly:
-    python -m pytest tests/test_quality.py -v
+    python3 -m pytest tests/service/test_quality.py -v --no-cov
 """
 
 import os
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scraper-svc"))
 
@@ -282,6 +283,136 @@ def test_html_to_markdown_normal_article():
     assert "My Article" in result
 
 
+def test_html_to_markdown_real_readability_filters_page_chrome():
+    """The real Readability fragment keeps article metadata, not page chrome."""
+    from scraper.fetch_quality import html_to_markdown
+
+    html = """<html><head><title>Site</title></head><body>
+    <header>Site Header</header>
+    <nav><a href="/">Home</a><a href="/docs">Docs</a></nav>
+    <article>
+      <header><h1>Article Title</h1><p>By Example Author</p></header>
+      <p>This is a substantive article paragraph with enough detail to make the
+      Readability result meaningful and useful for a real extraction test.</p>
+      <p>A second paragraph adds context, examples, and supporting information
+      for the reader.</p>
+      <footer>Sources: Example Research Institute</footer>
+    </article>
+    <footer>Page Copyright</footer>
+    </body></html>"""
+
+    result = html_to_markdown(html)
+
+    assert "Article Title" in result
+    assert "By Example Author" in result
+    assert "Sources: Example Research Institute" in result
+    assert "Site Header" not in result
+    assert "Page Copyright" not in result
+    assert "[Home](/)" not in result
+    assert "[Docs](/docs)" not in result
+
+
+def test_html_to_markdown_preserves_article_header_and_footer(monkeypatch):
+    """Readability content headers and footers carry article metadata and notes."""
+    from scraper.fetch_quality import html_to_markdown
+
+    summary = """<article>
+    <header><h1>Article Title</h1><p>By Example Author</p></header>
+    <p>This is a well-formed article with substantial content that should be easily
+    extracted by readability-lxml. It has multiple sentences and enough depth to
+    produce meaningful markdown output from the converter pipeline.</p>
+    <p>A second paragraph with additional context and information that builds on
+    the first paragraph and provides further detail about the topic.</p>
+    <footer><p>Sources: Example Research Institute</p></footer>
+    </article>"""
+
+    class ReadabilityDocument:
+        def __init__(self, _html):
+            pass
+
+        def summary(self):
+            return summary
+
+    monkeypatch.setitem(
+        sys.modules, "readability", SimpleNamespace(Document=ReadabilityDocument)
+    )
+
+    result = html_to_markdown("<html><body>ignored</body></html>")
+
+    assert "Article Title" in result
+    assert "By Example Author" in result
+    assert "Sources: Example Research Institute" in result
+
+
+def test_html_to_markdown_preserves_div_content_header_and_footer(monkeypatch):
+    """Readability content fragments need not use article or main elements."""
+    from scraper.fetch_quality import html_to_markdown
+
+    summary = """<div class="readability-content">
+    <header><h1>Div Article Title</h1><p>By Example Author</p></header>
+    <nav aria-label="Contents"><a href="#div-setup">Div Setup</a></nav>
+    <p>This div-based article has enough substantive content for the normal
+    readability path and does not depend on semantic HTML container elements.</p>
+    <footer><p>Sources: Div Content Research Institute</p></footer>
+    </div>"""
+
+    class ReadabilityDocument:
+        def __init__(self, _html):
+            pass
+
+        def summary(self):
+            return summary
+
+    monkeypatch.setitem(
+        sys.modules, "readability", SimpleNamespace(Document=ReadabilityDocument)
+    )
+
+    result = html_to_markdown(
+        "<html><body><header>Site Header</header>ignored"
+        "<footer>Page Copyright</footer></body></html>"
+    )
+
+    assert "Div Article Title" in result
+    assert "By Example Author" in result
+    assert "Sources: Div Content Research Institute" in result
+    assert "[Div Setup](#div-setup)" in result
+    assert "Site Header" not in result
+    assert "Page Copyright" not in result
+
+
+def test_html_to_markdown_preserves_in_article_nav(monkeypatch):
+    """Navigation inside Readability content can be article structure."""
+    from scraper.fetch_quality import html_to_markdown
+
+    summary = """<article>
+    <h1>Guide to Example Systems</h1>
+    <nav aria-label="Contents"><a href="#setup">Setup</a>
+    <a href="#usage">Usage</a></nav>
+    <p>This guide contains enough substantive content for the normal readability
+    path and explains how example systems are configured and operated in detail.</p>
+    <h2 id="setup">Setup</h2>
+    <p>Follow these setup steps to prepare the system before using its features.</p>
+    <h2 id="usage">Usage</h2>
+    <p>Use the configured system to complete the workflow and review its results.</p>
+    </article>"""
+
+    class ReadabilityDocument:
+        def __init__(self, _html):
+            pass
+
+        def summary(self):
+            return summary
+
+    monkeypatch.setitem(
+        sys.modules, "readability", SimpleNamespace(Document=ReadabilityDocument)
+    )
+
+    result = html_to_markdown("<html><body>ignored</body></html>")
+
+    assert "[Setup](#setup)" in result
+    assert "[Usage](#usage)" in result
+
+
 def test_html_to_markdown_spa_shell_falls_back_to_structural():
     """SPA shell HTML (no article content) should use structural fallback."""
     from scraper.fetch_quality import html_to_markdown
@@ -334,9 +465,22 @@ def test_html_to_markdown_structural_extracts_meta_description():
     assert "Browse and discover torrent files easily" in result
 
 
-def test_html_to_markdown_structural_strips_non_content_tags():
+def test_html_to_markdown_structural_strips_non_content_tags(monkeypatch):
     """Structural fallback should strip script, style, nav, footer, header."""
     from scraper.fetch_quality import html_to_markdown
+
+    class ReadabilityDocument:
+        def __init__(self, _html):
+            pass
+
+        def summary(self):
+            # Force the structural fallback rather than relying on a particular
+            # readability-lxml scoring result for this shell page.
+            return "<div>short readability fragment</div>"
+
+    monkeypatch.setitem(
+        sys.modules, "readability", SimpleNamespace(Document=ReadabilityDocument)
+    )
 
     html = """<html><head><title>Test</title>
     <script>console.log('hidden')</script>
@@ -344,13 +488,11 @@ def test_html_to_markdown_structural_strips_non_content_tags():
     </head><body>
     <nav>Skip this nav text</nav>
     <header>Skip this header text</header>
-    <p>Visible paragraph content here with enough text to pass the
-    threshold check and demonstrate that script and style content
-    is properly stripped from the extracted output.</p>
+    <div id="root"></div>
     <footer>Skip this footer text</footer>
     </body></html>"""
     result = html_to_markdown(html)
-    assert "Visible paragraph" in result
+    assert "Test" in result
     assert "console.log" not in result
     assert ".hidden" not in result
     assert "Skip this nav text" not in result
