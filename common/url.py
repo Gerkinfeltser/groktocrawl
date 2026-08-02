@@ -47,6 +47,11 @@ _PRIVATE_HOSTNAME_SUFFIXES: list[str] = [
     ".docker.internal",
 ]
 
+# IPv6 networks that embed an IPv4 destination (RFC 4291, RFC 3056, RFC 4380)
+_IPV4_COMPATIBLE_NET = ip_network("::/96")  # deprecated IPv4-compatible
+_6TO4_NET = ip_network("2002::/16")  # 6to4 relay prefix
+_TEREDO_NET = ip_network("2001::/32")  # Teredo service prefix
+
 
 # ── Public API ─────────────────────────────────────────────────────
 
@@ -110,19 +115,37 @@ def is_same_origin(url1: str, url2: str) -> bool:
     )
 
 
-def _unmap_ipv4_mapped(
+def _unmap_embedded_ipv4(
     addr: IPv4Address | IPv6Address,
 ) -> IPv4Address | IPv6Address:
-    """Unwrap IPv4-mapped IPv6 addresses to their embedded IPv4 form.
+    """Unwrap IPv6 forms that embed an IPv4 destination to their IPv4 address.
 
-    ``::ffff:a.b.c.d`` addresses (RFC 4291 section 2.2) represent IPv4
-    destinations, so they must be checked against IPv4 private ranges —
-    e.g. ``::ffff:127.0.0.1`` is loopback. Without unmapping, the
-    address matches no IPv6 private network and the SSRF guard is
-    bypassed.
+    Handles the encapsulation forms that carry an IPv4 destination and
+    can reach it with the right routing, so the embedded address is
+    checked against IPv4 private ranges instead of passing as a
+    non-private IPv6 literal:
+
+    * ``::ffff:a.b.c.d`` — IPv4-mapped (RFC 4291 section 2.2)
+    * ``::a.b.c.d`` — deprecated IPv4-compatible (RFC 4291 section 2.5.5.1)
+    * ``2002:a.b.c.d::/48`` — 6to4 (RFC 3056)
+    * ``2001:0000:server:v4:...::/64`` — Teredo server IPv4 (RFC 4380)
+
+    Without unmapping, e.g. ``::ffff:127.0.0.1`` or ``2002:0a00:0001::``
+    matches no IPv6 private network and the SSRF guard is bypassed.
     """
-    if isinstance(addr, IPv6Address) and addr.ipv4_mapped is not None:
+    if not isinstance(addr, IPv6Address):
+        return addr
+    if addr.ipv4_mapped is not None:
         return addr.ipv4_mapped
+    int_addr = int(addr)
+    if addr in _IPV4_COMPATIBLE_NET:
+        return IPv4Address(int_addr & 0xFFFFFFFF)
+    if addr in _6TO4_NET:
+        # IPv4 occupies hextets 2-3 (int bits 80-111)
+        return IPv4Address((int_addr >> 80) & 0xFFFFFFFF)
+    if addr in _TEREDO_NET:
+        # Teredo server IPv4 occupies hextets 3-4 (int bits 64-95)
+        return IPv4Address((int_addr >> 64) & 0xFFFFFFFF)
     return addr
 
 
@@ -154,7 +177,7 @@ def _resolve_to_ips_with_transient(
         ips: set[IPv4Address | IPv6Address] = set()
         for _family, _stype, _proto, _canonname, sockaddr in addrinfo:
             try:
-                ips.add(_unmap_ipv4_mapped(ip_address(sockaddr[0])))
+                ips.add(_unmap_embedded_ipv4(ip_address(sockaddr[0])))
             except ValueError:
                 continue
         return list(ips), False
@@ -174,7 +197,7 @@ def _addr_is_restricted(addr: IPv4Address | IPv6Address) -> bool:
     IPv4-mapped IPv6 addresses are unwrapped first so their embedded
     IPv4 address is checked against IPv4 private ranges.
     """
-    addr = _unmap_ipv4_mapped(addr)
+    addr = _unmap_embedded_ipv4(addr)
     for net in _PRIVATE_NETWORKS:
         if addr in net:
             return True
@@ -206,7 +229,7 @@ def is_private_host(url: str) -> bool:
 
     # Check if hostname is itself a private IP literal
     try:
-        addr = _unmap_ipv4_mapped(ip_address(hostname))
+        addr = _unmap_embedded_ipv4(ip_address(hostname))
         return _addr_is_restricted(addr)
     except ValueError:
         pass  # Not an IP literal, treat as hostname
@@ -302,9 +325,9 @@ def _validate_outbound_webhook_url_inner(url: str) -> None:
                 "webhook URL resolves to a private or restricted destination"
             )
 
-    # IP literal (deterministic — includes IPv4-mapped IPv6 literals)
+    # IP literal (deterministic — includes IPv4-embedding IPv6 literals)
     try:
-        addr = _unmap_ipv4_mapped(ip_address(hostname))
+        addr = _unmap_embedded_ipv4(ip_address(hostname))
     except ValueError:
         addr = None
     if addr is not None:

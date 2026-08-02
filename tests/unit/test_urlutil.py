@@ -123,6 +123,21 @@ class TestIsPrivateHost:
     def test_ipv4_mapped_public(self):
         assert not is_private_host("http://[::ffff:93.184.216.34]/test")
 
+    def test_ipv4_compatible_private(self):
+        assert is_private_host("http://[::10.0.0.1]/test")
+
+    def test_6to4_private(self):
+        assert is_private_host("http://[2002:0a00:0001::]/test")
+
+    def test_6to4_public(self):
+        assert not is_private_host("http://[2002:5db8:d822::]/test")
+
+    def test_teredo_private(self):
+        assert is_private_host("http://[2001:0000:0a00:0001::]/test")
+
+    def test_teredo_public(self):
+        assert not is_private_host("http://[2001:0000:5db8:d822::]/test")
+
 
 class TestConstants:
     """Verify module-level constants are well-formed."""
@@ -220,6 +235,23 @@ class TestValidateOutboundWebhookUrl:
     def test_accepts_ipv4_mapped_public(self):
         assert (
             validate_outbound_webhook_url("https://[::ffff:93.184.216.34]/hook") is None
+        )
+
+    def test_rejects_encapsulated_ipv4_private(self):
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://[::10.0.0.1]/hook")
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://[2002:0a00:0001::]/hook")
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://[2001:0000:0a00:0001::]/hook")
+        with pytest.raises(ValueError):
+            validate_outbound_webhook_url("http://[2002:7f00:0001::]/hook")
+
+    def test_accepts_encapsulated_ipv4_public(self):
+        assert validate_outbound_webhook_url("https://[2002:5db8:d822::]/hook") is None
+        assert (
+            validate_outbound_webhook_url("https://[2001:0000:5db8:d822::]/hook")
+            is None
         )
 
     def test_rejects_hostname_resolving_to_ipv4_mapped_private(self, monkeypatch):
