@@ -50,3 +50,7 @@ Set `API_KEY` for authentication, restrict network exposure, and review outbound
 ## Status
 
 Core Firecrawl-compatible workflows and GroktoCrawl extensions are actively developed. Review the [changelog](CHANGELOG.md), [ADRs](docs/adr/README.md), and [issues](https://github.com/groktopus/groktocrawl/issues) for change history and planned work.
+
+## Development policy
+
+Merges to `main` require the **Code Quality Gate** and **Runtime Gate** checks to pass and at least one approving review for non-automation changes (stale approvals are dismissed and open review conversations block merge). `dependabot[bot]` and `release-please[bot]` skip the review requirement only — they must still pass the required checks. See [ADR-0046](docs/adr/0046-enforce-qa-checks-and-review-policy-on-main.md) for the full policy and [Emergency Branch Protection Bypass](docs/runbooks/emergency-branch-protection-bypass.md) for the audited emergency exception path.

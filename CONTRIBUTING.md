@@ -32,6 +32,21 @@ Open a GitHub issue with:
 5. Commit with a clear message
 6. Open a PR
 
+### Merging to `main`
+
+The `main` branch is protected by repository rulesets (see
+[ADR-0046](docs/adr/0046-enforce-qa-checks-and-review-policy-on-main.md)):
+
+- Merges require the **Code Quality Gate** and **Runtime Gate** checks to pass
+  (branches must be up to date before merging).
+- Non-automation changes require **at least one approving review**; stale
+  approvals are dismissed on push and open review conversations block merge.
+- `dependabot[bot]` and `release-please[bot]` are exempt from the review
+  requirement only — they must still pass the required checks.
+- The policy is enforced on admins; the audited emergency exception path is
+  documented in
+  [Emergency Branch Protection Bypass](docs/runbooks/emergency-branch-protection-bypass.md).
+
 ### Running Tests
 
 ```bash
