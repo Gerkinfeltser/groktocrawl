@@ -20,9 +20,11 @@ QA gates and receive an approving human review.
   (`Code Quality Gate`, `Runtime Gate`) must block merges that fail them.
 * Required checks must be **stable aggregate gates only** — never volatile
   matrix or per-tool jobs that appear and disappear between runs.
-* Automation must keep shipping: `dependabot[bot]` and `release-please[bot]`
-  should not need a human approving review, but must still pass the required
-  checks.
+* Automation must keep shipping: `dependabot[bot]` should not need a human
+  approving review, but must still pass the required checks. Release-please
+  PRs are NOT exempt (2026-08-03 amendment): `github-actions[bot]`, the
+  actual author of release-please PRs, cannot be a ruleset bypass actor, so
+  release-please PRs require a human approving review.
 * The policy is **enforced on admins**: no routine bypass path.
 * The change must be **auditable** (who changed enforcement, when) and have a
   documented emergency exception path.
@@ -65,11 +67,17 @@ default branch, `conditions.ref_name.include: ["~DEFAULT_BRANCH"]`):
   * `require_code_owner_review: false`,
   * `required_review_thread_resolution: true` — open review conversations
     block merge.
-* `bypass_actors` (exactly two, bot exemption from the review rule **only**):
+* `bypass_actors` (exactly one, bot exemption from the review rule **only**):
   * `{actor_type: "Integration", actor_id: 29110, bypass_mode: "pull_request"}`
-    — `dependabot[bot]`,
-  * `{actor_type: "Integration", actor_id: 40688, bypass_mode: "pull_request"}`
-    — `release-please[bot]`.
+    — `dependabot[bot]`.
+  * **Amendment (2026-08-03, user-approved):** the release-please bypass
+    exemption is dropped. `github-actions[bot]` — the actual author of
+    release-please PRs (user id 41898282) — cannot be added to a ruleset
+    `bypass_actors` list (GitHub blocks the GitHub Actions app identity by
+    design), and the Release Please GitHub App (40688) is deprecated
+    (turndown 2025-08-13) and not installed on org `groktopus`.
+    Consequence: release-please PRs require a human approving review (the
+    sole org member `magnus919` can approve bot-authored PRs).
 
 **Ruleset B — `main required checks`** (enforcement: `active`, target: the
 default branch, **no bypass actors**):
@@ -92,9 +100,11 @@ the classic rule redundant once the rulesets are live).
   human approving review (with stale approvals dismissed and resolved
   conversations); the policy binds repo admins too.
 * **Why two rulesets:** `bypass_actors` exempts an actor from the entire
-  ruleset. The split keeps `dependabot[bot]` and `release-please[bot]`
-  exempt from the human review only; everyone — bots and admins — must still
-  pass the required checks in Ruleset B.
+  ruleset. The split keeps `dependabot[bot]` exempt from the human review
+  only; everyone — bots and admins — must still pass the required checks in
+  Ruleset B. Release-please PRs (authored by `github-actions[bot]`, which
+  cannot be a ruleset bypass actor) require a human approving review per the
+  2026-08-03 amendment.
 * **Emergency exception path:** an org admin may temporarily set both
   rulesets' enforcement to `disabled`, merge the blocking change, and restore
   both to `active` within 24 hours, recording the incident in a tracking

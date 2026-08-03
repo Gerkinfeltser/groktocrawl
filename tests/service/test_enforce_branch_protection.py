@@ -193,16 +193,17 @@ class PolicyPayloadTests(unittest.TestCase):
             ruleset["conditions"]["ref_name"]["include"], ["~DEFAULT_BRANCH"]
         )
         self.assertEqual(ruleset["conditions"]["ref_name"]["exclude"], [])
-        bypasses = sorted(
+        bypasses = [
             (actor["actor_type"], actor["actor_id"], actor["bypass_mode"])
             for actor in ruleset["bypass_actors"]
-        )
+        ]
+        # Exactly ONE bypass actor: dependabot[bot] (app 29110) only. The
+        # release-please exemption was dropped (2026-08-03 amendment):
+        # github-actions[bot] cannot be a ruleset bypass actor and the
+        # Release Please app is deprecated/not installed.
         self.assertEqual(
             bypasses,
-            [
-                ("Integration", 29110, "pull_request"),
-                ("Integration", 40688, "pull_request"),
-            ],
+            [("Integration", 29110, "pull_request")],
         )
         self.assertEqual(len(ruleset["rules"]), 1)
         pull_request = ruleset["rules"][0]
