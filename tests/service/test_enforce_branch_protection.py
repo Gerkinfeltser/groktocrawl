@@ -235,11 +235,16 @@ class PolicyPayloadTests(unittest.TestCase):
         )
         self.assertEqual(
             [
-                (entry["context"], entry["integration_id"])
+                entry["context"]
                 for entry in status_checks["parameters"]["required_status_checks"]
             ],
-            [("Code Quality Gate", None), ("Runtime Gate", None)],
+            ["Code Quality Gate", "Runtime Gate"],
         )
+        # integration_id is omitted from the payload: the REST schema types it
+        # as integer (not nullable) and rejects null; absent means "any
+        # source", which is the policy (VAL-ENF-003 tolerates absent-or-null).
+        for entry in status_checks["parameters"]["required_status_checks"]:
+            self.assertNotIn("integration_id", entry)
 
     def test_required_check_contexts_are_the_two_stable_gates(self) -> None:
         self.assertEqual(
@@ -279,7 +284,7 @@ class IdempotencyComparatorTests(unittest.TestCase):
         actual = json.loads(json.dumps(MODULE.RULESET_B))
         actual["id"] = 23
         for entry in actual["rules"][0]["parameters"]["required_status_checks"]:
-            del entry["integration_id"]
+            entry["integration_id"] = None
         self.assertEqual(MODULE.ruleset_diff(MODULE.RULESET_B, actual), [])
 
     def test_absent_false_pull_request_parameter_is_tolerated(self) -> None:
