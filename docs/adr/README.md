@@ -21,7 +21,7 @@ An Architecture Decision Record captures an important architectural decision mad
 
 **Current accepted decisions:** ADR-0001–0012, 0014–0022, 0026, 0029–0035, 0038, 0039, 0043, 0044, and 0045.
 
-**Proposed work:** ADR-0023–0025, 0027, 0028, 0036, 0037, and 0040–0042.
+**Proposed work:** ADR-0023–0025, 0027, 0028, 0036, 0037, 0040–0042, and 0046.
 
 | ADR | Title | Status |
 |-----|-------|--------|
@@ -70,5 +70,6 @@ An Architecture Decision Record captures an important architectural decision mad
 | 0043 | [Migration from SearXNG to SlopSearX](0043-migration-to-slopsearx.md) | accepted |
 | 0044 | [Autonomous CAPTCHA Recovery](0044-autonomous-captcha-recovery.md) | accepted |
 | 0045 | [Outbound Webhook Destination Validation](0045-outbound-webhook-destination-validation.md) | accepted |
+| 0046 | [Enforce QA Checks and Review Policy on main](0046-enforce-qa-checks-and-review-policy-on-main.md) | proposed |
 
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full ADR workflow: when to write an ADR, how to number it, and how to get it reviewed in a PR.

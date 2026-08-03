@@ -93,3 +93,39 @@ jobs:
           gitleaks version
       - name: Run gitleaks (secret scanning)
         run: gitleaks detect --no-git --verbose --redact
+
+  code-quality-gate:
+    name: Code Quality Gate
+    needs: [python-checks, duplicate-code, secret-scan]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize successful Python Checks
+        if: needs.python-checks.result == 'success'
+        run: echo "Python Checks completed successfully."
+
+      - name: Summarize successful Duplicate Code
+        if: needs.duplicate-code.result == 'success'
+        run: echo "Duplicate Code completed successfully."
+
+      - name: Summarize successful Secret Scanning
+        if: needs.secret-scan.result == 'success'
+        run: echo "Secret Scanning completed successfully."
+
+      - name: Fail when Python Checks do not succeed
+        if: needs.python-checks.result != 'success'
+        run: |
+          echo "Python Checks did not complete successfully."
+          exit 1
+
+      - name: Fail when Duplicate Code does not succeed
+        if: needs.duplicate-code.result != 'success'
+        run: |
+          echo "Duplicate Code did not complete successfully."
+          exit 1
+
+      - name: Fail when Secret Scanning does not succeed
+        if: needs.secret-scan.result != 'success'
+        run: |
+          echo "Secret Scanning did not complete successfully."
+          exit 1

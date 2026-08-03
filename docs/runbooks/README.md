@@ -10,6 +10,10 @@ Owner: GroktoCrawl maintainers
 - [QueueDepthSpike](queue-depth-spike.md)
 - [ServiceDown](service-down.md)
 
+## Emergency Procedures
+
+- [Emergency Branch Protection Bypass](emergency-branch-protection-bypass.md)
+
 ---
 
 ## Service Health Check
