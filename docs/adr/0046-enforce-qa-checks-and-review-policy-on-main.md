@@ -1,6 +1,6 @@
 # Enforce QA Checks and Review Policy on main
 
-* Status: proposed
+* Status: accepted
 * Deciders: GroktoCrawl maintainers
 * Date: 2026-08-03
 
