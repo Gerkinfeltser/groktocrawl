@@ -103,9 +103,13 @@ RULESET_B: dict[str, Any] = {
             "type": "required_status_checks",
             "parameters": {
                 "strict_required_status_checks_policy": True,
+                # integration_id is intentionally omitted: GitHub's REST schema
+                # types it as integer (not nullable) and rejects `null`, while
+                # an absent value means "any source" — identical policy (the
+                # idempotency comparator treats absent and null as equal).
                 "required_status_checks": [
-                    {"context": "Code Quality Gate", "integration_id": None},
-                    {"context": "Runtime Gate", "integration_id": None},
+                    {"context": "Code Quality Gate"},
+                    {"context": "Runtime Gate"},
                 ],
             },
         },
@@ -718,8 +722,8 @@ def policy_report_text() -> str:
         "    - required_status_checks:",
         "        strict_required_status_checks_policy: true",
         "        required_status_checks:",
-        "          - Code Quality Gate (integration_id: null)",
-        "          - Runtime Gate (integration_id: null)",
+        "          - Code Quality Gate",
+        "          - Runtime Gate",
         "    - non_fast_forward",
         "    - deletion",
     ]
