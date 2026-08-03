@@ -13,7 +13,7 @@ High
 Use it **only** when:
 
 - A legitimate fix must land on `main` immediately (e.g., a production incident fix), and
-- The blocking condition (failed required check or missing review) cannot be resolved within the required window.
+- The blocking condition (failed required check) cannot be resolved within the required window.
 
 Never use it for routine merges. Admins are subject to the policy; the audit trail below records every lift.
 
