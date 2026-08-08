@@ -13,6 +13,8 @@ curl http://localhost:8080/health
 
 The `fixture` profile starts a local LLM fixture and test sites. For production, omit that profile and configure an OpenAI-compatible provider plus `BRAVE_API_KEY` for web search. Set `API_KEY` before exposing the API outside a trusted network.
 
+> **Background jobs are best-effort.** Async jobs (crawl, agent, extract, batch-scrape, llmstxt, plan execution) run in-process and are not restart-safe; see [Deployment and configuration](docs/guides/deployment.md#job-durability-and-recovery) for the durability contract and recovery procedure.
+
 ## What it provides
 
 | Area | Capabilities |
@@ -50,3 +52,7 @@ Set `API_KEY` for authentication, restrict network exposure, and review outbound
 ## Status
 
 Core Firecrawl-compatible workflows and GroktoCrawl extensions are actively developed. Review the [changelog](CHANGELOG.md), [ADRs](docs/adr/README.md), and [issues](https://github.com/groktopus/groktocrawl/issues) for change history and planned work.
+
+## Development policy
+
+Merges to `main` require the **Code Quality Gate** and **Runtime Gate** checks to pass and at least one approving review for non-automation changes (stale approvals are dismissed and open review conversations block merge). `dependabot[bot]` skips the review requirement only — it must still pass the required checks; the sole maintainer can merge their own PRs without an approving review (review bypass only — required checks still bind); release-please PRs require a human approving review. See [ADR-0046](docs/adr/0046-enforce-qa-checks-and-review-policy-on-main.md) for the full policy and [Emergency Branch Protection Bypass](docs/runbooks/emergency-branch-protection-bypass.md) for the audited emergency exception path.
