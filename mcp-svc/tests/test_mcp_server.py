@@ -66,15 +66,15 @@ class TestTransportSecurity:
         settings = mcp.settings.transport_security
         assert settings is not None
 
-    def test_build_transport_security_disabled_when_unset(self, monkeypatch):
-        """MCP_ALLOWED_HOSTS unset -> protection disabled (matches the
-        SDK's non-loopback bind behavior; the server publishes 0.0.0.0)."""
+    def test_build_transport_security_fail_closed_when_unset(self, monkeypatch):
+        """MCP_ALLOWED_HOSTS unset -> protection ON with loopback-only
+        allowlist (fail-closed; the SDK's own default)."""
         import mcp_server as mod
 
         monkeypatch.delenv("MCP_ALLOWED_HOSTS", raising=False)
         ts = mod._build_transport_security()
-        assert ts.enable_dns_rebinding_protection is False
-        assert ts.allowed_hosts == []
+        assert ts.enable_dns_rebinding_protection is True
+        assert ts.allowed_hosts == ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 
     def test_build_transport_security_parses_env(self, monkeypatch):
         """MCP_ALLOWED_HOSTS set -> protection on with the parsed allowlist."""
@@ -102,12 +102,26 @@ class TestTransportSecurity:
         assert ts.allowed_hosts == ["hal2000:*", "localhost:*"]
 
     def test_build_transport_security_derives_origins(self, monkeypatch):
-        """allowed_origins mirror the host allowlist with an http:// prefix."""
+        """allowed_origins mirror the host allowlist under http and https."""
         import mcp_server as mod
 
         monkeypatch.setenv("MCP_ALLOWED_HOSTS", "hal2000:*")
         ts = mod._build_transport_security()
-        assert ts.allowed_origins == ["http://hal2000:*"]
+        assert ts.allowed_origins == ["http://hal2000:*", "https://hal2000:*"]
+
+    def test_build_transport_security_origins_override(self, monkeypatch):
+        """MCP_ALLOWED_ORIGINS overrides the host-derived origin default."""
+        import mcp_server as mod
+
+        monkeypatch.setenv("MCP_ALLOWED_HOSTS", "hal2000:*")
+        monkeypatch.setenv(
+            "MCP_ALLOWED_ORIGINS", "http://client.example:*,https://client.example:*"
+        )
+        ts = mod._build_transport_security()
+        assert ts.allowed_origins == [
+            "http://client.example:*",
+            "https://client.example:*",
+        ]
 
 
 # ── Tool Discovery (VAL-MCP-B01, B02, B03, B04) ────────────────────

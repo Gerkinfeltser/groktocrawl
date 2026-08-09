@@ -243,6 +243,12 @@ class TestHostHeaderTransportSecurity:
     sides of the contract:
       - a Host the deployment allows must initialize successfully;
       - a Host outside the allowlist must be rejected with 421.
+
+    Protection is fail-closed (always enabled), so the disallowed-host
+    assertion holds against both the default stack (loopback-only allowlist)
+    and a configured deployment (MCP_ALLOWED_HOSTS set). The allowed-host
+    test targets whatever the deployment configures via MCP_TEST_ALLOWED_HOST
+    (default ``localhost:8002``, which the default allowlist permits).
     """
 
     async def test_initialize_with_allowed_host(self) -> None:
@@ -258,11 +264,10 @@ class TestHostHeaderTransportSecurity:
     async def test_initialize_with_disallowed_host_rejected(self) -> None:
         """A Host outside the allowlist is rejected with 421.
 
-        When MCP_ALLOWED_HOSTS is unset on the server, DNS-rebinding
-        protection is disabled and every Host is accepted; that deployment
-        posture is tested by the explicit-config unit tests. This assertion
-        only applies when the server enforces an allowlist, which the CI
-        integration lane configures via MCP_ALLOWED_HOSTS.
+        Protection is fail-closed: the server always enforces an allowlist
+        (loopback-only by default, or MCP_ALLOWED_HOSTS when configured), so
+        a disallowed Host is deterministically rejected with 421 in every
+        deployment configuration.
         """
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
             resp = await _mcp_initialize_raw(client, DISALLOWED_TEST_HOST)
