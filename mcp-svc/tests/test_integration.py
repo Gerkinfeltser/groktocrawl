@@ -224,10 +224,26 @@ async def mcp_session(client: httpx.AsyncClient) -> str:
 # Host-header / DNS-rebinding protection (regression: issue #524)
 # ═══════════════════════════════════════════════════════════════════
 
+
 # The Host value the server should accept when MCP_ALLOWED_HOSTS is
 # configured for this deployment. Tests read it from the environment so the
 # same suite works against any host (CI service name, LAN hostname, etc.).
-ALLOWED_TEST_HOST = os.environ.get("MCP_TEST_ALLOWED_HOST", "localhost:8002")
+# When MCP_TEST_ALLOWED_HOST is unset but MCP_ALLOWED_HOSTS is configured,
+# derive the default from the allowlist so the test targets a Host the
+# deployment actually accepts (instead of silently assuming localhost).
+def _default_allowed_test_host() -> str:
+    raw = os.environ.get("MCP_ALLOWED_HOSTS", "")
+    hosts = [h.strip() for h in raw.split(",") if h.strip()]
+    for h in hosts:
+        base = h.removesuffix(":*")
+        if base not in ("localhost", "127.0.0.1", "[::1]"):
+            return f"{base}:8002"
+    return "localhost:8002"
+
+
+ALLOWED_TEST_HOST = (
+    os.environ.get("MCP_TEST_ALLOWED_HOST") or _default_allowed_test_host()
+)
 DISALLOWED_TEST_HOST = os.environ.get(
     "MCP_TEST_DISALLOWED_HOST", "not-allowed.invalid:8002"
 )

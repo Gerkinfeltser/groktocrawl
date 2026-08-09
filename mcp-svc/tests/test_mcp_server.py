@@ -106,6 +106,7 @@ class TestTransportSecurity:
         import mcp_server as mod
 
         monkeypatch.setenv("MCP_ALLOWED_HOSTS", "hal2000:*")
+        monkeypatch.delenv("MCP_ALLOWED_ORIGINS", raising=False)
         ts = mod._build_transport_security()
         assert ts.allowed_origins == ["http://hal2000:*", "https://hal2000:*"]
 
