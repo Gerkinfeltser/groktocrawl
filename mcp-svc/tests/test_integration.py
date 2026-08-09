@@ -235,9 +235,15 @@ def _default_allowed_test_host() -> str:
     raw = os.environ.get("MCP_ALLOWED_HOSTS", "")
     hosts = [h.strip() for h in raw.split(",") if h.strip()]
     for h in hosts:
-        base = h.removesuffix(":*")
-        if base not in ("localhost", "127.0.0.1", "[::1]"):
+        if h.endswith(":*"):
+            base = h[:-2]
+            if base in ("localhost", "127.0.0.1", "[::1]"):
+                continue
             return f"{base}:8002"
+        # Exact host or host:port entry: use it verbatim so a non-loopback
+        # value (e.g. "hal2000" or "mcp-svc:8002") is returned as-is.
+        if h not in ("localhost", "localhost:8002", "127.0.0.1", "[::1]"):
+            return h
     return "localhost:8002"
 
 
