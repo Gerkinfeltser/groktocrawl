@@ -245,20 +245,17 @@ class TestHostHeaderTransportSecurity:
       - a Host outside the allowlist must be rejected with 421.
     """
 
-    async def test_initialize_with_allowed_host(
-        self, client: httpx.AsyncClient
-    ) -> None:
+    async def test_initialize_with_allowed_host(self) -> None:
         """initialize succeeds for a Host value in the configured allowlist."""
-        resp = await _mcp_initialize_raw(client, ALLOWED_TEST_HOST)
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+            resp = await _mcp_initialize_raw(client, ALLOWED_TEST_HOST)
         assert resp.status_code == 200, (
             f"initialize with allowed Host {ALLOWED_TEST_HOST!r} "
             f"failed: {resp.status_code} {resp.text[:200]}"
         )
         assert "serverInfo" in resp.text
 
-    async def test_initialize_with_disallowed_host_rejected(
-        self, client: httpx.AsyncClient
-    ) -> None:
+    async def test_initialize_with_disallowed_host_rejected(self) -> None:
         """A Host outside the allowlist is rejected with 421.
 
         When MCP_ALLOWED_HOSTS is unset on the server, DNS-rebinding
@@ -267,7 +264,8 @@ class TestHostHeaderTransportSecurity:
         only applies when the server enforces an allowlist, which the CI
         integration lane configures via MCP_ALLOWED_HOSTS.
         """
-        resp = await _mcp_initialize_raw(client, DISALLOWED_TEST_HOST)
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+            resp = await _mcp_initialize_raw(client, DISALLOWED_TEST_HOST)
         assert resp.status_code == 421, (
             f"disallowed Host {DISALLOWED_TEST_HOST!r} was not rejected: "
             f"got {resp.status_code} {resp.text[:200]}"
