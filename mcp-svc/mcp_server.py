@@ -16,6 +16,7 @@ from typing import Any
 from groktocrawl_client import GroktocrawlClient
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 
 logger = logging.getLogger("grokto_crawl.mcp")
@@ -41,7 +42,38 @@ _client = GroktocrawlClient(
 
 # ── FastMCP server ─────────────────────────────────────────────────
 
-mcp = FastMCP("GroktoCrawl")
+# DNS-rebinding protection: the mcp SDK auto-enables loopback-only Host
+# validation when FastMCP is constructed without explicit transport_security
+# (its default host is 127.0.0.1). That rejects every non-loopback Host header
+# with 421 — the server binds 0.0.0.0, so real clients (Hermes, Claude Code,
+# remote MCP consumers) can never connect. Pass explicit settings instead:
+#
+# - MCP_ALLOWED_HOSTS set  -> protection ON, allowlist = parsed hosts
+# - MCP_ALLOWED_HOSTS unset -> protection OFF (matches the SDK's behavior for
+#   a server bound to a non-loopback address; the service is explicitly
+#   published on 0.0.0.0)
+#
+# Values are comma-separated Host patterns, e.g.
+# "hal2000:*,localhost:*,127.0.0.1:*,[::1]:*". Wildcards apply to the port
+# only ("host:*"); a bare "*" matches nothing in this SDK version.
+
+
+def _build_transport_security() -> TransportSecuritySettings:
+    """Build DNS-rebinding protection settings from MCP_ALLOWED_HOSTS."""
+    raw = os.environ.get("MCP_ALLOWED_HOSTS", "").strip()
+    allowed = [h.strip() for h in raw.split(",") if h.strip()]
+    if not allowed:
+        logger.info("MCP_ALLOWED_HOSTS unset — DNS-rebinding protection disabled")
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    logger.info("DNS-rebinding protection enabled for hosts: %s", allowed)
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed,
+        allowed_origins=[f"http://{h}" for h in allowed],
+    )
+
+
+mcp = FastMCP("GroktoCrawl", transport_security=_build_transport_security())
 
 # ── Annotation helpers ─────────────────────────────────────────────
 
@@ -730,11 +762,11 @@ def main() -> None:
         loop.add_signal_handler(signal.SIGINT, _handle_shutdown)
     except NotImplementedError:
         # Signal handlers not available on this platform (e.g. Windows)
+        import contextlib
+
         for sig in (signal.SIGTERM, signal.SIGINT):
-            try:
+            with contextlib.suppress(ValueError, OSError):
                 signal.signal(sig, lambda *_: _handle_shutdown())
-            except (ValueError, OSError):
-                pass
 
     loop.run_until_complete(server.serve())
 

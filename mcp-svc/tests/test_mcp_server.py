@@ -47,6 +47,69 @@ def _text(result: Any) -> str:
     return result.content[0].text
 
 
+# ── Transport Security (regression: issue #524) ────────────────────
+
+
+class TestTransportSecurity:
+    """The FastMCP app must be constructed with explicit DNS-rebinding
+    protection settings driven by MCP_ALLOWED_HOSTS.
+
+    The mcp SDK auto-enables loopback-only Host validation when FastMCP is
+    created without explicit transport_security. That rejects every
+    non-loopback Host header (HTTP 421), making the published server
+    unreachable from real clients. These tests pin the explicit
+    configuration so a regression to the SDK default fails CI.
+    """
+
+    def test_server_has_explicit_transport_security(self):
+        """The app-level FastMCP instance carries transport_security settings."""
+        settings = mcp.settings.transport_security
+        assert settings is not None
+
+    def test_build_transport_security_disabled_when_unset(self, monkeypatch):
+        """MCP_ALLOWED_HOSTS unset -> protection disabled (matches the
+        SDK's non-loopback bind behavior; the server publishes 0.0.0.0)."""
+        import mcp_server as mod
+
+        monkeypatch.delenv("MCP_ALLOWED_HOSTS", raising=False)
+        ts = mod._build_transport_security()
+        assert ts.enable_dns_rebinding_protection is False
+        assert ts.allowed_hosts == []
+
+    def test_build_transport_security_parses_env(self, monkeypatch):
+        """MCP_ALLOWED_HOSTS set -> protection on with the parsed allowlist."""
+        import mcp_server as mod
+
+        monkeypatch.setenv(
+            "MCP_ALLOWED_HOSTS", "localhost:*,127.0.0.1:*,[::1]:*,hal2000:*"
+        )
+        ts = mod._build_transport_security()
+        assert ts.enable_dns_rebinding_protection is True
+        assert ts.allowed_hosts == [
+            "localhost:*",
+            "127.0.0.1:*",
+            "[::1]:*",
+            "hal2000:*",
+        ]
+
+    def test_build_transport_security_ignores_empty_entries(self, monkeypatch):
+        """Trailing/empty comma entries are dropped, not kept as empty hosts."""
+        import mcp_server as mod
+
+        monkeypatch.setenv("MCP_ALLOWED_HOSTS", "hal2000:*, ,localhost:*,")
+        ts = mod._build_transport_security()
+        assert ts.enable_dns_rebinding_protection is True
+        assert ts.allowed_hosts == ["hal2000:*", "localhost:*"]
+
+    def test_build_transport_security_derives_origins(self, monkeypatch):
+        """allowed_origins mirror the host allowlist with an http:// prefix."""
+        import mcp_server as mod
+
+        monkeypatch.setenv("MCP_ALLOWED_HOSTS", "hal2000:*")
+        ts = mod._build_transport_security()
+        assert ts.allowed_origins == ["http://hal2000:*"]
+
+
 # ── Tool Discovery (VAL-MCP-B01, B02, B03, B04) ────────────────────
 
 

@@ -61,12 +61,13 @@ async def _mcp_request(
     params: dict[str, Any] | None = None,
     req_id: int = 1,
     session_id: str | None = None,
+    host: str | None = None,
 ) -> dict[str, Any]:
     """Send a JSON-RPC request to the MCP server and return the parsed response."""
     headers: dict[str, str] = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
-        "Host": "localhost:8002",
+        "Host": host or "localhost:8002",
     }
     if session_id:
         headers["MCP-Session-Id"] = session_id
@@ -113,6 +114,36 @@ async def _mcp_init(client: httpx.AsyncClient) -> str:
     session_id = resp.headers.get("mcp-session-id", "")
     assert session_id, "No MCP-Session-Id in initialize response"
     return session_id
+
+
+async def _mcp_initialize_raw(
+    client: httpx.AsyncClient,
+    host: str,
+) -> httpx.Response:
+    """Send initialize with an explicit Host header; return the raw response.
+
+    Used by the transport-security regression tests (issue #524) to assert
+    how the server treats specific Host values without requiring a session.
+    """
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "Host": host,
+    }
+    return await client.post(
+        MCP_URL,
+        json={
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "host-header-test", "version": "1.0"},
+            },
+        },
+        headers=headers,
+    )
 
 
 async def _mcp_call_tool(
@@ -187,6 +218,60 @@ async def agent_client() -> httpx.AsyncClient:
 async def mcp_session(client: httpx.AsyncClient) -> str:
     """Return an initialized MCP session ID."""
     return await _mcp_init(client)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Host-header / DNS-rebinding protection (regression: issue #524)
+# ═══════════════════════════════════════════════════════════════════
+
+# The Host value the server should accept when MCP_ALLOWED_HOSTS is
+# configured for this deployment. Tests read it from the environment so the
+# same suite works against any host (CI service name, LAN hostname, etc.).
+ALLOWED_TEST_HOST = os.environ.get("MCP_TEST_ALLOWED_HOST", "localhost:8002")
+DISALLOWED_TEST_HOST = os.environ.get(
+    "MCP_TEST_DISALLOWED_HOST", "not-allowed.invalid:8002"
+)
+
+
+@pytest.mark.asyncio
+class TestHostHeaderTransportSecurity:
+    """Regression tests for issue #524.
+
+    The MCP server previously auto-enabled loopback-only DNS-rebinding
+    protection (SDK default), rejecting every non-loopback Host header with
+    421 even though the server binds 0.0.0.0. These tests assert the two
+    sides of the contract:
+      - a Host the deployment allows must initialize successfully;
+      - a Host outside the allowlist must be rejected with 421.
+    """
+
+    async def test_initialize_with_allowed_host(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        """initialize succeeds for a Host value in the configured allowlist."""
+        resp = await _mcp_initialize_raw(client, ALLOWED_TEST_HOST)
+        assert resp.status_code == 200, (
+            f"initialize with allowed Host {ALLOWED_TEST_HOST!r} "
+            f"failed: {resp.status_code} {resp.text[:200]}"
+        )
+        assert "serverInfo" in resp.text
+
+    async def test_initialize_with_disallowed_host_rejected(
+        self, client: httpx.AsyncClient
+    ) -> None:
+        """A Host outside the allowlist is rejected with 421.
+
+        When MCP_ALLOWED_HOSTS is unset on the server, DNS-rebinding
+        protection is disabled and every Host is accepted; that deployment
+        posture is tested by the explicit-config unit tests. This assertion
+        only applies when the server enforces an allowlist, which the CI
+        integration lane configures via MCP_ALLOWED_HOSTS.
+        """
+        resp = await _mcp_initialize_raw(client, DISALLOWED_TEST_HOST)
+        assert resp.status_code == 421, (
+            f"disallowed Host {DISALLOWED_TEST_HOST!r} was not rejected: "
+            f"got {resp.status_code} {resp.text[:200]}"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════
