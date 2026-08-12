@@ -145,6 +145,8 @@ The configuration inventory follows `.env.sample`; unlisted implementation-only 
 - LLM_LLAMA_CPP_DISABLE_THINKING
 - LLM_MODEL
 - LOG_LEVEL
+- MCP_ALLOWED_HOSTS
+- MCP_ALLOWED_ORIGINS
 - MCP_PORT
 - NEAR_DUP_MODE
 - NEAR_DUP_THRESHOLD

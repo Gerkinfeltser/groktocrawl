@@ -16,6 +16,7 @@ from typing import Any
 from groktocrawl_client import GroktocrawlClient
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 
 logger = logging.getLogger("grokto_crawl.mcp")
@@ -41,7 +42,70 @@ _client = GroktocrawlClient(
 
 # ── FastMCP server ─────────────────────────────────────────────────
 
-mcp = FastMCP("GroktoCrawl")
+# DNS-rebinding protection: the mcp SDK auto-enables loopback-only Host
+# validation when FastMCP is constructed without explicit transport_security
+# (its default host is 127.0.0.1). That rejects every non-loopback Host header
+# with 421 — the server binds 0.0.0.0, so real clients (Hermes, Claude Code,
+# remote MCP consumers) can never connect. Pass explicit settings instead:
+#
+# - MCP_ALLOWED_HOSTS set   -> protection ON, allowlist = parsed hosts
+# - MCP_ALLOWED_HOSTS unset -> protection ON, fail-closed loopback-only
+#   allowlist (the SDK's own default: 127.0.0.1, localhost, ::1). The service
+#   is published on 0.0.0.0, so deployments that need LAN/Tailscale clients
+#   must extend the allowlist via MCP_ALLOWED_HOSTS.
+# - MCP_ALLOWED_ORIGINS set -> Origin allowlist = parsed origins (overrides
+#   the host-derived default below)
+#
+# Values are comma-separated Host patterns, e.g.
+# "hal2000:*,localhost:*,127.0.0.1:*,[::1]:*". Wildcards apply to the port
+# only ("host:*"); a bare "*" matches nothing in this SDK version.
+
+
+def _build_transport_security() -> TransportSecuritySettings:
+    """Build DNS-rebinding protection settings from MCP_ALLOWED_HOSTS.
+
+    Fail-closed: protection is always enabled. An unset MCP_ALLOWED_HOSTS
+    falls back to the SDK's loopback-only allowlist; operators extend it
+    (never disable it) via MCP_ALLOWED_HOSTS.
+    """
+    raw = os.environ.get("MCP_ALLOWED_HOSTS", "").strip()
+    allowed = [h.strip() for h in raw.split(",") if h.strip()]
+    if not allowed:
+        allowed = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+        logger.info(
+            "MCP_ALLOWED_HOSTS unset — protection ON with loopback-only allowlist"
+        )
+    else:
+        logger.info("DNS-rebinding protection enabled for hosts: %s", allowed)
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed,
+        allowed_origins=_build_allowed_origins(allowed),
+    )
+
+
+def _build_allowed_origins(hosts: list[str]) -> list[str]:
+    """Derive the Origin allowlist, honoring MCP_ALLOWED_ORIGINS when set.
+
+    Origins default to the host allowlist under both http and https schemes
+    so legitimate browser-served client pages are not rejected with 403.
+    Operators can scope origins independently of the server's Host allowlist
+    via MCP_ALLOWED_ORIGINS (comma-separated, e.g.
+    "http://hal2000:*,https://hal2000:*").
+    """
+    raw = os.environ.get("MCP_ALLOWED_ORIGINS", "").strip()
+    if raw:
+        origins = [o.strip() for o in raw.split(",") if o.strip()]
+        logger.info("MCP_ALLOWED_ORIGINS set — origin allowlist: %s", origins)
+        return origins
+    origins: list[str] = []
+    for h in hosts:
+        origins.append(f"http://{h}")
+        origins.append(f"https://{h}")
+    return origins
+
+
+mcp = FastMCP("GroktoCrawl", transport_security=_build_transport_security())
 
 # ── Annotation helpers ─────────────────────────────────────────────
 
@@ -730,11 +794,11 @@ def main() -> None:
         loop.add_signal_handler(signal.SIGINT, _handle_shutdown)
     except NotImplementedError:
         # Signal handlers not available on this platform (e.g. Windows)
+        import contextlib
+
         for sig in (signal.SIGTERM, signal.SIGINT):
-            try:
+            with contextlib.suppress(ValueError, OSError):
                 signal.signal(sig, lambda *_: _handle_shutdown())
-            except (ValueError, OSError):
-                pass
 
     loop.run_until_complete(server.serve())
 

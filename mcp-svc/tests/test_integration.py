@@ -61,12 +61,13 @@ async def _mcp_request(
     params: dict[str, Any] | None = None,
     req_id: int = 1,
     session_id: str | None = None,
+    host: str | None = None,
 ) -> dict[str, Any]:
     """Send a JSON-RPC request to the MCP server and return the parsed response."""
     headers: dict[str, str] = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
-        "Host": "localhost:8002",
+        "Host": host or "localhost:8002",
     }
     if session_id:
         headers["MCP-Session-Id"] = session_id
@@ -113,6 +114,36 @@ async def _mcp_init(client: httpx.AsyncClient) -> str:
     session_id = resp.headers.get("mcp-session-id", "")
     assert session_id, "No MCP-Session-Id in initialize response"
     return session_id
+
+
+async def _mcp_initialize_raw(
+    client: httpx.AsyncClient,
+    host: str,
+) -> httpx.Response:
+    """Send initialize with an explicit Host header; return the raw response.
+
+    Used by the transport-security regression tests (issue #524) to assert
+    how the server treats specific Host values without requiring a session.
+    """
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "Host": host,
+    }
+    return await client.post(
+        MCP_URL,
+        json={
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "host-header-test", "version": "1.0"},
+            },
+        },
+        headers=headers,
+    )
 
 
 async def _mcp_call_tool(
@@ -187,6 +218,85 @@ async def agent_client() -> httpx.AsyncClient:
 async def mcp_session(client: httpx.AsyncClient) -> str:
     """Return an initialized MCP session ID."""
     return await _mcp_init(client)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Host-header / DNS-rebinding protection (regression: issue #524)
+# ═══════════════════════════════════════════════════════════════════
+
+
+# The Host value the server should accept when MCP_ALLOWED_HOSTS is
+# configured for this deployment. Tests read it from the environment so the
+# same suite works against any host (CI service name, LAN hostname, etc.).
+# When MCP_TEST_ALLOWED_HOST is unset but MCP_ALLOWED_HOSTS is configured,
+# derive the default from the allowlist so the test targets a Host the
+# deployment actually accepts (instead of silently assuming localhost).
+def _default_allowed_test_host() -> str:
+    raw = os.environ.get("MCP_ALLOWED_HOSTS", "")
+    hosts = [h.strip() for h in raw.split(",") if h.strip()]
+    for h in hosts:
+        if h.endswith(":*"):
+            base = h[:-2]
+            if base in ("localhost", "127.0.0.1", "[::1]"):
+                continue
+            return f"{base}:8002"
+        # Exact host or host:port entry: use it verbatim so a non-loopback
+        # value (e.g. "hal2000" or "mcp-svc:8002") is returned as-is.
+        if h not in ("localhost", "localhost:8002", "127.0.0.1", "[::1]"):
+            return h
+    return "localhost:8002"
+
+
+ALLOWED_TEST_HOST = (
+    os.environ.get("MCP_TEST_ALLOWED_HOST") or _default_allowed_test_host()
+)
+DISALLOWED_TEST_HOST = os.environ.get(
+    "MCP_TEST_DISALLOWED_HOST", "not-allowed.invalid:8002"
+)
+
+
+@pytest.mark.asyncio
+class TestHostHeaderTransportSecurity:
+    """Regression tests for issue #524.
+
+    The MCP server previously auto-enabled loopback-only DNS-rebinding
+    protection (SDK default), rejecting every non-loopback Host header with
+    421 even though the server binds 0.0.0.0. These tests assert the two
+    sides of the contract:
+      - a Host the deployment allows must initialize successfully;
+      - a Host outside the allowlist must be rejected with 421.
+
+    Protection is fail-closed (always enabled), so the disallowed-host
+    assertion holds against both the default stack (loopback-only allowlist)
+    and a configured deployment (MCP_ALLOWED_HOSTS set). The allowed-host
+    test targets whatever the deployment configures via MCP_TEST_ALLOWED_HOST
+    (default ``localhost:8002``, which the default allowlist permits).
+    """
+
+    async def test_initialize_with_allowed_host(self) -> None:
+        """initialize succeeds for a Host value in the configured allowlist."""
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+            resp = await _mcp_initialize_raw(client, ALLOWED_TEST_HOST)
+        assert resp.status_code == 200, (
+            f"initialize with allowed Host {ALLOWED_TEST_HOST!r} "
+            f"failed: {resp.status_code} {resp.text[:200]}"
+        )
+        assert "serverInfo" in resp.text
+
+    async def test_initialize_with_disallowed_host_rejected(self) -> None:
+        """A Host outside the allowlist is rejected with 421.
+
+        Protection is fail-closed: the server always enforces an allowlist
+        (loopback-only by default, or MCP_ALLOWED_HOSTS when configured), so
+        a disallowed Host is deterministically rejected with 421 in every
+        deployment configuration.
+        """
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+            resp = await _mcp_initialize_raw(client, DISALLOWED_TEST_HOST)
+        assert resp.status_code == 421, (
+            f"disallowed Host {DISALLOWED_TEST_HOST!r} was not rejected: "
+            f"got {resp.status_code} {resp.text[:200]}"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════
