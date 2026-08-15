@@ -285,8 +285,20 @@ async def _scrape_answer_sources(
     Reuses Markdown carried by ``rerank_artifacts``, scrapes the remaining
     preferred (non-video) URLs, and falls back to video-platform URLs only
     when the ``num_sources`` quota is still unmet. Returns ordered artifacts
-    (preferred in rank order, then any video fallback).
+    (preferred in rank order, then any video fallback), deduplicated by URL
+    and bounded to ``num_sources``.
     """
+    # Search results can repeat the same URL (keyword mode returns up to
+    # 2x num_sources entries, many of them duplicates). Deduplicate first so
+    # one artifact per URL is produced and the quota cannot be exceeded.
+    seen_urls: set[str] = set()
+    deduped_urls: list[str] = []
+    for u in target_urls:
+        if u not in seen_urls:
+            seen_urls.add(u)
+            deduped_urls.append(u)
+    target_urls = deduped_urls
+
     reused = {a.url: a for a in rerank_artifacts if a.markdown}
     dedup_counter = METRICS.counter(
         "fetches_deduped_total",
@@ -319,7 +331,7 @@ async def _scrape_answer_sources(
         artifact
         for u in preferred
         if (artifact := reused.get(u) or fresh_by_url.get(u)) is not None
-    ]
+    ][:num_sources]
     artifacts = list(preferred_artifacts)
 
     if len(artifacts) < num_sources and deprioritized:
@@ -338,6 +350,8 @@ async def _scrape_answer_sources(
         )
         video_by_url = {a.url: a for a in fresh_video}
         for u in deprioritized:
+            if len(artifacts) >= num_sources:
+                break
             artifact = reused.get(u) or video_by_url.get(u)
             if artifact is not None:
                 artifacts.append(artifact)
