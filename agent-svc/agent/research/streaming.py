@@ -27,10 +27,15 @@ async def stream_cached_artifact(
     similarity: float,
     citation_style: CitationStyle,
     has_schema: bool,
+    age_hours: float | None = None,
+    refresh_awaitable: Any = None,
 ) -> Any:
     """Replay cached agent results as SSE token events.
 
     Preserves citation style transformation and schema-mode skip logic.
+    When ``refresh_awaitable`` is supplied (stale-while-revalidate), the
+    stale result is emitted first and the refreshed result follows as a
+    ``refreshed`` event.
     """
     stream_start = _time.monotonic()
 
@@ -58,6 +63,9 @@ async def stream_cached_artifact(
         "similarity": similarity,
         "citation_style": citation_style.value,
     }
+    if age_hours is not None:
+        done_payload["age_hours"] = age_hours
+        done_payload["refreshed"] = False
     if citation_style == CitationStyle.compact:
         compact_srcs = []
         for i, src in enumerate(sources, start=1):
@@ -67,6 +75,17 @@ async def stream_cached_artifact(
     else:
         done_payload["source_details"] = sources
     yield f"data: {json.dumps(done_payload)}\n\n"
+
+    # ── Stale-while-revalidate: await the single-flight refresh ──
+    if refresh_awaitable is not None:
+        try:
+            refreshed = await refresh_awaitable
+        except Exception:
+            logger.warning("Background research memory refresh failed", exc_info=True)
+            refreshed = None
+        if refreshed:
+            yield f"data: {json.dumps({'type': 'refreshed', 'result': refreshed.get('result', ''), 'sources': refreshed.get('sources', []), 'memory_id': refreshed.get('research_memory_id', ''), 'freshness': 'refreshed', 'age_hours': 0.0})}\n\n"
+
     yield "data: [DONE]\n\n"
 
 
@@ -86,6 +105,7 @@ async def stream_research_live(
     search_type: str = "deep",
     research_memory: Any = None,
     user_id: str | None = None,
+    fingerprint: str | None = None,
 ) -> Any:
     """Orchestrate full research SSE pipeline for cache-miss or force-fresh.
 
@@ -142,6 +162,7 @@ async def stream_research_live(
                     requested_model=requested_model,
                     latency_ms=event["latency_ms"],
                     user_id=user_id,
+                    fingerprint=fingerprint,
                 )
 
             done_payload: dict = {

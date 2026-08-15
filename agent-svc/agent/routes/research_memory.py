@@ -51,6 +51,7 @@ async def research_memory_query(
     result = await memory.query(
         prompt=body.question,
         user_id=user_id,
+        max_age_hours=body.max_age_hours,
     )
     return ResearchMemoryQueryResponse(**result)
 
