@@ -311,7 +311,9 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
             search_type=body.search_type,
             max_searches_per_request=max_searches,
             fingerprint=fingerprint,
-        )
+            task_tracker=request.app.state.task_tracker,
+        ),
+        job_id=job_id,
     )
 
     response.headers["X-Search-Budget"] = f"{max_searches}/{max_searches}"
@@ -343,6 +345,7 @@ async def cancel_agent(request: Request, job_id: str) -> AgentCancelResponse:
         raise NotFoundError(
             detail="Job not found or already completed", details={"job_id": job_id}
         )
+    request.app.state.task_tracker.cancel_job(job_id)
     return AgentCancelResponse(success=True)
 
 
