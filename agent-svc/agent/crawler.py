@@ -25,6 +25,7 @@ import httpx
 
 from common.url import is_private_host
 
+from .cancel import raise_if_cancelled
 from .crawl_cache import CrawlCache
 from .dedup import DedupManager
 from .link_extractor import classify_links, extract_links, filter_links
@@ -537,8 +538,8 @@ class CrawlEngine:
             return None
 
     async def close(self) -> None:
-        """Close the internal HTTP client and cancel pending tasks."""
-        self._cancel_all_tasks()
+        """Close the internal HTTP client and cancel/await pending tasks."""
+        await self._cancel_and_await_tasks()
         if self._html_client is not None:
             await self._html_client.aclose()
             self._html_client = None
@@ -575,6 +576,7 @@ class CrawlEngine:
         """
         parsed_start = urlparse(start_url)
         base_domain = parsed_start.hostname.lower() if parsed_start.hostname else ""
+        raise_if_cancelled()
 
         # Seed the BFS queue with start URL (DO NOT add to _seen — the task
         # adds to _seen when it acquires the URL. Adding here would cause
@@ -634,127 +636,132 @@ class CrawlEngine:
             self.options.delay,
         )
 
-        while self._queue or self._pending_tasks:
-            if (
-                self.options.max_pages > 0
-                and len(self._pages) >= self.options.max_pages
-            ):
-                logger.info(
-                    "Reached max_pages=%d — stopping crawl",
-                    self.options.max_pages,
-                )
-                break
-            if self._cancel_flag:
-                logger.info("Crawl cancelled via cancel flag")
-                break
-
-            # Cooperative cancellation: check Redis for cancelled status
-            if self.store is not None and job_id is not None:
-                job_meta = self.store.get_job(job_id)
-                if job_meta and job_meta.get("status") == "cancelled":
-                    self._cancel_flag = True
-                    logger.info("Crawl %s cancelled via Redis status check", job_id)
+        try:
+            while self._queue or self._pending_tasks:
+                if (
+                    self.options.max_pages > 0
+                    and len(self._pages) >= self.options.max_pages
+                ):
+                    logger.info(
+                        "Reached max_pages=%d — stopping crawl",
+                        self.options.max_pages,
+                    )
+                    break
+                if self._cancel_flag:
+                    logger.info("Crawl cancelled via cancel flag")
                     break
 
-            # Maximum duration timeout check
-            now = time.monotonic()
-            elapsed = now - crawl_start_time
-            if elapsed > self.options.max_duration_seconds:
-                logger.warning(
-                    "Crawl %s exceeded max duration of %ds (elapsed=%.1fs)",
-                    job_id,
-                    self.options.max_duration_seconds,
-                    elapsed,
-                )
-                self._cancel_all_tasks()
-                await self.close()
-                raise TimeoutError(
-                    f"Crawl exceeded max duration of {self.options.max_duration_seconds}s"
-                )
+                raise_if_cancelled()
 
-            # Dispatch tasks from the queue.
-            # We limit by both concurrency AND remaining capacity so that
-            # in-flight + completed pages don't exceed max_pages.
-            while (
-                self._queue
-                and len(self._pending_tasks) < self._effective_concurrency
-                and (
-                    self.options.max_pages <= 0
-                    or len(self._pages) + len(self._pending_tasks)
-                    < self.options.max_pages
-                )
-            ):
-                task = self._create_scrape_task(
-                    page_callback, error_callback, job_id, base_domain
-                )
-                if task is None:
-                    # Queue exhausted or all items filtered
-                    break
+                # Cooperative cancellation: check Redis for cancelled status
+                if self.store is not None and job_id is not None:
+                    job_meta = self.store.get_job(job_id)
+                    if job_meta and job_meta.get("status") == "cancelled":
+                        self._cancel_flag = True
+                        logger.info("Crawl %s cancelled via Redis status check", job_id)
+                        break
 
-            # Wait for at least one task to complete (or queue to be non-empty)
-            if self._pending_tasks:
-                _completed, _remaining = await asyncio.wait(
-                    self._pending_tasks,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                self._pending_tasks = _remaining
-                # Process completed tasks (any exceptions were handled within)
-                for task in _completed:
-                    try:
-                        task.result()
-                    except asyncio.CancelledError:
-                        logger.debug("Scrape task was cancelled")
-                    except StartUrlScrapeError:
-                        logger.error("Start URL scrape failed — aborting crawl")
-                        self._cancel_all_tasks()
-                        result_obj = CrawlResult(
-                            pages=self._pages,
-                            total=0,
-                            completed=len(self._pages),
-                            errors=self._errors,
-                            robots_blocked=self._robots_blocked,
-                        )
-                        await self.close()
-                        return result_obj
-                    except Exception as exc:
-                        logger.warning(
-                            "Scrape task raised unexpected exception: %s", exc
-                        )
-            elif not self._queue:
-                # Nothing pending and nothing left in queue — crawl is done
-                break
-
-            # Periodic job store update
-            if self.store is not None and job_id is not None:
+                # Maximum duration timeout check
                 now = time.monotonic()
-                if now - last_store_update >= self._update_interval:
-                    self._update_store(job_id)
-                    last_store_update = now
+                elapsed = now - crawl_start_time
+                if elapsed > self.options.max_duration_seconds:
+                    logger.warning(
+                        "Crawl %s exceeded max duration of %ds (elapsed=%.1fs)",
+                        job_id,
+                        self.options.max_duration_seconds,
+                        elapsed,
+                    )
+                    raise TimeoutError(
+                        f"Crawl exceeded max duration of {self.options.max_duration_seconds}s"
+                    )
 
-        # Wait for any remaining pending tasks to finish
-        if self._pending_tasks:
-            _done, _still_pending = await asyncio.wait(
-                self._pending_tasks, return_when=asyncio.ALL_COMPLETED
+                # Dispatch tasks from the queue.
+                # We limit by both concurrency AND remaining capacity so that
+                # in-flight + completed pages don't exceed max_pages.
+                while (
+                    self._queue
+                    and len(self._pending_tasks) < self._effective_concurrency
+                    and (
+                        self.options.max_pages <= 0
+                        or len(self._pages) + len(self._pending_tasks)
+                        < self.options.max_pages
+                    )
+                ):
+                    task = self._create_scrape_task(
+                        page_callback, error_callback, job_id, base_domain
+                    )
+                    if task is None:
+                        # Queue exhausted or all items filtered
+                        break
+
+                # Wait for at least one task to complete (or queue to be non-empty)
+                if self._pending_tasks:
+                    _completed, _remaining = await asyncio.wait(
+                        self._pending_tasks,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    self._pending_tasks = _remaining
+                    # Process completed tasks (any exceptions were handled within)
+                    for task in _completed:
+                        try:
+                            task.result()
+                        except asyncio.CancelledError:
+                            logger.debug("Scrape task was cancelled")
+                        except StartUrlScrapeError:
+                            logger.error("Start URL scrape failed — aborting crawl")
+                            result_obj = CrawlResult(
+                                pages=self._pages,
+                                total=0,
+                                completed=len(self._pages),
+                                errors=self._errors,
+                                robots_blocked=self._robots_blocked,
+                            )
+                            return result_obj
+                        except Exception as exc:
+                            logger.warning(
+                                "Scrape task raised unexpected exception: %s", exc
+                            )
+                elif not self._queue:
+                    # Nothing pending and nothing left in queue — crawl is done
+                    break
+
+                # Periodic job store update
+                if self.store is not None and job_id is not None:
+                    now = time.monotonic()
+                    if now - last_store_update >= self._update_interval:
+                        self._update_store(job_id)
+                        last_store_update = now
+
+            # Wait for any remaining pending tasks to finish
+            if self._pending_tasks:
+                _done, _still_pending = await asyncio.wait(
+                    self._pending_tasks, return_when=asyncio.ALL_COMPLETED
+                )
+                self._pending_tasks = _still_pending
+                for task in _done:
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        task.result()
+
+            # Final store update
+            if self.store is not None and job_id is not None:
+                self._update_store(job_id)
+
+            return CrawlResult(
+                pages=self._pages,
+                total=len(self._pages) + len(self._queue) + self._dedup_skipped,
+                completed=len(self._pages),
+                errors=self._errors,
+                robots_blocked=self._robots_blocked,
+                filtered_out=self._filtered_out,
             )
-            self._pending_tasks = _still_pending
-            for task in _done:
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    task.result()
-
-        # Final store update
-        if self.store is not None and job_id is not None:
-            self._update_store(job_id)
-
-        await self.close()
-
-        return CrawlResult(
-            pages=self._pages,
-            total=len(self._pages) + len(self._queue) + self._dedup_skipped,
-            completed=len(self._pages),
-            errors=self._errors,
-            robots_blocked=self._robots_blocked,
-            filtered_out=self._filtered_out,
-        )
+        finally:
+            # Deterministic teardown on success, cooperative cancel, and
+            # forced cancellation: await cancelled child tasks and close the
+            # HTML client so no task is destroyed while pending.
+            await self._cancel_and_await_tasks()
+            if self._html_client is not None:
+                await self._html_client.aclose()
+                self._html_client = None
 
     def _create_scrape_task(
         self,
@@ -857,6 +864,7 @@ class CrawlEngine:
         async with self._semaphore:
             if self._cancel_flag:
                 return
+            raise_if_cancelled()
 
             # Apply delay between scrapes (only when delay > 0)
             delay = self.options.delay
@@ -1286,14 +1294,18 @@ class CrawlEngine:
                         if child_normalized not in self._seen:
                             self._queue.append((child_url, depth + 1, False))
 
-    def _cancel_all_tasks(self) -> None:
-        """Cancel all in-flight scrape tasks and clear tracking.
+    async def _cancel_and_await_tasks(self) -> None:
+        """Cancel in-flight scrape tasks and await them for clean teardown.
 
-        This ensures semaphore slots are released and pending tasks
-        don't hold references after cancellation.
+        Awaiting cancelled tasks with ``return_exceptions=True`` ensures
+        browser/HTTP resources are closed deterministically and no task is
+        destroyed while still pending.
         """
+        if not self._pending_tasks:
+            return
         for task in self._pending_tasks:
             task.cancel()
+        await asyncio.gather(*self._pending_tasks, return_exceptions=True)
         self._pending_tasks.clear()
 
     def normalize_url(self, url: str) -> str:
@@ -1343,7 +1355,8 @@ class CrawlEngine:
         also be woken up and exit cleanly.
         """
         self._cancel_flag = True
-        self._cancel_all_tasks()
+        for task in self._pending_tasks:
+            task.cancel()
 
     @staticmethod
     def _filter_child_paths(links: list[str], current_url: str) -> list[str]:

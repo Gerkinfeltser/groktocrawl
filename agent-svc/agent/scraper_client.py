@@ -6,6 +6,8 @@ import time
 
 import httpx
 
+from .admission import AdmissionRejectedError, get_admission
+from .cancel import JobCancelledError, raise_if_cancelled
 from .metrics import METRICS
 
 logger = logging.getLogger(__name__)
@@ -20,8 +22,13 @@ class ScraperClient:
     concurrent scrape tasks are in flight.
     """
 
-    def __init__(self, base_url: str = "http://scraper-svc:8001"):
+    def __init__(
+        self,
+        base_url: str = "http://scraper-svc:8001",
+        admission=None,
+    ):
         self.base_url = base_url.rstrip("/")
+        self._admission = admission if admission is not None else get_admission()
         self._client = httpx.AsyncClient(
             timeout=60,
             limits=httpx.Limits(
@@ -61,6 +68,18 @@ class ScraperClient:
         scraper-svc ``/scrape`` endpoint so that per-page extraction
         options (formats, content filtering, viewport, etc.) are applied.
         """
+        raise_if_cancelled()
+        resource_class = "browser" if force_browser else "lightweight_fetch"
+        weight = self._admission.weight_for(resource_class)
+        try:
+            await self._admission.acquire(resource_class, weight=weight)
+        except AdmissionRejectedError as exc:
+            return {
+                "success": False,
+                "error": str(exc),
+                "error_code": "CAPACITY_EXCEEDED",
+            }
+
         start = time.monotonic()
         try:
             body: dict = {"url": url}
@@ -90,6 +109,8 @@ class ScraperClient:
                 {"tier": source}
             )
             return result  # type: ignore[no-any-return]
+        except JobCancelledError:
+            raise
         except httpx.TimeoutException:
             elapsed = time.monotonic() - start
             logger.warning("Scraper timed out for %s", url)
@@ -104,6 +125,8 @@ class ScraperClient:
                 "scrape_duration_seconds", "Scrape latency by source tier", ["tier"]
             ).observe({"tier": "error"}, elapsed)
             return {"success": False, "error": str(e)}
+        finally:
+            self._admission.release(resource_class, weight=weight)
 
     async def close(self) -> None:
         await self._client.aclose()

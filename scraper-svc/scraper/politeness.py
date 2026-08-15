@@ -73,6 +73,11 @@ class _DomainState:
     """Per-domain state tracked by the politeness manager."""
 
     last_request: float = 0.0
+    # Transient future-slot reservation used only to stagger concurrent
+    # same-domain tasks. Kept separate from ``last_request`` (an actual
+    # request timestamp) so an aborted delayed request never leaves a stale
+    # future timestamp behind. In-memory only; not persisted to Valkey.
+    reserved_slot: float = 0.0
     crawl_delay: float = DEFAULT_CRAWL_DELAY
     robots_cached_at: float = 0.0
     robots_disallowed_paths: list[re.Pattern] = field(default_factory=list)
@@ -316,6 +321,7 @@ class PolitenessManager:
         url: str,
         ignore_robots_txt: bool = False,
         robots_user_agent: str | None = None,
+        rate_limit: bool = True,
     ) -> PolitenessResult:
         """Check whether a URL can be scraped under the current politeness policy.
 
@@ -334,6 +340,10 @@ class PolitenessManager:
             ignore_robots_txt: If True, skip robots.txt enforcement.
             robots_user_agent: Custom User-Agent string for robots.txt
                 evaluation. If None, uses the default USER_AGENT.
+            rate_limit: If False, only robots.txt enforcement runs and the
+                rate-limiting state is left untouched. Per-tier checks pass
+                ``rate_limit=False`` so a single scrape does not reserve a
+                new future slot (and sleep) before every tier.
 
         Returns:
             PolitenessResult with action "proceed", "delay", or "blocked".
@@ -375,6 +385,17 @@ class PolitenessManager:
                         )
 
             # ── Rate limiting (Valkey-coordinated) ─────────────────
+            # Read-only checks (per-tier) only enforce robots.txt above and
+            # must not advance the rate-limit state, otherwise a single scrape
+            # would reserve a fresh future slot (and sleep) before every tier.
+            if not rate_limit:
+                return PolitenessResult(
+                    action="proceed",
+                    reason="",
+                    robots_allowed=True,
+                    domain=domain,
+                )
+
             # Check both in-memory and Valkey last_request, use the most recent
             in_memory_last = state.last_request
             valkey_last = await self._get_valkey_last_request(domain)
@@ -384,7 +405,16 @@ class PolitenessManager:
             elapsed = now - effective_last
 
             if elapsed < state.crawl_delay and effective_last > 0:
-                wait = state.crawl_delay - elapsed
+                # Atomically reserve the next-available slot under the
+                # per-domain lock so N concurrent same-domain tasks stagger
+                # their wake-ups instead of waking as a burst. The reservation
+                # is kept in-memory only (``reserved_slot``) — never written
+                # into ``last_request`` or Valkey — so an aborted delayed
+                # request does not leave a stale future timestamp behind.
+                base = max(effective_last, state.reserved_slot)
+                reserved = base + state.crawl_delay
+                wait = max(0.0, reserved - now)
+                state.reserved_slot = reserved
                 logger.debug(
                     "Rate limiting %s: %.2fs elapsed, need %.2fs, waiting %.2fs",
                     domain,
@@ -404,6 +434,7 @@ class PolitenessManager:
             # Update both in-memory and Valkey state before releasing the
             # lock so concurrent tasks see the updated timestamp.
             state.last_request = now
+            state.reserved_slot = 0.0
             await self._set_valkey_last_request(domain, now)
 
         return PolitenessResult(
@@ -412,6 +443,20 @@ class PolitenessManager:
             robots_allowed=True,
             domain=domain,
         )
+
+    def rollback_reservation(self, url: str) -> None:
+        """Clear a transient future-slot reservation for a domain.
+
+        Called when a delayed request is aborted before its actual fetch so
+        the abandoned reservation does not inflate the next request's delay.
+        """
+        if not self._enabled:
+            return
+        domain = self._domain_from_url(url)
+        if domain:
+            state = self._domains.get(domain)
+            if state is not None:
+                state.reserved_slot = 0.0
 
     def record_request(self, url: str) -> None:
         """Record that a request was made to a URL.
@@ -432,6 +477,7 @@ class PolitenessManager:
         if domain:
             state = self._domains.setdefault(domain, _DomainState())
             state.last_request = time.time()
+            state.reserved_slot = 0.0
 
     def get_politeness_metadata(self, url: str) -> dict:
         """Return politeness metadata for a scrape response.

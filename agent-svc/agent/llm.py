@@ -14,6 +14,8 @@ import httpx
 
 from common.stage_metrics import inc_counter, observe_elapsed
 
+from .admission import AdmissionRejectedError, get_admission
+from .cancel import JobCancelledError, raise_if_cancelled
 from .settings import load_settings
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,7 @@ class LLMClient:
         base_url: str = "https://api.openai.com/v1",
         api_key: str = "",
         model: str = "",
+        admission=None,
     ):
         if not model:
             raise ValueError(
@@ -40,6 +43,7 @@ class LLMClient:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
+        self._admission = admission if admission is not None else get_admission()
         self._client = httpx.AsyncClient(timeout=120)
 
     async def generate_stream(
@@ -86,6 +90,14 @@ class LLMClient:
                 yield {"type": "error", "content": content}
             else:
                 yield {"type": "done", "full_content": content}
+            return
+
+        raise_if_cancelled()
+        llm_weight = self._admission.weight_for("llm")
+        try:
+            await self._admission.acquire("llm", weight=llm_weight)
+        except AdmissionRejectedError as exc:
+            yield {"type": "error", "content": f"Error: LLM admission rejected: {exc}"}
             return
 
         messages = [{"role": "system", "content": system_prompt}]
@@ -176,6 +188,8 @@ class LLMClient:
             # client-cancelled SSE generation is not counted as "success".
             outcome = "cancelled"
             raise
+        except JobCancelledError:
+            raise
         except Exception as e:
             outcome = "error"
             logger.error("LLM stream call failed: %s", e)
@@ -189,6 +203,7 @@ class LLMClient:
                 _LLM_CALLS_TOTAL_HELP,
                 {"stage": stage, "outcome": outcome},
             )
+            self._admission.release("llm", weight=llm_weight)
 
     async def generate(
         self,
@@ -210,6 +225,13 @@ class LLMClient:
         Returns:
             The LLM's response text.
         """
+        raise_if_cancelled()
+        llm_weight = self._admission.weight_for("llm")
+        try:
+            await self._admission.acquire("llm", weight=llm_weight)
+        except AdmissionRejectedError as exc:
+            return f"Error: LLM admission rejected: {exc}"
+
         started = time.monotonic()
         outcome = "success"
         messages = [{"role": "system", "content": system_prompt}]
@@ -276,6 +298,8 @@ class LLMClient:
             content = result["choices"][0]["message"]["content"]
             return content  # type: ignore[no-any-return]
 
+        except JobCancelledError:
+            raise
         except Exception as e:
             outcome = "error"
             logger.error("LLM call failed: %s", e)
@@ -289,6 +313,7 @@ class LLMClient:
                 _LLM_CALLS_TOTAL_HELP,
                 {"stage": stage, "outcome": outcome},
             )
+            self._admission.release("llm", weight=llm_weight)
 
     async def check_health(self) -> bool:
         """Check if the LLM backend is reachable and responding.

@@ -183,7 +183,8 @@ async def create_crawl(
             scrape_options=body.scrape_options.model_dump(mode="json", by_alias=True)
             if body.scrape_options
             else None,
-        )
+        ),
+        job_id=job_id,
     )
     return CrawlCreateResponse(id=job_id)
 
@@ -328,6 +329,7 @@ async def cancel_crawl(request: Request, job_id: str) -> AgentCancelResponse:
         raise NotFoundError(
             detail="Job not found or already completed", details={"job_id": job_id}
         )
+    request.app.state.task_tracker.cancel_job(job_id)
     return AgentCancelResponse(success=True)
 
 

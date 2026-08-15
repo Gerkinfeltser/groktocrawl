@@ -75,7 +75,9 @@ async def create_batch_scrape(
             scraper_url=request.app.state.scraper_url,
             webhook_config=body.webhook,
             task_tracker=request.app.state.task_tracker,
-        )
+            max_concurrency=body.max_concurrency,
+        ),
+        job_id=job_id,
     )
     return CrawlCreateResponse(id=job_id)
 
@@ -150,6 +152,7 @@ async def cancel_batch_scrape(request: Request, job_id: str) -> AgentCancelRespo
         raise NotFoundError(
             detail="Job not found or already completed", details={"job_id": job_id}
         )
+    request.app.state.task_tracker.cancel_job(job_id)
     return AgentCancelResponse(success=True)
 
 

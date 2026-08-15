@@ -18,6 +18,7 @@ import time
 
 import httpx
 
+from common.admission import AdmissionController
 from common.metrics import METRICS
 from common.stage_metrics import inc_counter, observe_elapsed
 from common.url import extract_domain
@@ -39,6 +40,13 @@ logger = logging.getLogger(__name__)
 _settings = load_settings()
 FLARE_SOLVERR_URL = _settings.flare_solverr_url
 _browser_semaphore = asyncio.Semaphore(_settings.max_browser_concurrency)
+
+# Outer weighted admission for the browser class (single-class controller);
+# the semaphore above remains the inner per-request cap.
+_browser_admission = AdmissionController(
+    limits={"browser": _settings.max_browser_concurrency},
+    weights={"browser": 1},
+)
 
 # ── Browser lifecycle capacity/latency metric names ──────────────
 _BROWSER_ACTIVE = "groktocrawl_browser_semaphore_active"
@@ -92,20 +100,21 @@ async def _playwright_fetch_with_proxy(
     wait_started = time.monotonic()
     acquired = False
     try:
-        async with _browser_semaphore:
-            acquired = True
-            _browser_waiters_gauge().dec()
-            observe_elapsed(
-                _BROWSER_WAIT_SECONDS,
-                "Time spent waiting for a browser semaphore slot",
-                {},
-                wait_started,
-            )
-            _browser_active_gauge().inc()
-            try:
-                return await _playwright_fetch_unbounded(url, proxy)
-            finally:
-                _browser_active_gauge().dec()
+        async with _browser_admission.resource("browser"):
+            async with _browser_semaphore:
+                acquired = True
+                _browser_waiters_gauge().dec()
+                observe_elapsed(
+                    _BROWSER_WAIT_SECONDS,
+                    "Time spent waiting for a browser semaphore slot",
+                    {},
+                    wait_started,
+                )
+                _browser_active_gauge().inc()
+                try:
+                    return await _playwright_fetch_unbounded(url, proxy)
+                finally:
+                    _browser_active_gauge().dec()
     finally:
         if not acquired:
             _browser_waiters_gauge().dec()
