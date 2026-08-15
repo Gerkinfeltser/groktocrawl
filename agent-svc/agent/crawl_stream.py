@@ -176,7 +176,6 @@ async def crawl_event_stream(
 
         # Main event loop: read from page_queue with heartbeat timeout
         while not crawl_task.done() or not page_queue.empty():
-            timing.on_first_event()
             try:
                 page_data = await asyncio.wait_for(
                     page_queue.get(), timeout=_HEARTBEAT_INTERVAL
@@ -201,6 +200,7 @@ async def crawl_event_stream(
                     "total": total_est,
                     "status": "scraping",
                 }
+                timing.on_first_event()
                 event_id += 1
                 yield f"id: {event_id}\ndata: {json.dumps(progress_payload)}\n\n"
                 continue
@@ -216,6 +216,7 @@ async def crawl_event_stream(
                     "url": page_data.get("url", ""),
                     "error": page_data.get("error", "Unknown scrape error"),
                 }
+                timing.on_first_event()
                 event_id += 1
                 yield f"id: {event_id}\ndata: {json.dumps(error_payload)}\n\n"
                 continue
@@ -227,6 +228,7 @@ async def crawl_event_stream(
                 "markdown": page_data.get("markdown", ""),
                 "metadata": page_data.get("metadata", {}),
             }
+            timing.on_first_event()
             event_id += 1
             yield f"id: {event_id}\ndata: {json.dumps(page_payload)}\n\n"
             pages_yielded += 1

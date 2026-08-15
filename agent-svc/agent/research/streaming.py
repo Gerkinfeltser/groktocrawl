@@ -93,6 +93,10 @@ async def stream_research_live(
     source_scraped, sources, error, status, research_plan, research_pass.
     """
     timing = StreamTiming("agent")
+    # ``status`` / ``research_plan`` / ``research_pass`` are immediate
+    # sentinels emitted before any real work; TTFB must reflect the first
+    # content-bearing event, not the planning placeholder.
+    _content_events = {"sources_pending", "source_scraped", "sources", "token", "done"}
     async for event in run_research_stream(
         prompt=prompt,
         urls=urls,
@@ -108,7 +112,8 @@ async def stream_research_live(
         citation_style=citation_style,
         search_type=search_type,
     ):
-        timing.on_first_event()
+        if event["type"] in _content_events:
+            timing.on_first_event()
         if event["type"] == "sources_pending":
             yield f"data: {json.dumps({'type': 'sources_pending', 'sources': event['sources']})}\n\n"
         elif event["type"] == "source_scraped":
