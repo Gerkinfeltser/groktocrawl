@@ -131,6 +131,9 @@ def create_app() -> FastAPI:
     app.state.rate_limiter = rate_limiter
     app.state.max_searches_per_request = settings.max_searches_per_request
     app.state.task_tracker = TaskTracker()
+    from .admission import get_admission
+
+    app.state.admission = get_admission()
 
     # ── Middleware: request_id ───────────────────────────────────
     def _record_metric(labels: dict[str, str], value: float) -> None:

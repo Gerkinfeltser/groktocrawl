@@ -39,6 +39,13 @@ class AgentSettings(BaseModel):
     research_memory_max_artifact_bytes: int = Field(
         default=5_242_880, alias="RESEARCH_MEMORY_MAX_ARTIFACT_BYTES"
     )
+    # Global weighted admission budgets (ADR-0051). Values are weighted
+    # units; per-operation weights are fetch=1, llm=4, browser=8.
+    admission_light_fetch_limit: int = Field(
+        default=64, alias="ADMISSION_LIGHT_FETCH_LIMIT"
+    )
+    admission_browser_limit: int = Field(default=32, alias="ADMISSION_BROWSER_LIMIT")
+    admission_llm_limit: int = Field(default=32, alias="ADMISSION_LLM_LIMIT")
 
 
 @functools.cache
