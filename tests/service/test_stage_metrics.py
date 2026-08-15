@@ -139,6 +139,57 @@ async def test_research_memory_lookup_records_error_outcome(monkeypatch):
     assert "# TYPE groktocrawl_research_memory_lookup_seconds histogram" in text
 
 
+@pytest.mark.asyncio
+async def test_research_memory_valkey_failure_records_error_outcome(monkeypatch):
+    """A Valkey get failure during query() records outcome=error, not miss."""
+    from agent.research_memory import ResearchMemory
+
+    memory = ResearchMemory(
+        redis_url="redis://localhost:6379/0", semantic_url="http://semantic.test"
+    )
+
+    class _FakeQdrantResp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"result": [{"score": 0.9, "payload": {"memory_id": "mem1"}}]}
+
+    class _FakeQdrantClient:
+        async def post(self, *_args, **_kwargs):
+            return _FakeQdrantResp()
+
+    async def fake_embed(_text: str) -> list[float]:
+        return [0.1, 0.2, 0.3]
+
+    async def fake_ensure_collection() -> None:
+        return None
+
+    async def fake_get_qdrant():
+        return _FakeQdrantClient()
+
+    def raise_valkey_get(*_args, **_kwargs):
+        raise RuntimeError("valkey connection refused")
+
+    monkeypatch.setattr(memory, "_embed", fake_embed)
+    monkeypatch.setattr(memory, "_ensure_collection", fake_ensure_collection)
+    monkeypatch.setattr(memory, "_get_qdrant", fake_get_qdrant)
+    monkeypatch.setattr(memory.redis, "get", raise_valkey_get)
+
+    before = _counter_count(
+        "groktocrawl_research_memory_lookup_total", 'outcome="error"'
+    )
+
+    result = await memory.query(prompt="test prompt")
+    await memory.close()
+
+    assert result == {"hit": False}
+    assert (
+        _counter_count("groktocrawl_research_memory_lookup_total", 'outcome="error"')
+        == before + 1
+    )
+
+
 # ── Crawl scrape-cache lookup outcomes ────────────────────────────
 
 
@@ -318,6 +369,63 @@ async def test_crawl_stream_ttfb_fires_on_first_page_event(monkeypatch):
     assert _hist_count("crawl") == before + 1
 
     await gen.aclose()
+
+
+@pytest.mark.asyncio
+async def test_crawl_event_stream_records_workload_telemetry(monkeypatch):
+    """Stream-mode crawls touch the active-jobs gauge and cancelled counter."""
+    import agent.crawl_stream as cs
+
+    started = MagicMock()
+    ended = MagicMock()
+    cancelled = MagicMock()
+    monkeypatch.setattr(cs, "record_job_start", started)
+    monkeypatch.setattr(cs, "record_job_end", ended)
+    monkeypatch.setattr(cs, "record_job_cancelled", cancelled)
+
+    class FakeEngine:
+        def __init__(self, scraper, store=None, options=None):
+            self._scraped_count = 0
+            self._queue: list = []
+
+        async def run(self, url, job_id=None, page_callback=None, error_callback=None):
+            await asyncio.Future()  # never completes — keeps the stream alive
+
+        async def close(self):
+            return None
+
+    class FakeScraper:
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(cs, "CrawlEngine", FakeEngine)
+    monkeypatch.setattr(cs, "ScraperClient", lambda url: FakeScraper())
+    monkeypatch.setattr(cs, "deliver_webhook", AsyncMock())
+
+    store = MagicMock()
+
+    gen = cs.crawl_event_stream(
+        job_id="j",
+        url="https://example.test",
+        max_pages=1,
+        max_depth=1,
+        scraper_url="http://scraper.test",
+        store=store,
+    )
+
+    # Advancing the generator runs the generator body: record_job_start fires.
+    task = asyncio.create_task(gen.__anext__())
+    await asyncio.sleep(0)
+    started.assert_called_once_with("crawl")
+
+    # Cancelling the awaiting task drives the asyncio.CancelledError handler,
+    # which records the cancellation, then finally records the job end.
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    cancelled.assert_called_once_with("crawl")
+    ended.assert_called_once_with("crawl")
 
 
 @pytest.mark.asyncio
