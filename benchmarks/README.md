@@ -9,19 +9,27 @@ browser-process-reuse and adapter-investment decisions (see ADR-0048).
 ```bash
 # Print the plan without executing (validates the fixture matrix and schema)
 python benchmarks/run_benchmarks.py --dry-run
-
-# Run N times per fixture and write a baseline artifact to benchmarks/baselines/
-python benchmarks/run_benchmarks.py --runs 5 --json
 ```
 
 `--runs` controls repetitions per fixture (default 3). `--config-class` labels
 the hardware/config cohort (default `default`). `--json` prints the artifact to
 stdout in addition to writing it.
 
+**The live-stack run is not functional out of the box.** `StackRunner` is a
+placeholder and is intentionally left unwired: running the CLI in live mode
+exits with a clear error (non-zero, no traceback) until you implement
+`StackRunner.__call__` for your deployment and set `StackRunner.wired = True`.
+
+```bash
+# NOT runnable until StackRunner is wired for a live deployment.
+python benchmarks/run_benchmarks.py --runs 5 --json
+```
+
 The harness core (`run_benchmarks`) accepts any `runner(fixture) -> float`
 callable, so the service test suite can exercise it deterministically without
-Docker (`tests/service/test_benchmark_harness.py`). A live-stack `StackRunner`
-must be wired per deployment before real measurements are recorded.
+Docker (`tests/service/test_benchmark_harness.py`). The percentile math
+(`percentile`, `compute_summary`) and baseline-writing/sanitisation logic are
+real and fully covered by those tests.
 
 ## Fixtures
 

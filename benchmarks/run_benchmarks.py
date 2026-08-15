@@ -167,7 +167,12 @@ class StackRunner:
     full Docker compose stack and is intentionally left for operators to
     wire per deployment; the harness core remains deterministic and testable
     without Docker.
+
+    Set ``wired = True`` after overriding :meth:`__call__` to point at a real
+    deployment, or the CLI refuses to run live benchmarks (see ``main``).
     """
+
+    wired: bool = False
 
     def __call__(self, fixture: BenchmarkFixture) -> float:
         raise NotImplementedError(
@@ -211,8 +216,18 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(plan, indent=2, sort_keys=True))
         return 0
 
+    runner = StackRunner()
+    if not runner.wired:
+        print(
+            "error: StackRunner is not wired for this deployment; "
+            "implement StackRunner.__call__ (and set StackRunner.wired = True) "
+            "to run live benchmarks.",
+            file=sys.stderr,
+        )
+        return 2
+
     baseline = run_benchmarks(
-        StackRunner(),
+        runner,
         FIXTURES,
         args.runs,
         commit_sha,
