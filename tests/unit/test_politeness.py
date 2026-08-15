@@ -235,11 +235,38 @@ class TestPolitenessCheck:
         mgr = PolitenessManager()
         mgr._enabled = True
         mgr.record_request("https://example.com/page")
-        state = mgr._domains["example.com"]
 
         # Wait a tiny bit so we know the last_request is recent
         result = await mgr.check("https://example.com/other")
         assert result.action == "delay" or result.action == "proceed"
+
+    @pytest.mark.asyncio
+    async def test_delay_path_reserves_next_slot(self):
+        """Concurrent same-domain delay requests must stagger, not burst.
+
+        The delay branch atomically reserves the next-available slot under
+        the per-domain lock, so a second request computes its wait from the
+        reserved slot rather than the original timestamp.
+        """
+        mgr = PolitenessManager()
+        mgr._enabled = True
+        state = _DomainState(
+            robots_cached_at=time.time(),
+            crawl_delay=1.0,
+            last_request=time.time(),
+            robots_disallowed_paths=[],
+        )
+        mgr._domains["example.com"] = state
+
+        first = await mgr.check("https://example.com/a")
+        assert first.action == "delay"
+        assert first.delay_seconds > 0
+
+        second = await mgr.check("https://example.com/b")
+        assert second.action == "delay"
+        # Staggered: the second wait is computed from the reserved slot and
+        # must be strictly larger than the first.
+        assert second.delay_seconds > first.delay_seconds
 
 
 # ── get_politeness_metadata ─────────────────────────────────────
