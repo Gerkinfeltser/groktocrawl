@@ -70,3 +70,24 @@ Each artifact in `benchmarks/baselines/` is JSON with:
 the raw samples. Artifacts must never contain deployment identifiers (hostname,
 IP, machine, node, or pod values); the harness strips these via
 `sanitise_baseline`.
+
+## Hybrid retrieval old-vs-new comparison
+
+`scripts/benchmark_hybrid_retrieval.py` compares the pre-#532 sequential
+web-first `hybrid_vector` merge against the #532 concurrent, floor-guaranteed
+blend across four dimensions — latency, source diversity (Qdrant-only
+candidates that survive), citation validity, and answer quality (recall@k proxy).
+It is a deterministic, stdlib-only, in-process simulation (no Docker), so it is
+runnable anywhere:
+
+```bash
+python scripts/benchmark_hybrid_retrieval.py --runs 5
+python scripts/benchmark_hybrid_retrieval.py --runs 5 --json
+```
+
+The results demonstrate the structural change (concurrent latency is the max of
+the two branches rather than their sum, and a Qdrant-only candidate can enter a
+full web budget) but are **not** a live-stack benchmark and make **no universal
+quality claim from a single run** — the metrics are structural proxies, and real
+latency/diversity/citation/answer-quality numbers require the live Docker stack
+plus an LLM-judge harness (documented follow-up, consistent with #528).
