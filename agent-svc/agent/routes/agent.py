@@ -263,8 +263,14 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
         return await _handle_plan_mode(request, body, response)
 
     # ── Check research memory cache ───────────────────────────────
+    # Only the streaming path performs the lookup in the route (it needs the
+    # cached artifact to replay it inline). The non-streaming path defers the
+    # single lookup to the background worker so one request never performs
+    # the semantic query twice.
     fingerprint = fingerprint_from_agent_request(body)
-    cache_hit_data = await _lookup_agent_cache(request, body, fingerprint)
+    cache_hit_data = (
+        await _lookup_agent_cache(request, body, fingerprint) if body.stream else None
+    )
 
     # ── Try streaming dispatch (cache hit replay or live pipeline) ─
     streaming_response = await _handle_agent_streaming(
