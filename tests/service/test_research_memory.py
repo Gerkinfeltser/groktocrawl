@@ -297,6 +297,46 @@ class TestSingleFlightRefresh:
         assert await t1 == "result"
         assert calls == 1
 
+    @pytest.mark.asyncio
+    async def test_discard_callback_does_not_evict_newer_task(self):
+        memory = ResearchMemory("redis://localhost:6379/0")
+        loop = asyncio.get_running_loop()
+
+        release_second = asyncio.Event()
+
+        async def first_factory():
+            return "first"
+
+        async def second_factory():
+            await release_second.wait()
+            return "second"
+
+        memory.start_refresh("key", first_factory)
+        created: list = []
+
+        def create_replacement() -> None:
+            # Runs in the same tick after t1 completes but before t1's
+            # discard callback fires, replacing the registry entry.
+            created.append(memory.start_refresh("key", second_factory))
+
+        loop.call_soon(create_replacement)
+
+        # Let t1 complete and its (stale) discard callback run.
+        await asyncio.sleep(0)
+
+        t2 = created[0]
+        # The newer still-running task must survive the stale discard.
+        assert memory._refresh_tasks.get("key") is t2
+
+        # A later caller shares t2 — no second concurrent refresh starts.
+        t3 = memory.start_refresh("key", first_factory)
+        assert t3 is t2
+
+        release_second.set()
+        assert await t2 == "second"
+        await asyncio.sleep(0)
+        assert "key" not in memory._refresh_tasks
+
 
 # ── Stale replay streaming (SWR) ─────────────────────────────────
 
@@ -353,6 +393,41 @@ class TestStaleWhileRevalidateStreaming:
         assert refreshed[0]["freshness"] == "refreshed"
         assert refreshed[0]["result"] == "fresh answer"
         assert refreshed[0]["memory_id"] == "new-mid"
+
+    @pytest.mark.asyncio
+    async def test_compact_refreshed_event_includes_sources_compact(self):
+        from agent.models import CitationStyle
+        from agent.research.streaming import stream_cached_artifact
+
+        async def ok():
+            return {
+                "result": "fresh [1](https://a.com)",
+                "sources": ["https://a.com"],
+                "sources_compact": [{"index": 1, "url": "https://a.com"}],
+                "research_memory_id": "new-mid",
+            }
+
+        chunks = [
+            chunk
+            async for chunk in stream_cached_artifact(
+                artifact_text="stale [1](https://a.com)",
+                sources=[{"url": "https://a.com", "title": "A"}],
+                memory_id="m",
+                freshness="stale",
+                similarity=0.9,
+                citation_style=CitationStyle.compact,
+                has_schema=False,
+                age_hours=50.0,
+                refresh_awaitable=ok(),
+            )
+        ]
+        refreshed = [
+            json.loads(chunk.removeprefix("data: "))
+            for chunk in chunks
+            if '"type": "refreshed"' in chunk
+        ]
+        assert len(refreshed) == 1
+        assert refreshed[0]["sources_compact"] == [{"index": 1, "url": "https://a.com"}]
 
 
 # ── Agent cache lookup (streaming replay gate) ───────────────────
@@ -506,6 +581,204 @@ class TestWorkerStaleWhileRevalidate:
         payload = mocks["store"].complete_job.call_args.args[1]
         assert payload["cached_version_exists"] is True
         assert payload["cached_version_age_hours"] == 50.0
+
+    def _swr_memory(self, refresh_result: dict) -> tuple:
+        """Build a real ResearchMemory with a mocked stale SWR hit.
+
+        The refresh is mocked to block on a returned ``asyncio.Event`` so
+        callers can deterministically exercise single-flight sharing before
+        the refresh completes.
+        """
+        memory = ResearchMemory("redis://localhost:6379/0")
+        memory.query = AsyncMock(
+            return_value={
+                "hit": True,
+                "freshness": "stale",
+                "swr_eligible": True,
+                "artifact": {
+                    "artifact": "stale [1]",
+                    "sources": [{"url": "https://a.com", "title": "A"}],
+                },
+                "similarity": 0.9,
+                "memory_id": "m",
+                "age_hours": 50.0,
+            }
+        )
+        release = asyncio.Event()
+
+        async def blocked_refresh(*_args, **_kwargs):
+            await release.wait()
+            return refresh_result
+
+        mock_refresh = AsyncMock(side_effect=blocked_refresh)
+        return memory, mock_refresh, release
+
+    async def _run_worker_swr(
+        self,
+        memory,
+        mock_refresh: AsyncMock,
+        release: asyncio.Event,
+        *,
+        citation_style,
+        fingerprint: str = "fp",
+        hook=None,
+    ) -> tuple:
+        """Run the worker SWR path and finish its single-flight refresh.
+
+        Keeps ``refresh_research_memory`` mocked for the full refresh lifetime
+        (the refresh task is awaited before the patch context exits).  ``hook``
+        (optional) runs after the worker starts its refresh but before
+        ``release`` unblocks it, receiving ``(memory, started_tasks)``.
+
+        Returns ``(store, refreshed, refresh_task)``.
+        """
+        from agent.worker import _process_agent_async
+
+        mock_store = MagicMock()
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        started: list = []
+        real_start_refresh = memory.start_refresh
+
+        def spy_start_refresh(key, factory):
+            task = real_start_refresh(key, factory)
+            started.append(task)
+            return task
+
+        memory.start_refresh = spy_start_refresh
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store),
+            patch("agent.worker.refresh_research_memory", mock_refresh),
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey",
+                    valkey_port=6379,
+                    valkey_db=0,
+                    crawl_max_duration_seconds=1800,
+                    crawl_idle_timeout_seconds=300,
+                ),
+            ),
+        ):
+            await _process_agent_async(
+                job_id="swr-job",
+                prompt="q",
+                urls=None,
+                schema_=None,
+                llm_base_url="http://llm",
+                llm_api_key="k",
+                llm_model="m",
+                searxng_url="http://searxng",
+                scraper_url="http://scraper",
+                research_memory=memory,
+                citation_style=citation_style,
+                stale_while_revalidate=True,
+                max_stale_hours=6.0,
+                fingerprint=fingerprint,
+            )
+
+            if hook is not None:
+                hook(memory, started)
+            release.set()
+            refreshed = await started[0]
+            await asyncio.sleep(0)
+
+        return mock_store, refreshed, started[0]
+
+    @pytest.mark.asyncio
+    async def test_compact_refresh_payload_includes_sources_compact(self):
+        from agent.models import CitationStyle
+
+        compact_result = {
+            "result": "fresh [1](https://a.com)",
+            "sources": ["https://a.com"],
+            "source_details": [],
+            "sources_compact": [{"index": 1, "url": "https://a.com"}],
+            "research_memory_id": "new-mid",
+        }
+        memory, mock_refresh, release = self._swr_memory(compact_result)
+        store, refreshed, _task = await self._run_worker_swr(
+            memory, mock_refresh, release, citation_style=CitationStyle.compact
+        )
+
+        assert refreshed["sources_compact"] == [{"index": 1, "url": "https://a.com"}]
+        assert refreshed["source_details"] == []
+
+        store.overwrite_job_data.assert_called_once()
+        written = store.overwrite_job_data.call_args.args[1]
+        assert written["sources_compact"] == [{"index": 1, "url": "https://a.com"}]
+        assert written["source_details"] == []
+
+    @pytest.mark.asyncio
+    async def test_streaming_and_worker_share_single_refresh_worker_first(self):
+        from agent.models import CitationStyle
+
+        refresh_result = {
+            "result": "fresh answer",
+            "sources": ["https://a.com"],
+            "source_details": [{"url": "https://a.com", "title": "A"}],
+            "research_memory_id": "new-mid",
+        }
+        memory, mock_refresh, release = self._swr_memory(refresh_result)
+
+        def attach_streaming(memory, started):
+            # Streaming caller attaches to the worker's in-flight task.
+            streaming_task = memory.start_refresh("fp", lambda: mock_refresh())
+            assert streaming_task is started[0]
+
+        store, refreshed, _task = await self._run_worker_swr(
+            memory,
+            mock_refresh,
+            release,
+            citation_style=CitationStyle.inline,
+            hook=attach_streaming,
+        )
+
+        assert mock_refresh.await_count == 1
+        assert refreshed["result"] == "fresh answer"
+        assert refreshed["sources"] == ["https://a.com"]
+        assert refreshed["research_memory_id"] == "new-mid"
+
+        # The worker's job-data path observed the refreshed result.
+        store.overwrite_job_data.assert_called_once()
+        written = store.overwrite_job_data.call_args.args[1]
+        assert written["result"] == "fresh answer"
+        assert written["research_memory_id"] == "new-mid"
+
+    @pytest.mark.asyncio
+    async def test_streaming_and_worker_share_single_refresh_streaming_first(self):
+        from agent.models import CitationStyle
+
+        refresh_result = {
+            "result": "fresh answer",
+            "sources": ["https://a.com"],
+            "source_details": [{"url": "https://a.com", "title": "A"}],
+            "research_memory_id": "new-mid",
+        }
+        memory, mock_refresh, release = self._swr_memory(refresh_result)
+
+        # Streaming caller starts the refresh first.
+        streaming_task = memory.start_refresh("fp", lambda: mock_refresh())
+
+        store, refreshed, refresh_task = await self._run_worker_swr(
+            memory, mock_refresh, release, citation_style=CitationStyle.inline
+        )
+        assert refresh_task is streaming_task
+
+        assert mock_refresh.await_count == 1
+        assert refreshed is refresh_result
+
+        # The worker's job-data path observed the refreshed result.
+        store.overwrite_job_data.assert_called_once()
+        written = store.overwrite_job_data.call_args.args[1]
+        assert written["result"] == "fresh answer"
+        assert written["sources"] == ["https://a.com"]
 
 
 # ── Sweep ────────────────────────────────────────────────────────
