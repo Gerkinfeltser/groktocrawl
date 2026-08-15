@@ -283,7 +283,14 @@ class ResearchMemory:
                 if not memory_id:
                     continue
 
-                artifact_raw = self.redis.get(f"memory:{memory_id}:data")
+                try:
+                    artifact_raw = self.redis.get(f"memory:{memory_id}:data")
+                except Exception:
+                    outcome = "error"
+                    logger.warning(
+                        "Valkey lookup failed for research memory", exc_info=True
+                    )
+                    return {"hit": False}
                 if artifact_raw is None:
                     # Valkey key expired — skip; sweep will clean it up later
                     logger.debug(
