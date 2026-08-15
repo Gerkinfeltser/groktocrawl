@@ -503,6 +503,89 @@ async def test_scrape_retry_metric_increments_on_browser_fallback():
     assert 'scrape_retries_total{stage="generic_to_browser"} 1.0' in text
 
 
+@pytest.mark.asyncio
+async def test_degraded_lightweight_result_falls_through_to_browser():
+    """A warning-carrying (degraded) lightweight result triggers the browser retry.
+
+    The generic stage runs with ``lightweight_only=True``; when Tier 1/2 return
+    non-empty but below-quality content, smart_scrape attaches a ``warning`` key.
+    Such degraded content must not satisfy the success check — it falls through
+    to the forced-browser stage and the retry is observable via the metric.
+    """
+    from agent.scraper_client import ScraperClient
+
+    client = ScraperClient("http://scraper")
+    fresh_metrics = MetricsCollector()
+    call_kinds: list[str] = []
+
+    async def fake_scrape(
+        url: str,
+        force_browser: bool = False,
+        lightweight_only: bool = False,
+        scrape_options: dict | None = None,
+        **kwargs,
+    ) -> dict:
+        call_kinds.append("browser" if force_browser else "generic")
+        if force_browser:
+            return {
+                "success": True,
+                "data": {"markdown": "rendered ok", "source": "browser"},
+            }
+        return {
+            "success": True,
+            "warning": "Lightweight-only content — quality (0.10) below threshold (0.30)",
+            "data": {
+                "markdown": "thin nav-only shell",
+                "source": "tier2-content-negotiation",
+            },
+        }
+
+    with (
+        patch.object(client, "scrape", new=fake_scrape),
+        patch("agent.scraper_client.METRICS", new=fresh_metrics),
+    ):
+        result = await client.scrape_with_fallback("https://x.com")
+
+    assert result["data"]["markdown"] == "rendered ok"
+    assert call_kinds == ["generic", "browser"]
+    text = fresh_metrics.generate_openmetrics()
+    assert 'scrape_retries_total{stage="generic_to_browser"} 1.0' in text
+
+
+@pytest.mark.asyncio
+async def test_non_degraded_lightweight_result_returns_immediately():
+    """A clean (non-degraded) lightweight result skips the browser retry."""
+    from agent.scraper_client import ScraperClient
+
+    client = ScraperClient("http://scraper")
+    fresh_metrics = MetricsCollector()
+    call_kinds: list[str] = []
+
+    async def fake_scrape(
+        url: str,
+        force_browser: bool = False,
+        lightweight_only: bool = False,
+        scrape_options: dict | None = None,
+        **kwargs,
+    ) -> dict:
+        call_kinds.append("browser" if force_browser else "generic")
+        return {
+            "success": True,
+            "data": {"markdown": "full llms.txt", "source": "tier1-llms-txt"},
+        }
+
+    with (
+        patch.object(client, "scrape", new=fake_scrape),
+        patch("agent.scraper_client.METRICS", new=fresh_metrics),
+    ):
+        result = await client.scrape_with_fallback("https://x.com")
+
+    assert result["data"]["markdown"] == "full llms.txt"
+    assert call_kinds == ["generic"]
+    text = fresh_metrics.generate_openmetrics()
+    assert "scrape_retries_total" not in text
+
+
 # ── Dedup metric ──────────────────────────────────────────────────
 
 
@@ -527,6 +610,78 @@ async def test_dedup_metric_increments_for_reused_content():
     assert len(result) == 2
     text = fresh_metrics.generate_openmetrics()
     assert 'fetches_deduped_total{reason="rerank_reuse"} 2.0' in text
+
+
+@pytest.mark.asyncio
+async def test_keyword_answer_dedupes_duplicate_urls_respecting_num_sources():
+    """Duplicate URLs across preferred+deprioritized never exceed num_sources.
+
+    Keyword mode returns up to 2x num_sources search entries, many repeating
+    the same URL. The answer pipeline must deduplicate so the returned
+    artifacts/source_map stay within quota and contain no duplicate URLs,
+    while preserving first-occurrence ordering and the video fallback.
+    """
+    from agent.research.discovery import _run_answer_discover_and_scrape
+
+    searxng = MagicMock()
+    searxng.search = AsyncMock(
+        return_value=(
+            [
+                {"url": "https://a.com", "title": "A1", "description": "d1"},
+                {"url": "https://b.com", "title": "B", "description": "d2"},
+                {
+                    "url": "https://youtube.com/watch?v=1",
+                    "title": "V1",
+                    "description": "d3",
+                },
+                {"url": "https://a.com", "title": "A2", "description": "d4"},
+                {
+                    "url": "https://youtube.com/watch?v=1",
+                    "title": "V1b",
+                    "description": "d5",
+                },
+                {
+                    "url": "https://youtube.com/watch?v=2",
+                    "title": "V2",
+                    "description": "d6",
+                },
+            ],
+            MagicMock(),
+        )
+    )
+    searxng.close = AsyncMock()
+
+    class _Scraper:
+        base_url = "http://scraper"
+
+        async def scrape_with_fallback(self, url: str, **kwargs) -> dict:
+            if url == "https://youtube.com/watch?v=2":
+                return {"success": False, "error": "video scrape failed"}
+            return {
+                "success": True,
+                "data": {"markdown": f"content {url}", "source": "test"},
+            }
+
+    result = await _run_answer_discover_and_scrape(
+        query="q",
+        num_sources=3,
+        retrieval_mode="keyword",
+        searxng=searxng,
+        scraper=_Scraper(),  # type: ignore[arg-type]
+        semantic_url="http://semantic",
+        llm_base_url="http://llm",
+        llm_api_key="k",
+        llm_model="m",
+        requested_model=None,
+    )
+
+    source_map = result["source_map"]
+    urls = [entry["url"] for entry in source_map]
+    assert len(urls) <= 3
+    assert len(set(urls)) == len(urls)
+    # Stable ordering: preferred sources in first-occurrence rank order,
+    # then the video-platform fallback (duplicate URLs collapse to one entry).
+    assert urls == ["https://a.com", "https://b.com", "https://youtube.com/watch?v=1"]
 
 
 # ── Cancelled speculative tasks are awaited ───────────────────────
