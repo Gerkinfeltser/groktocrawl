@@ -203,6 +203,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv if argv is not None else sys.argv[1:])
+
+    if args.runs < 1:
+        print(
+            f"error: --runs must be >= 1 (got {args.runs})",
+            file=sys.stderr,
+        )
+        return 2
+
     commit_sha = current_commit_sha()
 
     if args.dry_run:

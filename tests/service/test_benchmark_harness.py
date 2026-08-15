@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 from benchmarks.run_benchmarks import (
     FIXTURES,
     compute_summary,
+    main,
     percentile,
     run_benchmarks,
     sanitise_baseline,
@@ -64,6 +65,30 @@ def test_run_benchmarks_builds_portable_baseline():
         assert result["p50"] <= result["p95"]
         assert "fixture" in result
         assert "samples" in result
+
+
+def test_main_rejects_non_positive_runs(monkeypatch, capsys):
+    import io
+
+    for bad in (0, -1, -5):
+        err = io.StringIO()
+        monkeypatch.setattr(sys, "stderr", err)
+        code = main(["--runs", str(bad), "--json"])
+        assert code == 2
+        out = err.getvalue()
+        assert "error: --runs must be >= 1" in out
+        assert "Traceback" not in out
+
+
+def test_main_rejects_non_positive_runs_even_with_dry_run(monkeypatch, capsys):
+    import io
+
+    err = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", err)
+    code = main(["--runs", "0", "--dry-run"])
+    assert code == 2
+    assert "error: --runs must be >= 1" in err.getvalue()
+    assert "Traceback" not in err.getvalue()
 
 
 def test_sanitise_baseline_removes_deployment_identifiers():
