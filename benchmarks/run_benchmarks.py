@@ -54,9 +54,10 @@ _DEPLOYMENT_IDENTIFIER_KEYS = {"hostname", "host", "ip", "machine", "node", "pod
 def percentile(sorted_samples: list[float], p: float) -> float:
     """Return the ``p``-th percentile (0-100) using linear interpolation.
 
-    Uses the standard "closest ranks" method over an already-sorted list,
-    which is deterministic and stdlib-only. Raises ``ValueError`` for an
-    empty sample set.
+    Computes the rank ``(p/100) * (n - 1)`` over an already-sorted list and
+    linearly interpolates between the two neighbouring samples (the same
+    method Python's ``statistics.quantiles`` uses by default). Raises
+    ``ValueError`` for an empty sample set.
     """
     if not sorted_samples:
         raise ValueError("cannot compute a percentile over zero samples")
