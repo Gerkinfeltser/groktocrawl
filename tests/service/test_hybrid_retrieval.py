@@ -519,3 +519,50 @@ async def test_searxng_timeout_yields_vector_only():
 
     assert [r["url"] for r in plan.results] == ["https://v0.com", "https://v1.com"]
     assert all(r["retrieval"] == "vector" for r in plan.results)
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_web_propagates_when_opted_in():
+    """ADR-0053: the answer pipeline must see a downstream 429, not a vector-only degrade."""
+    from agent.exceptions import RetryableRateLimitError
+
+    searxng = MagicMock()
+    searxng.search = AsyncMock(
+        side_effect=RetryableRateLimitError(
+            "downstream capacity", retry_after_seconds=37
+        )
+    )
+
+    with pytest.raises(RetryableRateLimitError) as exc:
+        await plan_hybrid_retrieval(
+            "q",
+            5,
+            searxng=searxng,
+            semantic=_semantic(_vec(2)),
+            admission=_admission(),
+            raise_on_rate_limit=True,
+        )
+    assert exc.value.retry_after_seconds == 37
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_web_degrades_by_default():
+    """Degrading call sites (/v2/search hybrid_vector) keep vector-only results."""
+    from agent.exceptions import RetryableRateLimitError
+
+    searxng = MagicMock()
+    searxng.search = AsyncMock(
+        side_effect=RetryableRateLimitError(
+            "downstream capacity", retry_after_seconds=37
+        )
+    )
+
+    plan = await plan_hybrid_retrieval(
+        "q",
+        5,
+        searxng=searxng,
+        semantic=_semantic(_vec(2)),
+        admission=_admission(),
+    )
+
+    assert [r["url"] for r in plan.results] == ["https://v0.com", "https://v1.com"]

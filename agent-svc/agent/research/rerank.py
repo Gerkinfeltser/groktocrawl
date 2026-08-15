@@ -133,6 +133,10 @@ async def _rerank_answer_sources(
                 semantic=semantic,
                 web_results=search_results or None,
                 scraper=scraper,
+                # The answer pipeline retries whole requests on downstream
+                # capacity conditions (ADR-0053); /v2/search keeps the
+                # degrading default.
+                raise_on_rate_limit=True,
             )
             return plan.results, plan.artifacts
 

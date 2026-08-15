@@ -29,6 +29,18 @@ class AgentSettings(BaseModel):
         default=5, alias="AGENT_MAX_SEARCHES_PER_REQUEST"
     )
     search_rate_limit: str = Field(default="10/60s", alias="AGENT_SEARCH_RATE_LIMIT")
+    # Job-time retry policy for downstream 429 RATE_LIMITED conditions
+    # (ADR-0053). Maximum total attempts for the blocked operation;
+    # the fallback delay is used when the downstream response carries no
+    # retry metadata, and server-provided delays are clamped to
+    # ``job_retry_max_wait_seconds``.
+    job_retry_max_attempts: int = Field(default=3, alias="JOB_RETRY_MAX_ATTEMPTS", ge=1)
+    job_retry_fallback_seconds: float = Field(
+        default=1.0, alias="JOB_RETRY_FALLBACK_SECONDS", ge=0
+    )
+    job_retry_max_wait_seconds: float = Field(
+        default=60.0, alias="JOB_RETRY_MAX_WAIT_SECONDS", ge=0
+    )
     crawl_max_duration_seconds: int = Field(
         default=1800, alias="CRAWL_MAX_DURATION_SECONDS"
     )

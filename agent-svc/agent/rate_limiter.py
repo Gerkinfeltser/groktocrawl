@@ -54,6 +54,38 @@ class SlidingWindowRateLimiter:
             logger.warning("Rate limiter check failed: %s", e)
             return True, self.limit  # Fail open
 
+    def retry_after_seconds(self, now: float | None = None) -> int:
+        """Seconds until the current fixed window rolls over.
+
+        The limiter buckets requests by ``now // window``, so a request
+        rejected at time *now* is admitted again at the next bucket
+        boundary: ``window - (now % window)`` seconds from now.
+
+        Args:
+            now: Optional epoch timestamp (injected by tests for
+                determinism); defaults to ``time.time()``.
+
+        Returns:
+            Whole seconds until the next window boundary (always >= 1
+            for a rejected request).
+        """
+        now = int(now if now is not None else time.time())
+        return max(1, self.window - (now % self.window))
+
+    def reset_at_iso(self, now: float | None = None) -> str | None:
+        """ISO 8601 UTC timestamp of the next window boundary.
+
+        This is the actual reset instant — ``now + retry_after_seconds`` —
+        not the current time. Returns ``None`` when the deployment cannot
+        derive a reset time (never the case for this limiter, but kept
+        nullable for contract compatibility).
+        """
+        from datetime import UTC, datetime
+
+        now_ts = now if now is not None else time.time()
+        boundary = now_ts + self.retry_after_seconds(now=now_ts)
+        return datetime.fromtimestamp(boundary, tz=UTC).isoformat()
+
     @staticmethod
     def parse_limit(limit_str: str) -> tuple[int, int]:
         """Parse a limit string like ``"10/60s"`` into ``(limit, window_seconds)``.

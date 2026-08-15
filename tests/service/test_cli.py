@@ -145,7 +145,7 @@ class TestClientCrawl:
     def test_basic_crawl_sends_correct_data(self, client):
         """Basic crawl sends url, limit, and max_depth."""
 
-        def _fake_request(method, path, json_data=None, params=None):
+        def _fake_request(method, path, json_data=None, params=None, **kwargs):
             assert json_data["url"] == "http://example.com"
             assert json_data["limit"] == 0
             assert json_data["max_depth"] == 2
@@ -158,7 +158,7 @@ class TestClientCrawl:
     def test_crawl_sends_include_paths(self, client):
         """include_paths is passed as include_paths."""
 
-        def _fake_request(method, path, json_data=None, params=None):
+        def _fake_request(method, path, json_data=None, params=None, **kwargs):
             assert json_data["include_paths"] == ["/blog/*", "/docs/*"]
             return {"success": True, "id": "job-1"}
 
@@ -172,7 +172,7 @@ class TestClientCrawl:
     def test_crawl_sends_exclude_paths(self, client):
         """exclude_paths is passed as exclude_paths."""
 
-        def _fake_request(method, path, json_data=None, params=None):
+        def _fake_request(method, path, json_data=None, params=None, **kwargs):
             assert json_data["exclude_paths"] == ["/admin/*"]
             return {"success": True, "id": "job-1"}
 
@@ -186,7 +186,7 @@ class TestClientCrawl:
     def test_crawl_sends_max_pages(self, client):
         """max_pages is passed as max_pages."""
 
-        def _fake_request(method, path, json_data=None, params=None):
+        def _fake_request(method, path, json_data=None, params=None, **kwargs):
             assert json_data["max_pages"] == 5
             return {"success": True, "id": "job-1"}
 
@@ -200,7 +200,7 @@ class TestClientCrawl:
     def test_crawl_sends_max_depth(self, client):
         """max_depth is passed as max_depth."""
 
-        def _fake_request(method, path, json_data=None, params=None):
+        def _fake_request(method, path, json_data=None, params=None, **kwargs):
             assert json_data["max_depth"] == 1
             return {"success": True, "id": "job-1"}
 
@@ -214,7 +214,7 @@ class TestClientCrawl:
     def test_crawl_sends_ignore_query_parameters(self, client):
         """ignore_query_parameters=True sends ignore_query_parameters."""
 
-        def _fake_request(method, path, json_data=None, params=None):
+        def _fake_request(method, path, json_data=None, params=None, **kwargs):
             assert json_data["ignore_query_parameters"] is True
             return {"success": True, "id": "job-1"}
 
@@ -228,7 +228,7 @@ class TestClientCrawl:
     def test_crawl_does_not_send_ignore_query_parameters_by_default(self, client):
         """ignore_query_parameters=False does not send the field."""
 
-        def _fake_request(method, path, json_data=None, params=None):
+        def _fake_request(method, path, json_data=None, params=None, **kwargs):
             assert "ignore_query_parameters" not in json_data
             return {"success": True, "id": "job-1"}
 
@@ -242,7 +242,7 @@ class TestClientCrawl:
     def test_crawl_does_not_send_max_pages_when_none(self, client):
         """max_pages=None does not send max_pages."""
 
-        def _fake_request(method, path, json_data=None, params=None):
+        def _fake_request(method, path, json_data=None, params=None, **kwargs):
             assert "max_pages" not in json_data
             return {"success": True, "id": "job-1"}
 
@@ -256,7 +256,7 @@ class TestClientCrawl:
     def test_crawl_sends_both_limit_and_max_pages(self, client):
         """Both limit and max_pages can be sent together."""
 
-        def _fake_request(method, path, json_data=None, params=None):
+        def _fake_request(method, path, json_data=None, params=None, **kwargs):
             assert json_data["limit"] == 50
             assert json_data["max_pages"] == 5
             return {"success": True, "id": "job-1"}
@@ -360,6 +360,7 @@ class TestCmdCrawl:
             exclude_paths=None,
             max_pages=5,
             ignore_query_parameters=True,
+            retry=True,
         )
 
     def test_cmd_crawl_json_output(self):
@@ -1279,6 +1280,7 @@ class TestImageSupport:
             max_pages=None,
             ignore_query_parameters=False,
             scrape_options={"formats": ["markdown", "images"]},
+            retry=True,
         )
 
     def test_scrape_with_images_display(self):
@@ -1365,6 +1367,7 @@ class TestImageSupport:
             urls=None,
             include_images=True,
             search_type="deep",
+            retry=True,
         )
 
     def test_search_type_images_in_choices(self):

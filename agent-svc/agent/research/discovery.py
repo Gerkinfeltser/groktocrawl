@@ -191,7 +191,10 @@ async def _run_multi_query_discover_and_scrape(
             max_searches_per_request,
         )
 
-        search_tasks = [searxng.search(q, limit=10) for q in queries_to_run]
+        search_tasks = [
+            searxng.search(q, limit=10, raise_on_rate_limit=True)
+            for q in queries_to_run
+        ]
         search_results_list = await asyncio.gather(
             *search_tasks, return_exceptions=True
         )
@@ -200,6 +203,14 @@ async def _run_multi_query_discover_and_scrape(
         ):
             logger.info("  [%d/%d] Searching: %s", i, len(queries_to_run), query)
             if isinstance(result_tuple, Exception):
+                from ..exceptions import RetryableRateLimitError
+
+                if isinstance(result_tuple, RetryableRateLimitError):
+                    # A downstream capacity condition affects the whole job,
+                    # not a single query: propagate so the worker schedules a
+                    # bounded retry (ADR-0053). Other search failures degrade
+                    # gracefully as before.
+                    raise result_tuple
                 logger.warning("Search failed for %s: %s", query, result_tuple)
                 continue
             results, _health = result_tuple  # type: ignore[misc]
@@ -254,7 +265,9 @@ async def _run_research_discover_and_scrape(
     search_results: list[dict] = []
     if not target_urls:
         logger.info("No URLs provided. Searching for: %s", prompt)
-        search_results, _health = await searxng.search(prompt, limit=10)
+        search_results, _health = await searxng.search(
+            prompt, limit=10, raise_on_rate_limit=True
+        )
         target_urls = [r["url"] for r in search_results if r.get("url")]
 
     # Score and rank URLs before scraping (F1: source pre-filtering)
@@ -442,7 +455,9 @@ async def _run_answer_discover_and_scrape(
         # Qdrant discovery concurrently (web is not searched twice).
         search_results = []
     else:
-        search_results, _health = await searxng.search(query, limit=num_sources * 2)
+        search_results, _health = await searxng.search(
+            query, limit=num_sources * 2, raise_on_rate_limit=True
+        )
 
     rerank_artifacts: list[SourceArtifact] = []
     if retrieval_mode != "keyword":

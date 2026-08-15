@@ -5,13 +5,21 @@ import logging
 import os
 import time
 from collections.abc import Callable, Coroutine
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .admission import get_admission
 from .cancel import JobCancelledError, raise_if_cancelled, set_token
+from .exceptions import RetryableRateLimitError
 from .metrics import METRICS
 from .research import run_extract, run_research
 from .research.memory import finalize_and_admit, refresh_research_memory
+from .retry import (
+    RetryPolicy,
+    clamp_retry_delay,
+    default_retry_policy,
+    retry_sleep,
+)
 from .scraper_client import ScraperClient
 from .settings import load_settings
 from .store import JobStore
@@ -25,6 +33,11 @@ def _get_worker_settings() -> Any:
     return load_settings()
 
 
+def _iso_now_plus(seconds: float) -> str:
+    """ISO 8601 UTC timestamp ``seconds`` from now."""
+    return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
+
+
 async def _run_job_with_observability(
     job_id: str,
     job_type: str,
@@ -32,30 +45,150 @@ async def _run_job_with_observability(
     webhook_config: dict[str, Any] | None,
     work_fn: Callable[[], Coroutine[Any, Any, Any]],
     cleanup_fn: Callable[[], Coroutine[Any, Any, None]] | None = None,
+    retry_policy: RetryPolicy | None = None,
 ) -> None:
     """Execute work_fn with standard observability scaffolding.
 
     Encapsulates metrics recording, store completion/failure, webhook
-    delivery, and cleanup — the identical scaffolding shared by all
-    worker processing functions.
+    delivery, retry scheduling (ADR-0053), and cleanup — the identical
+    scaffolding shared by all worker processing functions.
+
+    Retry behavior: when ``work_fn`` raises ``RetryableRateLimitError``
+    and retry budget remains, the job transitions to the non-terminal
+    ``retry_scheduled`` state, a ``retry_scheduled`` webhook fires, and
+    the blocked operation is attempted again after a bounded, cancellable
+    delay. Retry budget exhaustion fails the job with rate-limit details;
+    a job cancelled while waiting to retry never starts another attempt.
     """
     start = time.monotonic()
     METRICS.counter("jobs_submitted_total", "Total jobs submitted", ["type"]).inc(
         {"type": job_type}
     )
     record_job_start(job_type)
+    retry_policy = retry_policy or default_retry_policy()
+    attempt = 0
+    last_delay: float | None = None
     try:
-        result = await work_fn()
-        store.complete_job(job_id, result)
-        await deliver_webhook(webhook_config, "completed", job_id, result)
-        elapsed = time.monotonic() - start
-        METRICS.histogram(
-            "job_duration_seconds", "Job processing duration", ["type", "status"]
-        ).observe({"type": job_type, "status": "completed"}, elapsed)
-        METRICS.counter("jobs_completed_total", "Total completed jobs", ["type"]).inc(
-            {"type": job_type}
-        )
-        logger.info("%s job %s completed in %.2fs", job_type, job_id, elapsed)
+        while True:
+            attempt += 1
+            try:
+                result = await work_fn()
+            except RetryableRateLimitError as e:
+                if attempt >= retry_policy.max_attempts:
+                    # ── Retry budget exhausted → terminal failure ──
+                    error_message = (
+                        f"Rate limit retry budget exhausted after {attempt} "
+                        f"attempt(s) (reason={e.error_code}"
+                        + (
+                            f", last retry delay {last_delay:.0f}s)"
+                            if last_delay is not None
+                            else ")"
+                        )
+                    )
+                    logger.error("%s job %s %s", job_type, job_id, error_message)
+                    store.fail_job(job_id, error_message)
+                    await deliver_webhook(
+                        webhook_config,
+                        "failed",
+                        job_id,
+                        {"error": error_message},
+                        success=False,
+                        error=error_message,
+                    )
+                    elapsed = time.monotonic() - start
+                    METRICS.histogram(
+                        "job_duration_seconds",
+                        "Job processing duration",
+                        ["type", "status"],
+                    ).observe({"type": job_type, "status": "failed"}, elapsed)
+                    METRICS.counter(
+                        "jobs_failed_total", "Total failed jobs", ["type"]
+                    ).inc({"type": job_type})
+                    METRICS.counter(
+                        "job_retry_exhaustion_total",
+                        "Jobs that exhausted their rate-limit retry budget",
+                        ["type"],
+                    ).inc({"type": job_type})
+                    return
+
+                # ── Schedule a bounded, cancellable retry ──
+                delay = clamp_retry_delay(
+                    e.retry_after_seconds, attempt=attempt, policy=retry_policy
+                )
+                retry_at = _iso_now_plus(delay)
+                if not store.schedule_retry(
+                    job_id,
+                    retry_at=retry_at,
+                    retry_attempt=attempt,
+                    retry_limit=retry_policy.max_attempts,
+                    reason=e.error_code,
+                    retry_after_seconds=delay,
+                ):
+                    # The job was cancelled/completed concurrently — do not
+                    # schedule or start another attempt.
+                    logger.info(
+                        "%s job %s no longer retryable after rate limit",
+                        job_type,
+                        job_id,
+                    )
+                    return
+                await deliver_webhook(
+                    webhook_config,
+                    "retry_scheduled",
+                    job_id,
+                    data={
+                        "operation": job_type,
+                        "reason_code": e.error_code,
+                        "retry_attempt": attempt,
+                        "retry_limit": retry_policy.max_attempts,
+                        "retry_at": retry_at,
+                        "retry_after_seconds": delay,
+                    },
+                )
+                METRICS.counter(
+                    "job_retries_scheduled_total",
+                    "Jobs scheduled to retry after a rate-limit condition",
+                    ["type"],
+                ).inc({"type": job_type})
+                logger.info(
+                    "%s job %s rate limited — retry %d/%d scheduled in %.1fs",
+                    job_type,
+                    job_id,
+                    attempt,
+                    retry_policy.max_attempts,
+                    delay,
+                )
+                last_delay = delay
+                await retry_sleep(delay)
+                if not store.resume_retry(job_id):
+                    # Cancelled while waiting (DELETE) — do not start another
+                    # attempt; the store already records the terminal status.
+                    logger.info(
+                        "%s job %s cancelled while waiting to retry",
+                        job_type,
+                        job_id,
+                    )
+                    return
+                continue
+
+            # ── Success ─────────────────────────────────────────
+            store.complete_job(job_id, result)
+            await deliver_webhook(webhook_config, "completed", job_id, result)
+            elapsed = time.monotonic() - start
+            METRICS.histogram(
+                "job_duration_seconds", "Job processing duration", ["type", "status"]
+            ).observe({"type": job_type, "status": "completed"}, elapsed)
+            METRICS.counter(
+                "jobs_completed_total", "Total completed jobs", ["type"]
+            ).inc({"type": job_type})
+            if attempt > 1:
+                METRICS.counter(
+                    "job_retries_succeeded_total",
+                    "Jobs completed successfully after at least one rate-limit retry",
+                    ["type"],
+                ).inc({"type": job_type})
+            logger.info("%s job %s completed in %.2fs", job_type, job_id, elapsed)
+            return
     except JobCancelledError:
         # Cooperative cancellation: the DELETE handler already marked the job
         # cancelled in the store. Do not overwrite it, deliver a completion
@@ -1009,8 +1142,16 @@ async def _process_plan_execution_async(
                                 break
 
                     try:
-                        results, _health = await searxng.search(query, limit=10)
-                    except Exception:
+                        results, _health = await searxng.search(
+                            query, limit=10, raise_on_rate_limit=True
+                        )
+                    except Exception as e:
+                        from .exceptions import RetryableRateLimitError
+
+                        if isinstance(e, RetryableRateLimitError):
+                            # Downstream capacity condition: propagate so the
+                            # worker schedules a bounded retry (ADR-0053).
+                            raise
                         results = []
 
                     new_urls = []

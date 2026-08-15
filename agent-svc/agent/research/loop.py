@@ -553,7 +553,9 @@ async def run_answer_stream(
             # Defer web search to the hybrid planner (concurrent web+vector).
             search_results: list[dict] = []
         else:
-            search_results, _health = await searxng.search(query, limit=num_sources * 2)
+            search_results, _health = await searxng.search(
+                query, limit=num_sources * 2, raise_on_rate_limit=True
+            )
 
         rerank_artifacts: list[SourceArtifact] = []
         if retrieval_mode != "keyword":

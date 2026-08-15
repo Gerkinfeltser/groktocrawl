@@ -239,11 +239,25 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
     rate_limiter = request.app.state.rate_limiter
     allowed, rate_remaining = await rate_limiter.check(f"{client_ip}:search")
     if not allowed:
+        retry_after = rate_limiter.retry_after_seconds()
         METRICS.counter("search_calls_total", "Total search calls", ["status"]).inc(
             {"status": "rate_limited"}
         )
+        METRICS.counter(
+            "rate_limited_admissions_total",
+            "Admission requests rejected by per-client rate limit",
+            ["operation", "bucket"],
+        ).inc({"operation": "agent", "bucket": "search"})
         raise RateLimitedError(
-            detail=f"Per-client rate limit exceeded ({rate_limiter.limit}/{rate_limiter.window}s)"
+            detail=(
+                f"Per-client rate limit exceeded "
+                f"({rate_limiter.limit}/{rate_limiter.window}s) — retry in {retry_after}s"
+            ),
+            retry_after_seconds=retry_after,
+            bucket="search",
+            limit=rate_limiter.limit,
+            remaining=0,
+            reset_at=rate_limiter.reset_at_iso(),
         )
 
     max_searches = request.app.state.max_searches_per_request
@@ -335,6 +349,11 @@ async def get_agent_status(request: Request, job_id: str) -> AgentStatusResponse
         data=job.get("data"),
         error=job.get("error"),
         expires_at=job.get("completed_at") or job.get("created_at"),
+        retry_at=job.get("retry_at"),
+        retry_attempt=job.get("retry_attempt"),
+        retry_limit=job.get("retry_limit"),
+        retryable=True if job.get("status") == "retry_scheduled" else None,
+        retry_reason=job.get("retry_reason"),
     )
 
 
@@ -361,11 +380,25 @@ async def answer(request: Request, body: AnswerRequest, response: Response) -> A
     rate_limiter = request.app.state.rate_limiter
     allowed, rate_remaining = await rate_limiter.check(f"{client_ip}:search")
     if not allowed:
+        retry_after = rate_limiter.retry_after_seconds()
         METRICS.counter("search_calls_total", "Total search calls", ["status"]).inc(
             {"status": "rate_limited"}
         )
+        METRICS.counter(
+            "rate_limited_admissions_total",
+            "Admission requests rejected by per-client rate limit",
+            ["operation", "bucket"],
+        ).inc({"operation": "answer", "bucket": "search"})
         raise RateLimitedError(
-            detail=f"Per-client rate limit exceeded ({rate_limiter.limit}/{rate_limiter.window}s)"
+            detail=(
+                f"Per-client rate limit exceeded "
+                f"({rate_limiter.limit}/{rate_limiter.window}s) — retry in {retry_after}s"
+            ),
+            retry_after_seconds=retry_after,
+            bucket="search",
+            limit=rate_limiter.limit,
+            remaining=0,
+            reset_at=rate_limiter.reset_at_iso(),
         )
 
     max_searches = request.app.state.max_searches_per_request

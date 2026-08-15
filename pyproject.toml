@@ -98,6 +98,9 @@ ignore = [
 "agent-svc/agent/monitor.py" = ["T20"]  # scheduler CLI output consumed by Ofelia logs.
 "scraper-svc/scraper/app.py" = ["N815"]  # Firecrawl-compatible camelCase fields.
 "scraper-svc/scraper/adapters/github_social.py" = ["E741"]
+# models.py keeps Firecrawl-compatible camelCase fields and str+Enum bases
+# (UP042/N815 are pre-existing intentional patterns).
+"agent-svc/agent/models.py" = ["UP042", "N815"]
 
 [tool.black]
 target-version = ["py312"]
