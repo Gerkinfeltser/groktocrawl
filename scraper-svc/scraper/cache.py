@@ -12,11 +12,17 @@ from urllib.parse import urlparse
 
 import httpx
 
+from common.stage_metrics import inc_counter, observe_elapsed
 from common.url import normalize_url
 
 from .settings import load_settings
 
 logger = logging.getLogger(__name__)
+
+_CACHE_LOOKUP_SECONDS = "groktocrawl_scrape_cache_lookup_seconds"
+_CACHE_LOOKUP_SECONDS_HELP = "Scrape result cache lookup latency"
+_CACHE_LOOKUP_TOTAL = "groktocrawl_scrape_cache_lookup_total"
+_CACHE_LOOKUP_TOTAL_HELP = "Scrape result cache lookups by outcome"
 
 _settings = load_settings()
 SCRAPE_CACHE_TTL = _settings.scrape_cache_ttl
@@ -164,53 +170,65 @@ async def _check_cache(url: str) -> dict | None:
 
     Returns the cached/validated result dict, or None on cache miss.
     """
-    client = await _get_cache_client()
-    if not client:
-        return None
+    started = time.monotonic()
+    outcome = "miss"
     try:
-        key = _scrape_cache_key(url)
-        cached_raw = await client.get(key)
-        if not cached_raw:
+        client = await _get_cache_client()
+        if not client:
             return None
+        try:
+            key = _scrape_cache_key(url)
+            cached_raw = await client.get(key)
+            if not cached_raw:
+                return None
 
-        cached = json.loads(cached_raw)
-        logger.info("Cache hit for %s (key=%s)", url, key)
+            cached = json.loads(cached_raw)
+            outcome = "hit"
+            logger.info("Cache hit for %s (key=%s)", url, key)
 
-        # Determine source tier for revalidation strategy
-        source_tier = cached.get("source_tier") or cached.get("source", "")
-        etag = cached.get("etag")
-        last_modified = cached.get("last_modified")
+            # Determine source tier for revalidation strategy
+            source_tier = cached.get("source_tier") or cached.get("source", "")
+            etag = cached.get("etag")
+            last_modified = cached.get("last_modified")
 
-        # Slow tiers with ETag/LM → blocking revalidation
-        if source_tier in ("playwright", "flare-solverr", "browser-svc") and (
-            etag or last_modified
-        ):
-            fresh, result = await _conditional_revalidate(url, etag, last_modified)
-            if fresh:
-                # 304 — extend TTL and return cached content
-                new_ttl = _resolve_cache_ttl(url)
-                cached["last_checked_at"] = time.time()
-                await _set_cache_raw(key, cached, new_ttl)
-                logger.info(
-                    "Cache revalidated (304) for %s, extended TTL to %ds", url, new_ttl
-                )
-                return cached
-            elif result:
-                # 200 — content changed, return fresh and update cache
-                logger.info("Cache stale (200) for %s, fetching fresh content", url)
-                result = _merge_cache_metadata(result, cached)
-                await _set_cache_raw(key, result, _resolve_cache_ttl(url))
-                return result
-            else:
-                # Connection error — serve stale with warning
-                logger.warning("Revalidation failed for %s, serving stale cache", url)
-                return cached
+            # Slow tiers with ETag/LM → blocking revalidation
+            if source_tier in ("playwright", "flare-solverr", "browser-svc") and (
+                etag or last_modified
+            ):
+                fresh, result = await _conditional_revalidate(url, etag, last_modified)
+                if fresh:
+                    # 304 — extend TTL and return cached content
+                    new_ttl = _resolve_cache_ttl(url)
+                    cached["last_checked_at"] = time.time()
+                    await _set_cache_raw(key, cached, new_ttl)
+                    logger.info(
+                        "Cache revalidated (304) for %s, extended TTL to %ds",
+                        url,
+                        new_ttl,
+                    )
+                    return cached
+                elif result:
+                    # 200 — content changed, return fresh and update cache
+                    logger.info("Cache stale (200) for %s, fetching fresh content", url)
+                    result = _merge_cache_metadata(result, cached)
+                    await _set_cache_raw(key, result, _resolve_cache_ttl(url))
+                    return result
+                else:
+                    # Connection error — serve stale with warning
+                    logger.warning(
+                        "Revalidation failed for %s, serving stale cache", url
+                    )
+                    return cached
 
-        # Fast tiers or no ETag/LM — return cached, caller handles revalidation
-        return cached
-    except Exception as e:
-        logger.debug("Cache read failed for %s: %s", url, e)
-    return None
+            # Fast tiers or no ETag/LM — return cached, caller handles revalidation
+            return cached
+        except Exception as e:
+            outcome = "error"
+            logger.debug("Cache read failed for %s: %s", url, e)
+        return None
+    finally:
+        observe_elapsed(_CACHE_LOOKUP_SECONDS, _CACHE_LOOKUP_SECONDS_HELP, {}, started)
+        inc_counter(_CACHE_LOOKUP_TOTAL, _CACHE_LOOKUP_TOTAL_HELP, {"outcome": outcome})
 
 
 def _compute_content_hash(text: str) -> str:
