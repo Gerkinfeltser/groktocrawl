@@ -145,6 +145,24 @@ python tests/test_stack.py
 
 The integration tests in `tests/test_stack.py` verify all endpoints against a live Docker stack with fixture services.
 
+## Pull Requests, Review, and Merging
+
+**CI on every PR:** Fast Tests, Code Quality (vulture/deptry/mypy/ruff/jscpd/gitleaks),
+Docker/Integration Tests (self-hosted runner, runs when runtime code changes), and Architecture CI.
+The `main required checks` ruleset requires `Code Quality Gate` and `Runtime Gate`.
+
+**AI review loop (do not chase):** the `Droid Auto Review` workflow (`droid-review.yml`) posts review
+comments as the `factory-droid` bot and NEVER approves. Each re-run re-scans the whole diff and mints
+new (often minor) findings, so re-triggering it after every fix is an unbounded loop. Treat "review
+passed" as: all findings from ONE review pass fixed, CI green, and no blocking (P1/P2) findings
+remaining — do not iterate until the bot reports zero findings.
+
+**Merging to `main`:** gated by the `main review policy` ruleset (1 approving review + resolved review
+threads). Because the AI reviewer does not approve and human approval is often unavailable to automated
+agents, the maintainer (`magnus919`) is a configured bypass actor. Merge with:
+`gh pr merge <PR> --merge --delete-branch --admin`
+only after CI is green and review findings are addressed.
+
 ## Making Changes
 
 1. Edit the relevant service code under `agent-svc/` or `scraper-svc/`
