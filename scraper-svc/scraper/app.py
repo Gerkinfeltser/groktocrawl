@@ -160,6 +160,11 @@ class ScrapeResponse(BaseModel):
     success: bool
     data: dict | None = None
     error: str | None = None
+    # Present only for degraded best-effort results (content quality below
+    # QA_MIN_QUALITY_THRESHOLD). Lets callers distinguish thin-but-nonempty
+    # lightweight output from genuinely acceptable content and fall through
+    # to the browser tier.
+    warning: str | None = None
 
 
 class MetaResponse(BaseModel):
@@ -408,7 +413,11 @@ async def scrape(request: ScrapeRequest):
         METRICS.counter("scrape_calls_total", "Total scrape requests", ["status"]).inc(
             {"status": "success"}
         )
-        return ScrapeResponse(success=True, data=data)
+        return ScrapeResponse(
+            success=True,
+            data=data,
+            warning=result.get("warning"),
+        )
     except GroktoCrawlError:
         raise
     except Exception as e:

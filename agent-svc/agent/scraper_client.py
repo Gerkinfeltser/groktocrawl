@@ -190,6 +190,11 @@ class ScraperClient:
         silently enter the browser tier; a timed-out generic task is cancelled
         and awaited before the forced-browser retry starts.
 
+        A generic result that carries a ``warning`` key is degraded content
+        (below the scraper's quality threshold, e.g. JS-only shells, cookie
+        walls, or nav-only pages) and is treated as insufficient so the
+        forced-browser retry still runs.
+
         Returns the first successful result dict (with ``success``, ``data`` keys)
         or a failure dict.
         """
@@ -209,8 +214,10 @@ class ScraperClient:
         try:
             result = await _asyncio.wait_for(generic_task, timeout=generic_timeout)
             data = result.get("data") or {}
-            if result.get("success") and (
-                data.get("markdown", "").strip() or data.get("download")
+            if (
+                result.get("success")
+                and not result.get("warning")
+                and (data.get("markdown", "").strip() or data.get("download"))
             ):
                 return result
             if result.get("error_code") == "CAPTCHA_UNRESOLVED":

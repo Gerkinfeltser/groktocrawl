@@ -104,3 +104,28 @@ async def test_lightweight_only_returns_best_effort_without_browser(monkeypatch)
     )
     assert result["markdown"] == "thin content"
     assert result.get("warning")
+
+
+def test_scrape_response_surfaces_warning_key():
+    """The degraded-content warning survives the /scrape response body.
+
+    Without this, the caller-side check in ``scrape_with_fallback`` could not
+    distinguish thin-but-nonempty lightweight output from acceptable content,
+    and the forced-browser retry would never run.
+    """
+    from scraper.app import ScrapeResponse
+
+    resp = ScrapeResponse(
+        success=True,
+        data={
+            "markdown": "thin nav-only shell",
+            "source": "tier2-content-negotiation",
+            "url": "https://example.test/page",
+            "quality": {"score": 0.1},
+        },
+        warning="Lightweight-only content — quality (0.10) below threshold (0.30)",
+    ).model_dump()
+    assert resp["success"] is True
+    assert resp["data"]["markdown"] == "thin nav-only shell"
+    assert "warning" in resp
+    assert "below threshold" in resp["warning"]
