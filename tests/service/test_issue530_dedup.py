@@ -313,6 +313,55 @@ async def test_rerank_hybrid_vector_mode_returns_no_artifacts():
 
 
 @pytest.mark.asyncio
+async def test_answer_stream_reuses_rerank_content():
+    """run_answer_stream reuses rerank content without re-scraping."""
+    from agent.research import run_answer_stream
+
+    searxng = MagicMock()
+    searxng.search = AsyncMock(
+        return_value=(
+            [
+                {"url": "https://a.com", "title": "A", "description": "d"},
+                {"url": "https://b.com", "title": "B", "description": "d"},
+            ],
+            MagicMock(),
+        )
+    )
+    searxng.close = AsyncMock()
+
+    scraper = TrackingScraper()
+
+    async def _stream(*args, **kwargs):
+        yield {"type": "done", "full_content": "Based on [1] the answer."}
+
+    llm = MagicMock()
+    llm.generate_stream = _stream
+    llm.close = AsyncMock()
+
+    semantic = _make_semantic([0.9, 0.1])
+
+    with (
+        patch("agent.research.loop.SearXNGClient", return_value=searxng),
+        patch("agent.research.loop.ScraperClient", return_value=scraper),
+        patch("agent.research.loop.LLMClient", return_value=llm),
+        patch("agent.research.rerank.ScraperClient", return_value=scraper),
+        patch("agent.research.rerank.SemanticClient", return_value=semantic),
+    ):
+        events = [
+            event
+            async for event in run_answer_stream(
+                query="q", num_sources=2, retrieval_mode="semantic", llm_model="m"
+            )
+        ]
+
+    done = next(event for event in events if event["type"] == "done")
+    assert done["answer"] == "Based on [1] the answer."
+    assert sum(scraper.scrape_counts.values()) == 2
+    assert scraper.scrape_counts["https://a.com"] == 1
+    assert scraper.scrape_counts["https://b.com"] == 1
+
+
+@pytest.mark.asyncio
 async def test_answer_synthesis_reuses_rerank_content():
     """A candidate URL is scraped exactly once across rerank and synthesis."""
     from agent.research import run_answer
