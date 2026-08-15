@@ -28,8 +28,15 @@ class SourceArtifact:
     markdown: str | None = None
     source: str = "unknown"
     char_count: int = 0
-    cache_state: str | None = None  # None / "fresh" / "stale" / "from_cache"
+    cache_state: str | None = None  # None / "live" / "from_cache"
     fetched_at: float | None = None
+    # Hybrid-retrieval provenance (ADR-0052). ``retrieval`` records which
+    # discovery source(s) produced the URL; ``score`` carries the vector
+    # similarity score when one exists; ``cache_age_ms`` is set only when
+    # content was reused from the Valkey scrape cache.
+    retrieval: str = "web"  # "web" / "vector" / "both"
+    score: float | None = None
+    cache_age_ms: int | None = None
 
     def to_document(self, max_chars: int = DOCUMENT_MAX_CHARS) -> str:
         """Render the source into a ``Source: url (domain: ...)`` context block."""

@@ -56,6 +56,20 @@ URLs, content, and tokens are never metric labels.
 | `fetches_deduped_total` | `reason` (`rerank_reuse`) | Scrapes avoided by reusing source content already fetched during ranking |
 | `scrape_retries_total` | `stage` (`generic_to_browser`) | Explicit scrape retries by stage transition |
 
+## Hybrid retrieval blend policy
+
+`hybrid_vector` retrieval is planned by `agent-svc/agent/research/hybrid.py`
+(ADR-0052). Its discovery branches (SlopSearX and Qdrant) run concurrently and
+are independently timeout-bounded (web 15s, vector 8s) inside the
+`lightweight_fetch` admission budget. The blend is deterministic and has no
+raw-URL metric labels: candidates are normalised and deduplicated, emitted via a
+floor guarantee (`floor_web = max(0, limit - vector_unique)`,
+`floor_vector = max(0, limit - web_unique)`) followed by round-robin
+interleaving. Per-source provenance (`web`/`vector`/`both`) and acquisition
+origin (`cache_state`: `from_cache`/`live`, plus `cache_age_ms`) are carried on
+the internal `SourceArtifact`, not exported as metric labels.
+
+
 ## Verification
 
 1. Validate the deployment's Prometheus configuration and rules with its native check commands.
