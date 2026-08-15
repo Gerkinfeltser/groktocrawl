@@ -18,8 +18,10 @@ from ..models import (
     AnswerRequest,
     AnswerResponse,
     Citation,
+    CitationStyle,
     Source,
 )
+from ..research_memory import compute_fingerprint
 from ..store import JobStore
 from ._helpers import _derive_user_id, _get_client_ip, _resolve_output_schema
 
@@ -28,14 +30,37 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def fingerprint_from_agent_request(body: AgentRequest) -> str:
+    """Compute the canonical replay-compatibility fingerprint for *body*."""
+    citation_style = (
+        body.citation_style.value
+        if isinstance(body.citation_style, CitationStyle)
+        else str(body.citation_style)
+    )
+    return compute_fingerprint(
+        prompt=body.prompt,
+        urls=body.urls,
+        schema=body.output_schema or body.schema_,
+        model=body.model,
+        search_type=body.search_type,
+        include_images=body.include_images,
+        citation_style=citation_style,
+        strict_constrain_to_urls=body.strict_constrain_to_urls,
+        force_fresh=body.force_fresh,
+    )
+
+
 # ── Agent cache helpers ──────────────────────────────────────────
 
 
-async def _lookup_agent_cache(request: Request, body: AgentRequest) -> dict | None:
+async def _lookup_agent_cache(
+    request: Request, body: AgentRequest, fingerprint: str
+) -> dict | None:
     """Check Research Memory for a cached artifact matching the prompt.
 
-    Returns the cache result dict on hit with ``fresh`` or ``aging``
-    freshness, or ``None`` on miss / stale / error.
+    Returns the cache result dict on hit with ``fresh``/``aging``
+    freshness, or on a stale-while-revalidate-eligible ``stale`` hit,
+    or ``None`` on miss / incompatible / stale / error.
     """
     if body.force_fresh:
         return None
@@ -46,10 +71,20 @@ async def _lookup_agent_cache(request: Request, body: AgentRequest) -> dict | No
         cache_result = await memory.query(
             prompt=body.prompt,
             user_id=user_id if memory_scope == "per_user" else None,
+            fingerprint=fingerprint,
+            max_stale_hours=(
+                body.max_stale_hours if body.stale_while_revalidate else None
+            ),
         )
         if cache_result["hit"]:
             freshness = cache_result.get("freshness", "stale")
             if freshness in ("fresh", "aging"):
+                return cache_result
+            if (
+                freshness == "stale"
+                and body.stale_while_revalidate
+                and cache_result.get("swr_eligible")
+            ):
                 return cache_result
         return None
     except Exception:
@@ -64,6 +99,7 @@ async def _handle_agent_streaming(
     request: Request,
     body: AgentRequest,
     cache_hit_data: dict | None,
+    fingerprint: str,
     rate_remaining: int,
     max_searches: int,
 ) -> StreamingResponse | None:
@@ -86,16 +122,53 @@ async def _handle_agent_streaming(
         artifact_text = entry.get("artifact", "")
         sources = entry.get("sources", [])
         has_schema = bool(body.output_schema or body.schema_)
+        freshness = cache_hit_data.get("freshness", "fresh")
+
+        refresh_awaitable = None
+        age_hours = None
+        if (
+            freshness == "stale"
+            and body.stale_while_revalidate
+            and cache_hit_data.get("swr_eligible")
+        ):
+            from ..research.memory import refresh_research_memory
+
+            memory = request.app.state.research_memory
+            age_hours = cache_hit_data.get("age_hours")
+
+            def _refresh_factory() -> Any:
+                return refresh_research_memory(
+                    memory,
+                    prompt=body.prompt,
+                    urls=body.urls,
+                    schema=body.output_schema or body.schema_,
+                    searxng_url=request.app.state.searxng_url,
+                    scraper_url=request.app.state.scraper_url,
+                    llm_base_url=request.app.state.llm_base_url,
+                    llm_api_key=request.app.state.llm_api_key,
+                    llm_model=request.app.state.llm_model,
+                    requested_model=body.model if body.model != "default" else None,
+                    max_searches_per_request=max_searches,
+                    include_images=body.include_images,
+                    citation_style=body.citation_style,
+                    search_type=body.search_type,
+                    user_id=_derive_user_id(request),
+                    fingerprint=fingerprint,
+                )
+
+            refresh_awaitable = memory.start_refresh(fingerprint, _refresh_factory)
 
         return StreamingResponse(
             stream_cached_artifact(
                 artifact_text=artifact_text,
                 sources=sources,
                 memory_id=cache_hit_data.get("memory_id", ""),
-                freshness=cache_hit_data.get("freshness", "fresh"),
+                freshness=freshness,
                 similarity=cache_hit_data.get("similarity", 0),
                 citation_style=body.citation_style,
                 has_schema=has_schema,
+                age_hours=age_hours,
+                refresh_awaitable=refresh_awaitable,
             ),
             media_type="text/event-stream",
             headers=headers,
@@ -147,6 +220,7 @@ async def _handle_agent_streaming(
                 search_type=body.search_type,
                 research_memory=request.app.state.research_memory,
                 user_id=_derive_user_id(request),
+                fingerprint=fingerprint,
             ),
             media_type="text/event-stream",
             headers=headers,
@@ -189,11 +263,12 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
         return await _handle_plan_mode(request, body, response)
 
     # ── Check research memory cache ───────────────────────────────
-    cache_hit_data = await _lookup_agent_cache(request, body)
+    fingerprint = fingerprint_from_agent_request(body)
+    cache_hit_data = await _lookup_agent_cache(request, body, fingerprint)
 
     # ── Try streaming dispatch (cache hit replay or live pipeline) ─
     streaming_response = await _handle_agent_streaming(
-        request, body, cache_hit_data, rate_remaining, max_searches
+        request, body, cache_hit_data, fingerprint, rate_remaining, max_searches
     )
     if streaming_response is not None:
         return streaming_response
@@ -223,10 +298,13 @@ async def create_agent(request: Request, body: AgentRequest, response: Response)
             include_images=body.include_images,
             citation_style=body.citation_style,
             force_fresh=body.force_fresh,
+            stale_while_revalidate=body.stale_while_revalidate,
+            max_stale_hours=body.max_stale_hours,
             user_id=user_id,
             research_memory=request.app.state.research_memory,
             search_type=body.search_type,
             max_searches_per_request=max_searches,
+            fingerprint=fingerprint,
         )
     )
 

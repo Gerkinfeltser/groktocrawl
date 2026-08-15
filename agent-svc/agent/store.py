@@ -162,6 +162,16 @@ class JobStore:
         data["completed"] = self.get_completed(job_id)
         self.redis.set(f"job:{job_id}:data", json.dumps(data), ex=_default_ttl())
 
+    def overwrite_job_data(self, job_id: str, data: dict) -> None:
+        """Overwrite the data payload of an already-completed job.
+
+        Used by stale-while-revalidate so the existing ``GET /v2/agent/{id}``
+        job handle reflects the refreshed result without changing the job's
+        terminal ``completed`` status.
+        """
+        data["completed"] = self.get_completed(job_id)
+        self.redis.set(f"job:{job_id}:data", json.dumps(data), ex=_default_ttl())
+
     def fail_job(self, job_id: str, error: str) -> None:
         """Mark a job as failed with an error message.
 

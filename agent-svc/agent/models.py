@@ -486,6 +486,16 @@ class AgentRequest(BaseModel):
         default=False,
         description="When True, bypass the research memory cache and run fresh research pipeline",
     )
+    stale_while_revalidate: bool = Field(
+        default=False,
+        description="When True, a stale cached artifact may be replayed while a single background refresh runs",
+    )
+    max_stale_hours: float = Field(
+        default=6.0,
+        ge=0,
+        le=720,
+        description="Maximum hours past the stale boundary to serve a stale artifact when stale_while_revalidate is enabled",
+    )
     search_type: str = Field(
         default="deep",
         description="Research depth: 'deep' (multi-query, multi-pass, default) or 'focused' (single-query, single-pass)",
@@ -1885,6 +1895,9 @@ class ResearchMemoryQueryResponse(BaseModel):
     similarity: float | None = None
     freshness: str | None = None
     memory_id: str | None = None
+    age_hours: float | None = None
+    expires_at: str | None = None
+    compatibility: str | None = None
 
 
 class ResearchMemoryStoreRequest(BaseModel):
