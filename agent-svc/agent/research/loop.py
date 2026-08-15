@@ -549,7 +549,11 @@ async def run_answer_stream(
     try:
         # Step 1: Search (fetch extra results to allow for scrape failures)
         logger.info("Answer (stream): searching for: %s", query)
-        search_results, _health = await searxng.search(query, limit=num_sources * 2)
+        if retrieval_mode == "hybrid_vector":
+            # Defer web search to the hybrid planner (concurrent web+vector).
+            search_results: list[dict] = []
+        else:
+            search_results, _health = await searxng.search(query, limit=num_sources * 2)
 
         rerank_artifacts: list[SourceArtifact] = []
         if retrieval_mode != "keyword":
@@ -562,6 +566,7 @@ async def run_answer_stream(
                 semantic_url,
                 scraper_url,
                 num_sources,
+                searxng=searxng,
             )
         target_urls = [r["url"] for r in search_results if r.get("url")]
 

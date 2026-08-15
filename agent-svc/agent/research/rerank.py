@@ -7,6 +7,7 @@ import time
 from common.stage_metrics import observe_elapsed
 
 from ..scraper_client import ScraperClient
+from ..searxng_client import SearXNGClient
 from ..semantic_client import SemanticClient
 from .sources import SourceArtifact
 
@@ -62,6 +63,7 @@ async def _rerank_answer_sources(
     scraper_url: str,
     limit: int,
     max_concurrent: int = _RERANK_MAX_CONCURRENT,
+    searxng: SearXNGClient | None = None,
 ) -> tuple[list[dict], list[SourceArtifact]]:
     """Rerank or augment search results for the answer pipeline.
 
@@ -69,7 +71,9 @@ async def _rerank_answer_sources(
     artifacts carry the candidate Markdown fetched concurrently during ranking
     so final synthesis can reuse it instead of scraping again.
     """
-    if retrieval_mode == "keyword" or not search_results:
+    if retrieval_mode == "keyword" or (
+        not search_results and retrieval_mode != "hybrid_vector"
+    ):
         return search_results, []
 
     started = time.monotonic()
@@ -120,20 +124,17 @@ async def _rerank_answer_sources(
             ], []
 
         elif retrieval_mode == "hybrid_vector":
-            vector_results = await semantic.search_vector(query, limit=limit)
-            seen: set[str] = set()
-            merged: list[dict] = []
-            for r in search_results[:limit]:
-                if r["url"] not in seen:
-                    seen.add(r["url"])
-                    merged.append(r)
-            for r in vector_results:
-                if r["url"] not in seen:
-                    seen.add(r["url"])
-                    merged.append(
-                        {"url": r["url"], "title": r["title"], "description": ""}
-                    )
-            return merged[:limit], []
+            from .hybrid import plan_hybrid_retrieval
+
+            plan = await plan_hybrid_retrieval(
+                query=query,
+                limit=limit,
+                searxng=searxng,
+                semantic=semantic,
+                web_results=search_results or None,
+                scraper=scraper,
+            )
+            return plan.results, plan.artifacts
 
         return search_results, []
     finally:

@@ -437,7 +437,12 @@ async def _run_answer_discover_and_scrape(
 
     search_results: list[dict] = []
     logger.info("Answer: searching for: %s", query)
-    search_results, _health = await searxng.search(query, limit=num_sources * 2)
+    if retrieval_mode == "hybrid_vector":
+        # Defer web search to the hybrid planner, which runs SearXNG and
+        # Qdrant discovery concurrently (web is not searched twice).
+        search_results = []
+    else:
+        search_results, _health = await searxng.search(query, limit=num_sources * 2)
 
     rerank_artifacts: list[SourceArtifact] = []
     if retrieval_mode != "keyword":
@@ -448,6 +453,7 @@ async def _run_answer_discover_and_scrape(
             semantic_url,
             scraper.base_url,
             num_sources,
+            searxng=searxng,
         )
 
     target_urls = [r["url"] for r in search_results if r.get("url")]

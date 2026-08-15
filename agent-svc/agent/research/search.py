@@ -332,27 +332,19 @@ async def run_search_stream(
 
         elif retrieval_mode == "hybrid_vector":
             from ..semantic_client import SemanticClient
+            from .hybrid import plan_hybrid_retrieval
 
             semantic = SemanticClient(semantic_url)
             try:
-                searxng_results, _health = await searxng.search(
-                    query, limit=limit, categories=categories, sources=sources
+                plan = await plan_hybrid_retrieval(
+                    query=query,
+                    limit=limit,
+                    searxng=searxng,
+                    semantic=semantic,
+                    categories=categories,
+                    sources=sources,
                 )
-                vector_results = await semantic.search_vector(query, limit=limit)
-
-                seen: set[str] = set()
-                merged: list[dict] = []
-                for r in searxng_results:
-                    if r["url"] not in seen:
-                        seen.add(r["url"])
-                        merged.append(r)
-                for r in vector_results:
-                    if r["url"] not in seen:
-                        seen.add(r["url"])
-                        merged.append(
-                            {"url": r["url"], "title": r["title"], "description": ""}
-                        )
-                search_results = merged[:limit]
+                search_results = plan.results
             finally:
                 await semantic.close()
 
