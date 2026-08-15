@@ -14,13 +14,11 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from agent.research_memory import (
     ResearchMemory,
     compute_fingerprint,
     run_research_memory_sweep_loop,
 )
-
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -30,9 +28,11 @@ def _dict_redis(store: dict[str, str]) -> MagicMock:
     mock = MagicMock()
     mock.get.side_effect = lambda key: store.get(key)
     mock.exists.side_effect = lambda key: key in store
-    mock.set.side_effect = lambda key, value, ex=None: store.__setitem__(key, value)
-    mock.sadd.side_effect = lambda key, *members: 1
-    mock.srem.side_effect = lambda key, *members: 1
+    mock.set.side_effect = lambda key, value, ex=None: (
+        store.__setitem__(key, value) and ex
+    )
+    mock.sadd.side_effect = lambda key, *_members: 1
+    mock.srem.side_effect = lambda key, *_members: 1
     mock.delete.side_effect = lambda key: 1 if store.pop(key, None) is not None else 0
     return mock
 
@@ -91,17 +91,17 @@ def _result(memory_id: str, score: float = 0.95) -> dict:
 
 class TestCompatibilityFingerprint:
     def _fp(self, **overrides) -> str:
-        kwargs = dict(
-            prompt="p",
-            urls=["https://a.com"],
-            schema={"type": "object"},
-            model="gpt-4o",
-            search_type="deep",
-            include_images=False,
-            citation_style="inline",
-            strict_constrain_to_urls=False,
-            force_fresh=False,
-        )
+        kwargs = {
+            "prompt": "p",
+            "urls": ["https://a.com"],
+            "schema": {"type": "object"},
+            "model": "gpt-4o",
+            "search_type": "deep",
+            "include_images": False,
+            "citation_style": "inline",
+            "strict_constrain_to_urls": False,
+            "force_fresh": False,
+        }
         kwargs.update(overrides)
         return compute_fingerprint(**kwargs)
 
