@@ -799,6 +799,293 @@ class TestAllTools:
         assert result["style"] == "compact"
 
 
+# ── New surface: agent create/cancel, batch cancel/errors, browser, monitor ──
+
+
+class TestExpandedSurface:
+    """Verify the expanded client surface hits the right endpoints."""
+
+    def test_create_agent_creates_without_polling(self):
+        call_count = 0
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if request.method == "POST" and request.url.path == "/v2/agent":
+                return httpx.Response(
+                    200, json={"success": True, "id": "agent-1"}, request=request
+                )
+            return httpx.Response(404, json={"error": "not found"}, request=request)
+
+        transport = httpx.MockTransport(_handler)
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        client._client = httpx.AsyncClient(
+            base_url=client._base_url, headers=client._headers(), transport=transport
+        )
+
+        async def run():
+            return await client.create_agent("explain gravity", model="gpt-4o")
+
+        result = asyncio.run(run())
+        assert result["id"] == "agent-1"
+        # create_agent must NOT poll — exactly one request
+        assert call_count == 1
+
+    def test_create_agent_passes_optional_params(self):
+        captured: dict[str, Any] = {}
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            captured["body"] = json.loads(request.content or b"{}")
+            return httpx.Response(
+                200, json={"success": True, "id": "a1"}, request=request
+            )
+
+        transport = httpx.MockTransport(_handler)
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        client._client = httpx.AsyncClient(
+            base_url=client._base_url, headers=client._headers(), transport=transport
+        )
+
+        async def run():
+            return await client.create_agent(
+                "p",
+                urls=["https://a.com"],
+                output_schema={"type": "object"},
+                citation_style="compact",
+                max_credits=3,
+                include_images=True,
+                force_fresh=True,
+                search_type="focused",
+            )
+
+        asyncio.run(run())
+        body = captured["body"]
+        assert body["urls"] == ["https://a.com"]
+        assert body["output_schema"] == {"type": "object"}
+        assert body["citation_style"] == "compact"
+        assert body["max_credits"] == 3
+        assert body["include_images"] is True
+        assert body["force_fresh"] is True
+        assert body["search_type"] == "focused"
+
+    def test_cancel_agent_verb(self):
+        client = _make_matched_client(
+            {("DELETE", "/v2/agent/agent-1"): _json_handler({"success": True})}
+        )
+
+        async def run():
+            return await client.cancel_agent("agent-1")
+
+        result = asyncio.run(run())
+        assert result["success"] is True
+
+    def test_cancel_batch_scrape_verb(self):
+        client = _make_matched_client(
+            {("DELETE", "/v2/batch/scrape/batch-1"): _json_handler({"success": True})}
+        )
+
+        async def run():
+            return await client.cancel_batch_scrape("batch-1")
+
+        result = asyncio.run(run())
+        assert result["success"] is True
+
+    def test_get_batch_scrape_errors_verb(self):
+        client = _make_matched_client(
+            {
+                ("GET", "/v2/batch/scrape/batch-1/errors"): _json_handler(
+                    {"errors": [{"url": "https://x.com"}]}
+                )
+            }
+        )
+
+        async def run():
+            return await client.get_batch_scrape_errors("batch-1")
+
+        result = asyncio.run(run())
+        assert result["errors"][0]["url"] == "https://x.com"
+
+    def test_get_active_crawls_verb(self):
+        client = _make_matched_client(
+            {
+                ("GET", "/v2/crawl/active"): _json_handler(
+                    {"data": [{"id": "c1", "status": "processing"}]}
+                )
+            }
+        )
+
+        async def run():
+            return await client.get_active_crawls()
+
+        result = asyncio.run(run())
+        assert result["data"][0]["id"] == "c1"
+
+    def test_browser_list_verb(self):
+        client = _make_matched_client(
+            {("GET", "/v2/browser"): _json_handler({"sessions": [{"id": "s1"}]})}
+        )
+
+        async def run():
+            return await client.browser_list()
+
+        result = asyncio.run(run())
+        assert result["sessions"][0]["id"] == "s1"
+
+    def test_monitor_get_verb(self):
+        client = _make_matched_client(
+            {
+                ("GET", "/v2/monitor/m-1"): _json_handler(
+                    {"id": "m-1", "monitor_type": "scrape", "schedule": "* * * * *"}
+                )
+            }
+        )
+
+        async def run():
+            return await client.monitor_get("m-1")
+
+        result = asyncio.run(run())
+        assert result["id"] == "m-1"
+
+    def test_monitor_update_verb(self):
+        captured: dict[str, Any] = {}
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            captured["method"] = request.method
+            captured["body"] = json.loads(request.content or b"{}")
+            return httpx.Response(200, json={"success": True}, request=request)
+
+        transport = httpx.MockTransport(_handler)
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        client._client = httpx.AsyncClient(
+            base_url=client._base_url, headers=client._headers(), transport=transport
+        )
+
+        async def run():
+            return await client.monitor_update("m-1", schedule="0 * * * *")
+
+        asyncio.run(run())
+        assert captured["method"] == "PATCH"
+        assert captured["body"]["schedule"] == "0 * * * *"
+
+    def test_monitor_run_verb(self):
+        client = _make_matched_client(
+            {
+                ("POST", "/v2/monitor/m-1/run"): _json_handler(
+                    {"id": "m-1", "last_result": "changed"}
+                )
+            }
+        )
+
+        async def run():
+            return await client.monitor_run("m-1")
+
+        result = asyncio.run(run())
+        assert result["last_result"] == "changed"
+
+    def test_monitor_create_search_config(self):
+        captured: dict[str, Any] = {}
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            captured["body"] = json.loads(request.content or b"{}")
+            return httpx.Response(200, json={"success": True}, request=request)
+
+        transport = httpx.MockTransport(_handler)
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        client._client = httpx.AsyncClient(
+            base_url=client._base_url, headers=client._headers(), transport=transport
+        )
+
+        async def run():
+            return await client.monitor_create(
+                monitor_type="search",
+                search_config={"query": "rust", "numResults": 5},
+            )
+
+        asyncio.run(run())
+        body = captured["body"]
+        assert body["monitor_type"] == "search"
+        assert body["search_config"]["query"] == "rust"
+        assert body["search_config"]["numResults"] == 5
+        assert "url" not in body
+
+
+# ── 429 retry behaviour (ADR-0053 rate-limit contract) ──
+
+
+class TestRateLimitRetry:
+    """Bounded retry for HTTP 429 responses honoring Retry-After."""
+
+    def test_429_retries_then_succeeds(self):
+        call_count = 0
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return httpx.Response(
+                    429,
+                    json={"error": "Rate limit exceeded", "retry_after_seconds": 1},
+                    headers={"Retry-After": "1"},
+                    request=request,
+                )
+            return httpx.Response(
+                200, json={"success": True, "data": {}}, request=request
+            )
+
+        transport = httpx.MockTransport(_handler)
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        client._client = httpx.AsyncClient(
+            base_url=client._base_url, headers=client._headers(), transport=transport
+        )
+
+        async def run():
+            return await client.scrape("https://example.com")
+
+        result = asyncio.run(run())
+        assert result.get("success") is True
+        assert call_count == 2
+
+    def test_429_exhausts_retries(self):
+        call_count = 0
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            return httpx.Response(
+                429,
+                json={"error": "Rate limit exceeded"},
+                headers={"Retry-After": "1"},
+                request=request,
+            )
+
+        transport = httpx.MockTransport(_handler)
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        client._client = httpx.AsyncClient(
+            base_url=client._base_url, headers=client._headers(), transport=transport
+        )
+
+        async def run():
+            return await client.search("test")
+
+        result = asyncio.run(run())
+        assert result["status_code"] == 429
+        # initial + _MAX_429_RETRIES retries
+        assert call_count == 3
+
+    def test_429_retry_after_clamped(self):
+        """Retry-After is clamped to the bounded max wait."""
+        import groktocrawl_client
+
+        assert groktocrawl_client._MIN_RETRY_WAIT_SECONDS >= 1.0
+        assert groktocrawl_client._MAX_RETRY_WAIT_SECONDS <= 10.0
+
+
 # ── VAL-MCP-K04: Recovery after transient outage ──
 
 
