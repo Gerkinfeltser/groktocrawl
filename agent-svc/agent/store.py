@@ -175,16 +175,16 @@ class JobStore:
     def fail_job(self, job_id: str, error: str) -> None:
         """Mark a job as failed with an error message.
 
-        Only transitions ``processing`` → ``failed``. If the current
-        status is ``cancelled`` or already terminal, the status is left
-        unchanged. This prevents a race where a concurrent
+        Only transitions ``processing`` or ``retry_scheduled`` → ``failed``.
+        If the current status is ``cancelled`` or already terminal, the
+        status is left unchanged. This prevents a race where a concurrent
         ``cancel_job()`` is silently overwritten with ``failed``.
         """
         meta_raw = self.redis.get(f"job:{job_id}:meta")
         if meta_raw is None:
             return
         meta = json.loads(meta_raw)
-        if meta["status"] != "processing":
+        if meta["status"] not in ("processing", "retry_scheduled"):
             # Preserve existing terminal status (e.g., cancelled).
             return
         meta["status"] = "failed"
@@ -193,15 +193,73 @@ class JobStore:
         self.redis.set(f"job:{job_id}:meta", json.dumps(meta), ex=_default_ttl())
 
     def cancel_job(self, job_id: str) -> bool:
-        """Cancel a job that's still processing. Returns True if cancelled."""
+        """Cancel a job that's still processing or waiting to retry.
+
+        Returns True if cancelled. A job waiting in ``retry_scheduled``
+        is cancelled so no further retry starts (ADR-0053 AC-003.6).
+        """
+        meta_raw = self.redis.get(f"job:{job_id}:meta")
+        if meta_raw is None:
+            return False
+        meta = json.loads(meta_raw)
+        if meta["status"] not in ("processing", "retry_scheduled"):
+            return False
+        meta["status"] = "cancelled"
+        meta["completed_at"] = _now_iso()
+        self.redis.set(f"job:{job_id}:meta", json.dumps(meta), ex=_default_ttl())
+        return True
+
+    def schedule_retry(
+        self,
+        job_id: str,
+        *,
+        retry_at: str,
+        retry_attempt: int,
+        retry_limit: int,
+        reason: str,
+        retry_after_seconds: float,
+    ) -> bool:
+        """Transition a processing job into the non-terminal retry state.
+
+        Stores the retry metadata (``retry_at``, ``retry_attempt``,
+        ``retry_limit``, ``retry_reason``, ``retry_after_seconds``) on
+        the job meta so ``GET`` status endpoints can expose it. The job
+        is NOT failed and no terminal event is emitted.
+
+        Returns ``True`` when the transition happened; ``False`` when the
+        job was already cancelled, failed, completed, or does not exist
+        (the caller must not schedule a retry in those cases).
+        """
         meta_raw = self.redis.get(f"job:{job_id}:meta")
         if meta_raw is None:
             return False
         meta = json.loads(meta_raw)
         if meta["status"] != "processing":
             return False
-        meta["status"] = "cancelled"
-        meta["completed_at"] = _now_iso()
+        meta["status"] = "retry_scheduled"
+        meta["retry_at"] = retry_at
+        meta["retry_attempt"] = retry_attempt
+        meta["retry_limit"] = retry_limit
+        meta["retry_reason"] = reason
+        meta["retry_after_seconds"] = retry_after_seconds
+        self.redis.set(f"job:{job_id}:meta", json.dumps(meta), ex=_default_ttl())
+        return True
+
+    def resume_retry(self, job_id: str) -> bool:
+        """Transition ``retry_scheduled`` → ``processing`` when a retry begins.
+
+        No-op (returns ``False``) when the job was cancelled while
+        waiting (``DELETE`` wins over the retry wakeup) or the job no
+        longer exists. Only the owning worker task calls this, so at most
+        one retry is ever claimed per job.
+        """
+        meta_raw = self.redis.get(f"job:{job_id}:meta")
+        if meta_raw is None:
+            return False
+        meta = json.loads(meta_raw)
+        if meta["status"] != "retry_scheduled":
+            return False
+        meta["status"] = "processing"
         self.redis.set(f"job:{job_id}:meta", json.dumps(meta), ex=_default_ttl())
         return True
 

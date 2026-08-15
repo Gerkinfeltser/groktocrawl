@@ -14,6 +14,14 @@ curl -X POST http://localhost:8080/v2/scrape \
   -d '{"url":"https://example.com"}'
 ```
 
+### Rate limits and retries
+
+Per-client rate limits reject `POST /v2/agent`, `POST /v2/answer`, and `POST /v2/crawl` before a job is created. A rejection is HTTP 429 with `error_code: RATE_LIMITED`, `retryable: true`, a positive `retry_after_seconds`, and `details` describing the non-secret bucket (`search` or `crawl`), limit, remaining, and reset time. The response also carries standard `Retry-After`, `RateLimit-Limit`, `RateLimit-Remaining`, and `RateLimit-Reset` headers. Because rejection happens before job creation, retrying a definitively rejected admission never creates duplicate jobs.
+
+A 429 admission is a temporary condition, not an operation failure: the CLI (`answer`, `agent`, `crawl`) retries automatically with a bounded policy (at most 3 total attempts, server-provided delays clamped to 60s, fallback backoff with jitter; see [ADR-0053](../adr/0053-retryable-rate-limit-contract.md)). Retry progress goes to stderr; `--json` stdout stays valid JSON. Other clients can apply the same policy from the response metadata.
+
+Accepted asynchronous jobs that hit a downstream rate-limit condition (for example SlopSearX answering 429) transition to the non-terminal `retry_scheduled` status, exposed via `retry_at`, `retry_attempt`, `retry_limit`, `retryable: true`, and `retry_reason: RATE_LIMITED` on the status response, with a `retry_scheduled` webhook event. The worker resumes the same job after the bounded delay; exhaustion fails the job with rate-limit details. A scheduled retry is in-process state: it is not resumed after a process restart (see the durability paragraph below and ADR-0047).
+
 ## Jobs, streaming, and webhooks
 
 Scrape, map, search, answer, browser, and similar lightweight operations return directly. Crawl, extraction, batch scrape, and llms.txt generation create persistent job records: create the job, poll its status route, and cancel where a DELETE route is available. Job responses include IDs suitable for polling.

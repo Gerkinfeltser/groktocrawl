@@ -200,6 +200,14 @@ async def _run_multi_query_discover_and_scrape(
         ):
             logger.info("  [%d/%d] Searching: %s", i, len(queries_to_run), query)
             if isinstance(result_tuple, Exception):
+                from ..exceptions import RetryableRateLimitError
+
+                if isinstance(result_tuple, RetryableRateLimitError):
+                    # A downstream capacity condition affects the whole job,
+                    # not a single query: propagate so the worker schedules a
+                    # bounded retry (ADR-0053). Other search failures degrade
+                    # gracefully as before.
+                    raise result_tuple
                 logger.warning("Search failed for %s: %s", query, result_tuple)
                 continue
             results, _health = result_tuple  # type: ignore[misc]

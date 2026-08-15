@@ -37,6 +37,22 @@ class BenchmarkFixture:
     kind: str
 
 
+@dataclass(frozen=True)
+class Sample:
+    """A single benchmark iteration.
+
+    ``runner`` implementations may return either a bare latency float
+    (backward compatible) or a ``Sample`` carrying the HTTP status and a
+    retry classification. Rate-limited samples (``retry_class ==
+    "rate_limited"``) are recorded with their status/classification but
+    excluded from the p50/p95 latency distributions (ADR-0053 AC-004.4).
+    """
+
+    latency: float
+    status: int | None = None
+    retry_class: str | None = None
+
+
 FIXTURES: tuple[BenchmarkFixture, ...] = (
     BenchmarkFixture("cold scrape", "cold_scrape"),
     BenchmarkFixture("warm scrape", "warm_scrape"),
@@ -46,6 +62,10 @@ FIXTURES: tuple[BenchmarkFixture, ...] = (
     BenchmarkFixture("agent research", "agent_research"),
     BenchmarkFixture("batch scrape", "batch_scrape"),
 )
+
+# Retry classifications recorded per iteration. ``rate_limited`` samples
+# are never mixed into operation-latency distributions.
+RETRY_CLASS_RATE_LIMITED = "rate_limited"
 
 # Deployment identifiers that must never appear in a checked-in baseline.
 _DEPLOYMENT_IDENTIFIER_KEYS = {"hostname", "host", "ip", "machine", "node", "pod"}
@@ -73,13 +93,37 @@ def percentile(sorted_samples: list[float], p: float) -> float:
     return sorted_samples[lower] * (1.0 - weight) + sorted_samples[upper] * weight
 
 
-def compute_summary(samples: list[float]) -> dict[str, float]:
-    """Return p50 and p95 for the raw latency samples."""
+def compute_summary(samples: list[float]) -> dict[str, float | None]:
+    """Return p50 and p95 for the raw latency samples.
+
+    Returns ``{"p50": None, "p95": None}`` when no samples are provided
+    (e.g. an iteration set that was entirely rate-limited).
+    """
+    if not samples:
+        return {"p50": None, "p95": None}
     ordered = sorted(samples)
     return {
         "p50": round(percentile(ordered, 50.0), 6),
         "p95": round(percentile(ordered, 95.0), 6),
     }
+
+
+def _coerce_sample(value: float | Sample) -> Sample:
+    """Normalize a runner return value (bare float or ``Sample``)."""
+    if isinstance(value, Sample):
+        return value
+    return Sample(latency=float(value))
+
+
+def _counts(entries: list[object]) -> dict[str, int]:
+    """Build a string-keyed count map for JSON-safe artifact output."""
+    counts: dict[str, int] = {}
+    for entry in entries:
+        if entry is None:
+            continue
+        key = str(entry)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 def current_commit_sha() -> str:
@@ -141,13 +185,22 @@ def run_benchmarks(
 ) -> dict:
     """Execute each fixture ``runs`` times and return a baseline artifact dict.
 
-    ``runner`` is any callable accepting a ``BenchmarkFixture`` and returning
-    a latency in seconds (a real HTTP runner, or a deterministic fake in tests).
+    ``runner`` is any callable accepting a ``BenchmarkFixture`` and
+    returning a latency in seconds or a ``Sample`` (a real HTTP runner,
+    or a deterministic fake in tests). Samples classified as rate-limited
+    are excluded from the p50/p95 distributions but reported through
+    ``status_counts`` / ``retry_class_counts`` so throttling is never
+    mistaken for operation latency (ADR-0053 AC-004.4).
     """
     results: list[dict] = []
     for fixture in fixtures:
-        samples = [float(runner(fixture)) for _ in range(runs)]
-        summary = compute_summary(samples)
+        samples: list[Sample] = []
+        for _ in range(runs):
+            samples.append(_coerce_sample(runner(fixture)))
+        eligible = [
+            s.latency for s in samples if s.retry_class != RETRY_CLASS_RATE_LIMITED
+        ]
+        summary = compute_summary(eligible)
         results.append(
             {
                 "fixture": fixture.name,
@@ -155,7 +208,9 @@ def run_benchmarks(
                 "runs": runs,
                 "p50": summary["p50"],
                 "p95": summary["p95"],
-                "samples": [round(s, 6) for s in samples],
+                "samples": [round(s.latency, 6) for s in samples],
+                "status_counts": _counts([s.status for s in samples]),
+                "retry_class_counts": _counts([s.retry_class for s in samples]),
             }
         )
     return sanitise_baseline(build_baseline(commit_sha, config_class, runs, results))
@@ -168,6 +223,10 @@ class StackRunner:
     full Docker compose stack and is intentionally left for operators to
     wire per deployment; the harness core remains deterministic and testable
     without Docker.
+
+    Implementations should return a ``Sample`` (latency + HTTP status +
+    retry classification) so rate-limited iterations are excluded from the
+    latency distributions per ADR-0053 AC-004.4.
 
     Set ``wired = True`` after overriding :meth:`__call__` to point at a real
     deployment, or the CLI refuses to run live benchmarks (see ``main``).

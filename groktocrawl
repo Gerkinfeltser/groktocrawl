@@ -497,6 +497,25 @@ def warn(msg: str) -> None:
 
 
 def die(msg: Any, exit_code: int = 1) -> None:
+    if isinstance(msg, RetryExhaustedError):
+        # Structured retryable error (ADR-0053 AC-002.4): never describe
+        # the underlying operation as failed or completed.
+        if JSON_OUTPUT:
+            print(
+                json.dumps(
+                    {
+                        "success": False,
+                        "error": str(msg),
+                        "error_code": "RATE_LIMITED",
+                        "retryable": True,
+                        "attempts": msg.attempts,
+                        "retry_after_seconds": round(msg.last_delay, 1),
+                    }
+                )
+            )
+        else:
+            print(f"Error: {msg}", file=sys.stderr)
+        sys.exit(exit_code)
     body = getattr(msg, "body", None)
     if JSON_OUTPUT and isinstance(body, dict):
         print(json.dumps(body))
@@ -530,6 +549,140 @@ class ApiError(Exception):
         self.body = body
 
 
+class RetryExhaustedError(ApiError):
+    """Raised when the bounded rate-limit retry budget is exhausted.
+
+    Carries the final 429 status/body plus the number of attempts made
+    and the last computed retry delay so the CLI can emit a structured
+    error that never describes the underlying operation as failed or
+    completed (ADR-0053 AC-002.4).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        body: dict[str, Any] | None = None,
+        attempts: int = 0,
+        last_delay: float = 0.0,
+    ) -> None:
+        super().__init__(message, status_code=status_code, body=body)
+        self.attempts = attempts
+        self.last_delay = last_delay
+
+
+# ── Rate-limit retry policy (ADR-0053) ────────────────────────────
+# Bounded, observable retries apply ONLY to definitively rejected HTTP
+# 429 RATE_LIMITED admission responses (the server contract guarantees
+# no job was created). Ambiguous outcomes and unrelated errors are never
+# retried. Defaults are documented in docs/adr/0053; every value is
+# overridable via GROKTOCRAWL_RETRY_* environment variables.
+
+
+def _retry_policy() -> dict:
+    """Return the retry policy from env overrides (documented defaults)."""
+
+    def _int_env(name: str, default: int) -> int:
+        try:
+            return int(os.getenv(name, str(default)))
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "max_attempts": max(1, _int_env("GROKTOCRAWL_RETRY_MAX_ATTEMPTS", 3)),
+        "max_wait_seconds": max(0, _int_env("GROKTOCRAWL_RETRY_MAX_WAIT_SECONDS", 60)),
+        "fallback_seconds": max(0, _int_env("GROKTOCRAWL_RETRY_FALLBACK_SECONDS", 1)),
+    }
+
+
+def _is_retryable_rate_limit(
+    status_code: int | None, body: dict[str, Any] | None
+) -> bool:
+    """True only for a definitively rejected 429 ``RATE_LIMITED`` response.
+
+    Retry eligibility per ADR-0053: HTTP 429 plus the normalized
+    ``RATE_LIMITED`` error code. Anything else (400/401/404/422/502,
+    successful responses, ambiguous outcomes) is never retried.
+    """
+    if status_code != 429 or not isinstance(body, dict):
+        return False
+    return body.get("error_code") == "RATE_LIMITED"
+
+
+def _retry_delay_from_response(
+    body: dict[str, Any] | None, headers: dict[str, str] | None
+) -> float | None:
+    """Server-provided retry delay, or ``None`` when absent/invalid.
+
+    Prefers the structured ``retry_after_seconds`` body field, then the
+    ``Retry-After`` header (numeric seconds only; HTTP-date values and
+    negative values are treated as absent so the caller falls back to its
+    bounded policy).
+    """
+    if isinstance(body, dict):
+        raw = body.get("retry_after_seconds")
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                value = None
+            if value is not None and value >= 0:
+                return value
+    if headers:
+        raw = headers.get("Retry-After")
+        if raw is not None:
+            try:
+                value = float(str(raw).strip())
+            except (TypeError, ValueError):
+                return None
+            if value >= 0:
+                return value
+    return None
+
+
+def _jitter() -> float:
+    """Small uniform jitter so concurrent clients do not retry in lockstep."""
+    import random
+
+    return random.uniform(0.0, 0.5)
+
+
+def _compute_retry_delay(
+    body: dict[str, Any] | None,
+    headers: dict[str, str] | None,
+    attempt: int,
+    jitter_fn=None,
+) -> float:
+    """Bounded delay before the next attempt.
+
+    Server-provided delay takes precedence, clamped to
+    ``[1, GROKTOCRAWL_RETRY_MAX_WAIT_SECONDS]``. Otherwise a bounded
+    exponential backoff from the fallback delay plus jitter, also never
+    below 1s (``Retry-After: 0`` must not become a hot loop) and never
+    above the configured maximum.
+    """
+    policy = _retry_policy()
+    max_wait = float(policy["max_wait_seconds"])
+    if max_wait <= 0:
+        return 1.0
+    server_delay = _retry_delay_from_response(body, headers)
+    if server_delay is not None and server_delay > 0:
+        return min(max(server_delay, 1.0), max_wait)
+    fallback = min(float(policy["fallback_seconds"]) * (2 ** (attempt - 1)), max_wait)
+    jitter = jitter_fn() if jitter_fn is not None else _jitter()
+    return min(max(fallback + jitter, 1.0), max_wait)
+
+
+def _interruptible_sleep(seconds: float) -> None:
+    """Sleep, exiting promptly without another attempt on interruption."""
+    try:
+        time.sleep(seconds)
+    except KeyboardInterrupt:
+        print("Interrupted while waiting to retry — exiting.", file=sys.stderr)
+        sys.exit(130)
+
+
 class Client:
     """GroktoCrawl API client."""
 
@@ -550,6 +703,8 @@ class Client:
         path: str,
         json_data: dict | None = None,
         params: dict | None = None,
+        retry: bool = False,
+        operation: str = "",
     ) -> dict[str, Any]:
         import requests
 
@@ -571,46 +726,139 @@ class Client:
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
-        try:
-            resp = requests.request(
-                method=method,
-                url=url,
-                params=params,
-                json=json_data,
-                headers=headers,
-                timeout=120,
+        policy = _retry_policy()
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                resp = requests.request(
+                    method=method,
+                    url=url,
+                    params=params,
+                    json=json_data,
+                    headers=headers,
+                    timeout=120,
+                )
+            except requests.ConnectionError as e:
+                raise ApiError(
+                    f"Cannot connect to {self.server}: {e}\n"
+                    f"  Is the server running? Set --server or GROKTOCRAWL_API_URL"
+                )
+
+            if resp.status_code == 204:
+                return {}
+
+            try:
+                body = resp.json()
+            except (json.JSONDecodeError, ValueError):
+                body = {"raw": resp.text[:500]}
+
+            # Check for security warning header (one-time stderr warning)
+            warning = resp.headers.get(SECURITY_WARNING_HEADER)
+            if warning and _server_id(resp.url) not in _security_warnings_shown:
+                _security_warnings_shown.add(_server_id(resp.url))
+                print(f"\u26a0\ufe0f  Security warning: {warning}", file=sys.stderr)
+
+            if retry and _is_retryable_rate_limit(resp.status_code, body):
+                delay = _compute_retry_delay(body, dict(resp.headers), attempt)
+                if attempt >= policy["max_attempts"]:
+                    detail = body.get("error", "Rate limit exceeded")
+                    raise RetryExhaustedError(
+                        f"Rate limit exceeded after {attempt} attempt(s): {detail}",
+                        status_code=resp.status_code,
+                        body=body,
+                        attempts=attempt,
+                        last_delay=delay,
+                    )
+                print(
+                    f"Rate limited ({operation or path}): retrying in {delay:.0f}s "
+                    f"(attempt {attempt}/{policy['max_attempts']})",
+                    file=sys.stderr,
+                )
+                _interruptible_sleep(delay)
+                continue
+
+            if resp.status_code >= 400:
+                detail = body.get(
+                    "detail", body.get("error", body.get("message", str(body)))
+                )
+                raise ApiError(
+                    f"API error ({resp.status_code}): {detail}",
+                    status_code=resp.status_code,
+                    body=body,
+                )
+
+            return body
+
+    def _post_stream_with_retry(
+        self,
+        path: str,
+        json_data: dict[str, Any],
+        operation: str,
+        timeout: int = 300,
+    ) -> Any:
+        """POST *json_data* expecting an SSE stream, retrying rate-limited 429s.
+
+        Returns the raw streaming ``requests.Response``. A 429 with the
+        normalized ``RATE_LIMITED`` code is retried with the bounded
+        ADR-0053 policy (the stream is never opened for a rejected
+        request); exhaustion raises ``RetryExhaustedError``. Non-429
+        errors raise ``ApiError`` and the response is closed.
+        """
+        import requests
+
+        url = self._url(path)
+        api_key = os.getenv("GROKTOCRAWL_API_KEY") or os.getenv("API_KEY") or ""
+        headers: dict[str, str] = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        policy = _retry_policy()
+        attempt = 0
+        while True:
+            attempt += 1
+            resp = requests.post(
+                url, json=json_data, headers=headers, timeout=timeout, stream=True
             )
-        except requests.ConnectionError as e:
-            raise ApiError(
-                f"Cannot connect to {self.server}: {e}\n"
-                f"  Is the server running? Set --server or GROKTOCRAWL_API_URL"
-            )
+            if resp.status_code < 400:
+                return resp
 
-        if resp.status_code == 204:
-            return {}
+            try:
+                body = resp.json()
+            except (json.JSONDecodeError, ValueError):
+                body = {"raw": resp.text[:500]}
 
-        try:
-            body = resp.json()
-        except (json.JSONDecodeError, ValueError):
-            body = {"raw": resp.text[:500]}
+            if _is_retryable_rate_limit(resp.status_code, body):
+                delay = _compute_retry_delay(body, dict(resp.headers), attempt)
+                if attempt >= policy["max_attempts"]:
+                    resp.close()
+                    detail = body.get("error", "Rate limit exceeded")
+                    raise RetryExhaustedError(
+                        f"Rate limit exceeded after {attempt} attempt(s): {detail}",
+                        status_code=resp.status_code,
+                        body=body,
+                        attempts=attempt,
+                        last_delay=delay,
+                    )
+                print(
+                    f"Rate limited ({operation}): retrying in {delay:.0f}s "
+                    f"(attempt {attempt}/{policy['max_attempts']})",
+                    file=sys.stderr,
+                )
+                resp.close()
+                _interruptible_sleep(delay)
+                continue
 
-        # Check for security warning header (one-time stderr warning)
-        warning = resp.headers.get(SECURITY_WARNING_HEADER)
-        if warning and _server_id(resp.url) not in _security_warnings_shown:
-            _security_warnings_shown.add(_server_id(resp.url))
-            print(f"\u26a0\ufe0f  Security warning: {warning}", file=sys.stderr)
-
-        if resp.status_code >= 400:
             detail = body.get(
-                "detail", body.get("error", body.get("message", str(body)))
+                "detail",
+                body.get("error", body.get("message", resp.text[:500])),
             )
+            resp.close()
             raise ApiError(
                 f"API error ({resp.status_code}): {detail}",
                 status_code=resp.status_code,
                 body=body,
             )
-
-        return body
 
     def scrape(
         self,
@@ -721,6 +969,7 @@ class Client:
         exclude_paths: list[str] | None = None,
         max_pages: int | None = None,
         ignore_query_parameters: bool = False,
+        retry: bool = False,
         **extra: Any,
     ) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -737,7 +986,9 @@ class Client:
         if ignore_query_parameters:
             data["ignore_query_parameters"] = True
         data.update(extra)
-        return self._request("POST", "/crawl", json_data=data)
+        return self._request(
+            "POST", "/crawl", json_data=data, retry=retry, operation="crawl"
+        )
 
     def crawl_status(self, job_id: str) -> dict[str, Any]:
         return self._request("GET", f"/crawl/{job_id}")
@@ -761,6 +1012,7 @@ class Client:
         schema: dict | None = None,
         include_images: bool = False,
         search_type: str = "deep",
+        retry: bool = False,
     ) -> dict[str, Any]:
         data: dict[str, Any] = {"prompt": prompt, "search_type": search_type}
         if urls:
@@ -769,7 +1021,9 @@ class Client:
             data["schema"] = schema
         if include_images:
             data["include_images"] = True
-        return self._request("POST", "/agent", json_data=data)
+        return self._request(
+            "POST", "/agent", json_data=data, retry=retry, operation="agent"
+        )
 
     def create_agent_stream(
         self,
@@ -777,10 +1031,13 @@ class Client:
         urls: list[str] | None = None,
         include_images: bool = False,
         search_type: str = "deep",
+        retry: bool = False,
     ) -> dict[str, Any]:
         """Create an agent research job with SSE streaming.
 
         Returns a dict with ``_stream`` key containing the raw streaming response.
+        Rate-limited 429 responses are retried with the bounded ADR-0053
+        policy before the stream is opened.
         """
         data: dict[str, Any] = {
             "prompt": prompt,
@@ -791,12 +1048,7 @@ class Client:
             data["urls"] = urls
         if include_images:
             data["include_images"] = True
-        import requests
-
-        url = self._url("/agent")
-        resp = requests.post(url, json=data, timeout=300, stream=True)
-        if resp.status_code >= 400:
-            raise ApiError(f"API error ({resp.status_code}): {resp.text[:500]}")
+        resp = self._post_stream_with_retry("/agent", data, "agent", timeout=300)
         return {"_stream": resp}
 
     def agent_status(self, job_id: str) -> dict[str, Any]:
@@ -810,22 +1062,24 @@ class Client:
         query: str,
         num_sources: int = 5,
         stream: bool = False,
+        retry: bool = False,
     ) -> dict[str, Any]:
-        """Grounded Q&A: synchronous, cited answer."""
+        """Grounded Q&A: synchronous, cited answer.
+
+        Rate-limited 429 responses are retried with the bounded ADR-0053
+        policy (for both the sync and streaming paths).
+        """
         data: dict[str, Any] = {
             "query": query,
             "num_sources": num_sources,
             "stream": stream,
         }
         if stream:
-            import requests
-
-            url = self._url("/answer")
-            resp = requests.post(url, json=data, timeout=120, stream=True)
-            if resp.status_code >= 400:
-                raise ApiError(f"API error ({resp.status_code}): {resp.text[:500]}")
+            resp = self._post_stream_with_retry("/answer", data, "answer", timeout=120)
             return {"_stream": resp}
-        return self._request("POST", "/answer", json_data=data)
+        return self._request(
+            "POST", "/answer", json_data=data, retry=retry, operation="answer"
+        )
 
     def enrich(
         self,
@@ -1298,6 +1552,7 @@ def cmd_crawl(client: Client, args: argparse.Namespace) -> None:
             exclude_paths=args.exclude_paths,
             max_pages=args.max_pages,
             ignore_query_parameters=args.ignore_query_parameters,
+            retry=True,
             **extra,
         )
     except ApiError as e:
@@ -1389,6 +1644,7 @@ def cmd_agent(client: Client, args: argparse.Namespace) -> None:
                 schema=None,
                 include_images=include_images,
                 search_type=search_type,
+                retry=True,
             )
         else:
             # Streaming path (default)
@@ -1397,10 +1653,10 @@ def cmd_agent(client: Client, args: argparse.Namespace) -> None:
                 urls=args.urls,
                 include_images=include_images,
                 search_type=search_type,
+                retry=True,
             )
     except ApiError as e:
-        print(f"\nError: {e}", flush=True)
-        sys.exit(1)
+        die(e)
 
     if args.sync:
         # Poll loop (non-streaming)
@@ -1535,7 +1791,10 @@ def cmd_answer(client: Client, args: argparse.Namespace) -> None:
 
     try:
         result = client.answer(
-            query=args.query, num_sources=args.num_sources, stream=not args.sync
+            query=args.query,
+            num_sources=args.num_sources,
+            stream=not args.sync,
+            retry=True,
         )
     except ApiError as e:
         die(e)

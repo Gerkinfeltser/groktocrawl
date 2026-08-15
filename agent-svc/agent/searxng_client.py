@@ -60,6 +60,23 @@ _CATEGORIES_MAP = {
 }
 
 
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse a ``Retry-After`` header as seconds, or ``None`` when absent/invalid.
+
+    Only numeric seconds are accepted (HTTP-date values are treated as
+    absent so the caller falls back to its bounded policy).
+    """
+    if not value:
+        return None
+    try:
+        seconds = float(value.strip())
+    except (TypeError, ValueError):
+        return None
+    if seconds < 0:
+        return None
+    return seconds
+
+
 class SearXNGClient:
     """Client for the SearXNG search engine JSON API."""
 
@@ -194,6 +211,26 @@ class SearXNGClient:
                 f"{self.base_url}/search",
                 params=params,  # type: ignore[arg-type]
             )
+            if resp.status_code == 429:
+                # Downstream capacity condition (ADR-0053): classify as a
+                # retryable rate-limit error so sync routes render a
+                # retryable 429 and the worker schedules a bounded retry
+                # instead of failing the job terminally.
+                from .exceptions import RetryableRateLimitError
+
+                outcome = "rate_limited"
+                retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
+                logger.warning(
+                    "SearXNG rate limited (429) — retry_after=%s",
+                    retry_after if retry_after is not None else "unknown",
+                )
+                raise RetryableRateLimitError(
+                    detail=(
+                        "Downstream search capacity is temporarily exhausted "
+                        "(SearXNG returned HTTP 429)"
+                    ),
+                    retry_after_seconds=retry_after,
+                )
             if resp.status_code != 200:
                 outcome = "error"
                 logger.warning(

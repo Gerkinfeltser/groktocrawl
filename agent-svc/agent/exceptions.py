@@ -71,6 +71,65 @@ class ConflictError(GroktoCrawlError):
 
 
 class RateLimitedError(GroktoCrawlError):
+    """Per-client admission rejection with retry metadata.
+
+    Raised by route handlers when the per-client budget is exhausted
+    BEFORE a job is created, so a rejected request never leaves a job
+    record. Carries retry metadata that the FastAPI exception handler
+    renders into ``Retry-After`` / ``RateLimit-*`` headers and the
+    ``retryable`` / ``retry_after_seconds`` body fields.
+
+    ``bucket`` must be a stable non-secret identifier (``search`` or
+    ``crawl``), never the client IP.
+    """
+
     status_code = 429
     error_code = "RATE_LIMITED"
     detail = "Rate limit exceeded"
+
+    def __init__(
+        self,
+        detail: str | None = None,
+        details: dict | None = None,
+        *,
+        retry_after_seconds: float | None = None,
+        bucket: str | None = None,
+        limit: int | None = None,
+        remaining: int | None = None,
+        reset_at: str | None = None,
+    ):
+        super().__init__(detail, details)
+        self.retry_after_seconds = retry_after_seconds
+        self.bucket = bucket
+        self.limit = limit
+        self.remaining = remaining
+        self.reset_at = reset_at
+        if (bucket or limit is not None or remaining is not None or reset_at) and (
+            not self.details or not isinstance(self.details, dict)
+        ):
+            self.details = {}
+        if isinstance(self.details, dict):
+            if bucket is not None:
+                self.details["bucket"] = bucket
+            if limit is not None:
+                self.details["limit"] = limit
+            if remaining is not None:
+                self.details["remaining"] = remaining
+            if reset_at is not None:
+                self.details["reset_at"] = reset_at
+
+
+class RetryableRateLimitError(RateLimitedError):
+    """Downstream rate-limit condition that may be retried at the job level.
+
+    Raised by internal clients (e.g. ``SearXNGClient``) when an upstream
+    component definitively answers HTTP 429 ``RATE_LIMITED``. Sync routes
+    render it as a retryable 429 to the caller; the background worker
+    catches it to schedule a bounded, cancellable retry of the job
+    instead of failing terminally.
+
+    Only explicit upstream 429 ``RATE_LIMITED`` responses are classified
+    this way — never ambiguous outcomes or local budget exhaustion.
+    """
+
+    retryable = True

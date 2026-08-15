@@ -533,9 +533,7 @@ class AgentRequest(BaseModel):
         """Reject invalid search_type values."""
         allowed = {"deep", "focused"}
         if value not in allowed:
-            raise ValueError(
-                f"search_type must be one of {allowed}, got '{value}'"
-            )
+            raise ValueError(f"search_type must be one of {allowed}, got '{value}'")
         return value
 
 
@@ -546,11 +544,21 @@ class AgentCreateResponse(BaseModel):
 
 class AgentStatusResponse(BaseModel):
     success: bool = True
-    status: str = "processing"  # processing | completed | failed | cancelled
+    status: str = (
+        "processing"  # processing | retry_scheduled | completed | failed | cancelled
+    )
     data: dict[str, Any] | None = None
     error: str | None = None
     expires_at: str | None = None
     credits_used: int | None = None
+    # Retry metadata (ADR-0053) — populated while status == "retry_scheduled".
+    # ``retryable`` is True only for a job waiting on a downstream rate-limit
+    # condition; ``retry_reason`` carries the normalized reason (RATE_LIMITED).
+    retry_at: str | None = None
+    retry_attempt: int | None = None
+    retry_limit: int | None = None
+    retryable: bool | None = None
+    retry_reason: str | None = None
 
 
 class AgentCancelResponse(BaseModel):
@@ -769,6 +777,12 @@ class CrawlStatusResponse(BaseModel):
     completed_at: str | None = None
     expires_at: str | None = None
     duration: int | None = None
+    # Retry metadata (ADR-0053) — populated while status == "retry_scheduled".
+    retry_at: str | None = None
+    retry_attempt: int | None = None
+    retry_limit: int | None = None
+    retryable: bool | None = None
+    retry_reason: str | None = None
 
 
 class ParamsPreviewRequest(BaseModel):
