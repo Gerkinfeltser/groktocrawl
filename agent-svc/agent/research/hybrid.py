@@ -19,6 +19,13 @@ Blend policy (deterministic, no web-first starvation)
        floor_web    = max(0, limit - len(vector_unique))
        floor_vector = max(0, limit - len(web_unique))
 
+   In addition, a diversity floor reserves one slot for each source that has
+   at least one exclusive candidate (provenance ``web`` / ``vector``) while
+   the other source also contributes candidates::
+
+       if has_web_only and vector_unique:    floor_web    = max(floor_web, 1)
+       if has_vector_only and web_unique:    floor_vector = max(floor_vector, 1)
+
    The web floor and vector floor are emitted first (each in its source's
    rank order), then the remaining slots are filled by round-robin
    interleaving of the two rank orders (web first). Rank order within a
@@ -26,8 +33,9 @@ Blend policy (deterministic, no web-first starvation)
    the round-robin interleave is the deterministic cross-source tie-break.
    Overlapping URLs (provenance ``both``) are emitted once, keeping web's
    richer metadata (title/description) and the vector score when present.
-3. A Qdrant-only candidate therefore always has a chance to enter the final
-   candidate set even when web returns a full result budget.
+3. An exclusive (``web``-only or ``vector``-only) candidate therefore always
+   has a chance to enter the final candidate set even when the other source
+   returns a full result budget.
 
 Acquisition
 -----------
@@ -121,15 +129,23 @@ def _normalize_url_for_blend(url: str) -> str:
     Lowercases the scheme and hostname, drops the default port, strips the
     fragment, and strips a trailing slash from the path. The query string and
     path case are preserved (both are significant to URL identity).
+
+    Malformed URLs (an invalid IPv6 literal, a non-numeric port) raise
+    ``ValueError`` during parsing; those fall back to the raw URL so a single
+    bad result cannot abort the whole blend. The raw text is still
+    deduplicated exactly by :func:`_collect_candidates`.
     """
-    parsed = urlparse(url)
-    scheme = parsed.scheme.lower()
-    host = (parsed.hostname or "").lower()
+    try:
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:
+        return url
     if not host:
         # Relative or otherwise unparseable URL — normalize what we can.
         return url
     display_host = f"[{host}]" if ":" in host else host
-    port = parsed.port
     if port is not None and not _is_default_port(scheme, port):
         display_host = f"{display_host}:{port}"
     path = parsed.path.rstrip("/")
@@ -220,11 +236,24 @@ def _blend(
 
     See the module docstring for the full policy. The floor guarantee ensures
     neither source can be fully starved by a full budget from the other; the
-    remaining slots are filled by round-robin interleaving (web first), which
-    is deterministic.
+    diversity floor reserves a slot for each source that has an exclusive
+    candidate while the other source also contributes. The remaining slots are
+    filled by round-robin interleaving (web first), which is deterministic.
     """
+    has_web_only = any(by_norm[norm]["retrieval"] == "web" for norm in web_order)
+    has_vector_only = any(
+        by_norm[norm]["retrieval"] == "vector" for norm in vector_order
+    )
+
     floor_web = max(0, limit - len(vector_order))
     floor_vector = max(0, limit - len(web_order))
+
+    # Diversity floor: an exclusive candidate from a source that also faces
+    # candidates from the other source must always have a chance to enter.
+    if has_web_only and vector_order:
+        floor_web = max(floor_web, 1)
+    if has_vector_only and web_order:
+        floor_vector = max(floor_vector, 1)
 
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -251,8 +280,6 @@ def _blend(
     ):
         while web_idx < len(web_order) and web_order[web_idx] in seen:
             web_idx += 1
-        while vector_idx < len(vector_order) and vector_order[vector_idx] in seen:
-            vector_idx += 1
 
         advanced = False
         if web_idx < len(web_order):
@@ -260,11 +287,17 @@ def _blend(
             seen.add(web_order[web_idx])
             web_idx += 1
             advanced = True
+
+        # Re-check ``seen`` after the web append so an overlapping URL at the
+        # current vector pointer is not emitted twice in the same iteration.
+        while vector_idx < len(vector_order) and vector_order[vector_idx] in seen:
+            vector_idx += 1
         if len(result) < limit and vector_idx < len(vector_order):
             result.append(by_norm[vector_order[vector_idx]])
             seen.add(vector_order[vector_idx])
             vector_idx += 1
             advanced = True
+
         if not advanced:
             break
 
