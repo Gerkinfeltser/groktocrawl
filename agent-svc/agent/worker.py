@@ -221,7 +221,7 @@ async def _process_agent_async(
                         webhook_config, "completed", job_id, stale_payload
                     )
 
-                    async def _refresh_and_update() -> None:
+                    async def _refresh_and_update() -> dict[str, Any] | None:
                         try:
                             fresh = await refresh_research_memory(
                                 research_memory,
@@ -248,7 +248,7 @@ async def _process_agent_async(
                                 job_id,
                                 exc_info=True,
                             )
-                            return
+                            return None
                         refreshed_payload: dict[str, Any] = {
                             "result": fresh.get("result", ""),
                             "sources": fresh.get("sources", []),
@@ -259,10 +259,33 @@ async def _process_agent_async(
                             "age_hours": 0.0,
                             "research_memory_id": fresh.get("research_memory_id"),
                         }
-                        store.overwrite_job_data(job_id, refreshed_payload)
+                        if cs == CitationStyle.compact:
+                            refreshed_payload["sources_compact"] = fresh.get(
+                                "sources_compact", []
+                            )
+                            refreshed_payload["source_details"] = []
+                        return refreshed_payload
 
                     refresh_key = fingerprint or f"prompt:{prompt}"
-                    research_memory.start_refresh(refresh_key, _refresh_and_update)
+                    refresh_task = research_memory.start_refresh(
+                        refresh_key, _refresh_and_update
+                    )
+
+                    def _write_refreshed(_future: asyncio.Future[Any]) -> None:
+                        try:
+                            fresh_payload = _future.result()
+                        except Exception:
+                            logger.warning(
+                                "Background research memory refresh failed for "
+                                "agent %s",
+                                job_id,
+                                exc_info=True,
+                            )
+                            return
+                        if fresh_payload:
+                            store.overwrite_job_data(job_id, fresh_payload)
+
+                    refresh_task.add_done_callback(_write_refreshed)
                     return
                 else:
                     # Stale hit — run normal pipeline but note cached version

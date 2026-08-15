@@ -84,7 +84,19 @@ async def stream_cached_artifact(
             logger.warning("Background research memory refresh failed", exc_info=True)
             refreshed = None
         if refreshed:
-            yield f"data: {json.dumps({'type': 'refreshed', 'result': refreshed.get('result', ''), 'sources': refreshed.get('sources', []), 'memory_id': refreshed.get('research_memory_id', ''), 'freshness': 'refreshed', 'age_hours': 0.0})}\n\n"
+            refreshed_payload: dict = {
+                "type": "refreshed",
+                "result": refreshed.get("result", ""),
+                "sources": refreshed.get("sources", []),
+                "memory_id": refreshed.get("research_memory_id", ""),
+                "freshness": "refreshed",
+                "age_hours": 0.0,
+            }
+            if citation_style == CitationStyle.compact:
+                refreshed_payload["sources_compact"] = refreshed.get(
+                    "sources_compact", []
+                )
+            yield f"data: {json.dumps(refreshed_payload)}\n\n"
 
     yield "data: [DONE]\n\n"
 

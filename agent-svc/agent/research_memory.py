@@ -355,7 +355,8 @@ class ResearchMemory:
             self._refresh_tasks[key] = task
 
             def _discard(_future: asyncio.Future[Any]) -> None:
-                self._refresh_tasks.pop(key, None)
+                if self._refresh_tasks.get(key) is _future:
+                    self._refresh_tasks.pop(key, None)
 
             task.add_done_callback(_discard)
         return task
