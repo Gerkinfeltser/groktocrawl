@@ -1055,3 +1055,219 @@ class TestIndexBatchAsync:
             )
 
         assert "Failed to batch-index" in caplog.text
+
+
+class TestCancellationMetrics:
+    """Cancelled jobs must never be recorded as completed or failed."""
+
+    @pytest.mark.asyncio
+    async def test_run_job_with_observability_records_cancelled_not_completed(self):
+        from agent.worker import JobCancelledError, _run_job_with_observability
+
+        mock_store = MagicMock()
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        async def work_fn():
+            raise JobCancelledError("cancelled by DELETE")
+
+        with (
+            patch("agent.worker.record_job_cancelled") as mock_cancel,
+            patch("agent.worker.record_job_start") as mock_start,
+            patch("agent.worker.record_job_end") as mock_end,
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+        ):
+            await _run_job_with_observability(
+                job_id="job-1",
+                job_type="batch_scrape",
+                store=mock_store,
+                webhook_config=None,
+                work_fn=work_fn,
+            )
+
+        mock_cancel.assert_called_once_with("batch_scrape")
+        mock_store.complete_job.assert_not_called()
+        mock_store.fail_job.assert_not_called()
+        mock_deliver_webhook.assert_not_called()
+        mock_start.assert_called_once_with("batch_scrape")
+        mock_end.assert_called_once_with("batch_scrape")
+        completed_calls = [
+            c
+            for c in mock_metrics.counter.call_args_list
+            if c.args and c.args[0] == "jobs_completed_total"
+        ]
+        failed_calls = [
+            c
+            for c in mock_metrics.counter.call_args_list
+            if c.args and c.args[0] == "jobs_failed_total"
+        ]
+        assert completed_calls == []
+        assert failed_calls == []
+
+    @pytest.mark.asyncio
+    async def test_cancelled_crawl_does_not_record_completed_metrics(self):
+        from agent.worker import _process_crawl_async
+
+        mock_store = MagicMock()
+        mock_store.get_job.return_value = {"status": "cancelled"}
+        mock_scraper_instance = MagicMock()
+        mock_scraper_instance.scrape = AsyncMock(
+            return_value={"success": True, "data": {"markdown": "# x", "metadata": {}}}
+        )
+        mock_scraper_instance.close = AsyncMock()
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store),
+            patch("agent.worker.ScraperClient", return_value=mock_scraper_instance),
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch("agent.worker.record_job_cancelled") as mock_cancel,
+            patch("agent.worker.record_job_start"),
+            patch("agent.worker.record_job_end"),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey",
+                    valkey_port=6379,
+                    valkey_db=0,
+                    crawl_max_duration_seconds=1800,
+                    crawl_idle_timeout_seconds=300,
+                ),
+            ),
+            patch("agent.worker._index_page_async", AsyncMock()),
+        ):
+            await _process_crawl_async(
+                job_id="crawl-cancel-metrics",
+                url="https://example.com",
+                max_pages=10,
+                max_depth=2,
+                scraper_url="http://scraper:8001",
+            )
+
+        mock_cancel.assert_called_once_with("crawl")
+        completed_calls = [
+            c
+            for c in mock_metrics.counter.call_args_list
+            if c.args and c.args[0] == "jobs_completed_total"
+        ]
+        assert completed_calls == []
+        generic_duration_calls = [
+            c
+            for c in mock_metrics.histogram.call_args_list
+            if c.args and c.args[0] == "job_duration_seconds"
+        ]
+        assert generic_duration_calls == []
+
+    @pytest.mark.asyncio
+    async def test_cancelled_batch_scrape_does_not_complete(self):
+        from agent.worker import _process_batch_scrape_async
+
+        mock_store = MagicMock()
+        mock_store.get_job.return_value = {"status": "cancelled"}
+        mock_store.get_completed.return_value = 0
+        mock_scraper_instance = MagicMock()
+        mock_scraper_instance.scrape = AsyncMock(
+            return_value={"success": True, "data": {"markdown": "# x", "metadata": {}}}
+        )
+        mock_scraper_instance.close = AsyncMock()
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store),
+            patch("agent.worker.ScraperClient", return_value=mock_scraper_instance),
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch("agent.worker.record_job_cancelled") as mock_cancel,
+            patch("agent.worker.record_job_start"),
+            patch("agent.worker.record_job_end"),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey",
+                    valkey_port=6379,
+                    valkey_db=0,
+                    crawl_max_duration_seconds=1800,
+                    crawl_idle_timeout_seconds=300,
+                ),
+            ),
+            patch("agent.worker._index_batch_async", AsyncMock()),
+        ):
+            await _process_batch_scrape_async(
+                job_id="batch-cancel",
+                urls=["https://a.com", "https://b.com"],
+                scraper_url="http://scraper:8001",
+            )
+
+        mock_cancel.assert_called_once_with("batch_scrape")
+        mock_store.complete_job.assert_not_called()
+        mock_store.fail_job.assert_not_called()
+        mock_scraper_instance.scrape.assert_not_called()
+        mock_scraper_instance.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_plan_execute_does_not_complete(self):
+        from agent.worker import _process_plan_execution_async
+
+        mock_store = MagicMock()
+        mock_store.get_job.return_value = {"status": "cancelled"}
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        fake_llm = MagicMock()
+        fake_llm.close = AsyncMock()
+        fake_searxng = MagicMock()
+        fake_searxng.close = AsyncMock()
+        fake_scraper = MagicMock()
+        fake_scraper.close = AsyncMock()
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store),
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch("agent.worker.record_job_cancelled") as mock_cancel,
+            patch("agent.worker.record_job_start"),
+            patch("agent.worker.record_job_end"),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey",
+                    valkey_port=6379,
+                    valkey_db=0,
+                    crawl_max_duration_seconds=1800,
+                    crawl_idle_timeout_seconds=300,
+                ),
+            ),
+            patch("agent.llm.LLMClient", return_value=fake_llm),
+            patch("agent.scraper_client.ScraperClient", return_value=fake_scraper),
+            patch("agent.searxng_client.SearXNGClient", return_value=fake_searxng),
+        ):
+            await _process_plan_execution_async(
+                job_id="plan-cancel",
+                prompt="test",
+                plan={"phases": [{"action": "search", "description": "query"}]},
+                modifications=None,
+                llm_base_url="http://llm",
+                llm_api_key="k",
+                llm_model="m",
+                searxng_url="http://searxng",
+                scraper_url="http://scraper",
+            )
+
+        mock_cancel.assert_called_once_with("plan_execute")
+        mock_store.complete_job.assert_not_called()
+        mock_store.fail_job.assert_not_called()
+        fake_llm.close.assert_called_once()
+        fake_searxng.close.assert_called_once()
+        fake_scraper.close.assert_called_once()

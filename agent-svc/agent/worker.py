@@ -19,6 +19,14 @@ from .workload_metrics import record_job_cancelled, record_job_end, record_job_s
 logger = logging.getLogger(__name__)
 
 
+class JobCancelledError(Exception):
+    """Raised by a work function to signal cooperative cancellation.
+
+    ``_run_job_with_observability`` treats this distinctly from a normal
+    ``Exception`` so a cancelled job is never recorded as completed or failed.
+    """
+
+
 def _get_worker_settings() -> Any:
     return load_settings()
 
@@ -54,6 +62,12 @@ async def _run_job_with_observability(
             {"type": job_type}
         )
         logger.info("%s job %s completed in %.2fs", job_type, job_id, elapsed)
+    except JobCancelledError:
+        # Cooperative cancellation: the DELETE handler already marked the job
+        # cancelled in the store. Do not overwrite it, deliver a completion
+        # webhook, or record completed/failed metrics.
+        record_job_cancelled(job_type)
+        logger.info("%s job %s cancelled", job_type, job_id)
     except Exception as e:
         logger.exception("%s job %s failed", job_type, job_id)
         store.fail_job(job_id, str(e))
@@ -453,12 +467,14 @@ async def _process_crawl_async(
         elapsed = time.monotonic() - start
 
         # ── Existing job-type-agnostic metrics (keep for backward compat) ──
-        METRICS.histogram(
-            "job_duration_seconds", "Job processing duration", ["type", "status"]
-        ).observe({"type": job_type, "status": "completed"}, elapsed)
-        METRICS.counter("jobs_completed_total", "Total completed jobs", ["type"]).inc(
-            {"type": job_type}
-        )
+        # A cancelled crawl must not be double-counted as completed.
+        if not was_cancelled:
+            METRICS.histogram(
+                "job_duration_seconds", "Job processing duration", ["type", "status"]
+            ).observe({"type": job_type, "status": "completed"}, elapsed)
+            METRICS.counter(
+                "jobs_completed_total", "Total completed jobs", ["type"]
+            ).inc({"type": job_type})
 
         # ── Crawl-specific metrics ──────────────────────────────────────────
         crawl_status = "cancelled" if was_cancelled else "completed"
@@ -547,14 +563,13 @@ async def _process_batch_scrape_async(
             # Check for cancellation between URLs
             job_meta = store.get_job(job_id)
             if job_meta and job_meta.get("status") == "cancelled":
-                record_job_cancelled("batch_scrape")
                 logger.info(
                     "Batch scrape %s cancelled after %d/%d URLs",
                     job_id,
                     len(pages),
                     total,
                 )
-                break
+                raise JobCancelledError("batch scrape cancelled via DELETE")
 
             try:
                 result = await scraper.scrape(url)
@@ -785,14 +800,13 @@ async def _process_plan_execution_async(
                 # Check for cancellation between phases
                 job_meta = store.get_job(job_id)
                 if job_meta and job_meta.get("status") == "cancelled":
-                    record_job_cancelled("plan_execute")
                     logger.info(
                         "Plan execution %s cancelled at phase %d/%d",
                         job_id,
                         phase_idx + 1,
                         len(phases),
                     )
-                    break
+                    raise JobCancelledError("plan execution cancelled via DELETE")
 
                 action = phase.get("action", "search")
                 description = phase.get("description", "")
