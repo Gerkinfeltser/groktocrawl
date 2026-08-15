@@ -93,6 +93,7 @@ ignore = [
 "**/tests/**" = ["T20"]
 "tests/**" = ["T20"]
 "scripts/*" = ["T20"]
+"benchmarks/*" = ["T20"]  # benchmark CLI output is the product interface.
 "groktocrawl" = ["T20"]  # CLI output is the product interface.
 "agent-svc/agent/monitor.py" = ["T20"]  # scheduler CLI output consumed by Ofelia logs.
 "scraper-svc/scraper/app.py" = ["N815"]  # Firecrawl-compatible camelCase fields.
