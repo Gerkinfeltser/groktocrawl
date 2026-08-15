@@ -6,6 +6,8 @@ import sys
 
 import pytest
 
+from common.metrics import METRICS
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scraper-svc"))
 
 
@@ -153,6 +155,25 @@ async def test_cancellation_completes_cleanup_before_releasing_browser_slot(
 
     assert events == ["browser-closed", "playwright-exited"]
     assert semaphore.locked() is False
+
+
+@pytest.mark.asyncio
+async def test_browser_semaphore_capacity_metrics_recorded(monkeypatch):
+    import scraper.fetch_tiers as tiers
+
+    monkeypatch.setattr(tiers, "_browser_semaphore", asyncio.Semaphore(1))
+
+    async def lifecycle(_url: str, _proxy: dict | None) -> str:
+        return "ok"
+
+    monkeypatch.setattr(tiers, "_playwright_fetch_unbounded", lifecycle, raising=False)
+
+    await tiers._playwright_fetch_with_proxy("https://example.test", None)
+
+    out = METRICS.generate_openmetrics()
+    assert "# TYPE groktocrawl_browser_semaphore_wait_seconds histogram" in out
+    assert "groktocrawl_browser_semaphore_wait_seconds_count" in out
+    assert "groktocrawl_browser_semaphore_active 0.0" in out
 
 
 def test_browser_concurrency_setting_defaults_to_four():
