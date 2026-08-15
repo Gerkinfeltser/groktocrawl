@@ -246,6 +246,7 @@ async def _head_probe(url: str, client: httpx.AsyncClient) -> dict:
 async def smart_scrape(
     url: str,
     force_browser: bool = False,
+    lightweight_only: bool = False,
     ignore_robots_txt: bool = False,
     robots_user_agent: str | None = None,
     scrape_options: dict | None = None,
@@ -259,6 +260,12 @@ async def smart_scrape(
     going straight to Tier 3 (Playwright render). Used for Cloudflare-
     protected pages where the lightweight tiers would fail or timeout.
 
+    When ``lightweight_only`` is True, the pipeline runs only the lightweight
+    tiers (adapter, cache, Tier 1 llms.txt, Tier 2 content negotiation) and
+    short-circuits before Tier 3 (Playwright). Callers use this for the
+    generic fallback stage so it can never silently enter the browser tier
+    before a separate forced-browser retry.
+
     When SCRAPER_POLITENESS_ENABLED=true, checks robots.txt and enforces
     per-domain rate limits before each tier.
 
@@ -271,6 +278,7 @@ async def smart_scrape(
     Args:
         url: The URL to scrape.
         force_browser: If True, skip lightweight tiers.
+        lightweight_only: If True, stop before the browser tier.
         ignore_robots_txt: If True, skip robots.txt enforcement.
         robots_user_agent: Custom UA for robots.txt evaluation.
 
@@ -486,6 +494,37 @@ async def smart_scrape(
                     accepted = await _enrich_with_politeness(accepted, url)
                     await _set_cache(url, accepted, prior_entry=cached)
                     return accepted
+
+    # ── Lightweight-only short-circuit ──────────────────────────
+    # The generic fallback stage must not silently enter the browser tier.
+    # Return the best effort produced by the lightweight tiers (or a failure)
+    # and let the caller decide whether to force a separate browser retry.
+    if lightweight_only:
+        if best_effort:
+            best = max(
+                best_effort, key=lambda r: r.get("quality", {}).get("score", 0.0)
+            )
+            bq = best.get("quality", {})
+            bs = bq.get("score", 0.0)
+            logger.warning(
+                "lightweight_only for %s, returning best effort (quality=%.2f)",
+                url,
+                bs,
+            )
+            best["warning"] = (
+                f"Lightweight-only content — quality ({bs:.2f}) below threshold "
+                f"({QA_MIN_QUALITY_THRESHOLD:.2f})"
+            )
+            return await _enrich_with_politeness(best, url)
+        return await _enrich_with_politeness(
+            {
+                "error": f"Could not extract content from {url} using lightweight tiers",
+                "markdown": "",
+                "source": "none",
+                "url": url,
+            },
+            url,
+        )
 
     # Tier 3: Playwright render + readability (no shared client needed)
     _proceed, blocked = await _politeness_check_and_delay(

@@ -141,6 +141,7 @@ class ScrapeRequest(BaseModel):
     url: str
     contents: ContentsOptions | None = None  # Optional content extraction options
     force_browser: bool = False
+    lightweight_only: bool = False
     ignore_robots_txt: bool = False
     robots_user_agent: str | None = None
     scrape_options: dict | None = None
@@ -264,6 +265,7 @@ async def scrape(request: ScrapeRequest):
             result = await smart_scrape(
                 request.url,
                 force_browser=request.force_browser or needs_images,
+                lightweight_only=request.lightweight_only,
                 ignore_robots_txt=request.ignore_robots_txt,
                 robots_user_agent=request.robots_user_agent,
                 scrape_options=request.scrape_options,
