@@ -574,6 +574,11 @@ async def run_search_stream(
         }
         if output is not None:
             done_event["output"] = output
+        # Ensure TTFB is sampled even when zero results were returned: the
+        # terminal ``done`` event is the only event delivered in that case.
+        # ``on_first_event`` is idempotent, so the loop-entry call for the
+        # normal path is unaffected.
+        timing.on_first_event()
         yield done_event
 
     finally:

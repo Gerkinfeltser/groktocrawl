@@ -330,3 +330,34 @@ async def test_agent_stream_ttfb_ignores_planning_sentinels(monkeypatch):
 
     assert chunks[-1] == "data: [DONE]\n\n"
     assert after == before + 1
+
+
+@pytest.mark.asyncio
+async def test_search_stream_ttfb_fires_on_done_when_zero_results(monkeypatch):
+    """A zero-result search still samples TTFB on its terminal done event."""
+    import agent.research.search as search_mod
+
+    async def no_results(*_args, **_kwargs):
+        return [], None
+
+    monkeypatch.setattr(search_mod.SearXNGClient, "search", no_results)
+
+    before = _hist_count("search")
+    chunks = [
+        chunk
+        async for chunk in search_mod.run_search_stream(
+            query="no results anywhere",
+            limit=5,
+            search_type="fast",
+            searxng_url="http://searxng",
+            scraper_url="http://scraper",
+            llm_base_url="http://llm",
+            llm_api_key="k",
+            llm_model="m",
+        )
+    ]
+    after = _hist_count("search")
+
+    assert [c["type"] for c in chunks] == ["done"]
+    assert chunks[-1]["total_results"] == 0
+    assert after == before + 1
