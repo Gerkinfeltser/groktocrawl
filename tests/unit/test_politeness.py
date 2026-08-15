@@ -5,10 +5,11 @@ Tests the PolitenessManager in isolation, with Valkey caching mocked out
 rate limiting, and the check/delay/block decision flow.
 """
 
+import asyncio
 import os
 import sys
 import time
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -268,6 +269,55 @@ class TestPolitenessCheck:
         # must be strictly larger than the first.
         assert second.delay_seconds > first.delay_seconds
 
+    @pytest.mark.asyncio
+    async def test_readonly_check_does_not_reserve_new_slot(self):
+        """A per-tier read-only check proceeds without reserving another slot."""
+        mgr = PolitenessManager()
+        mgr._enabled = True
+        state = _DomainState(
+            robots_cached_at=time.time(),
+            crawl_delay=1.0,
+            last_request=time.time(),
+            robots_disallowed_paths=[],
+        )
+        mgr._domains["example.com"] = state
+
+        first = await mgr.check("https://example.com/a")
+        assert first.action == "delay"
+        reserved_after_first = state.reserved_slot
+        assert reserved_after_first > 0
+
+        readonly = await mgr.check("https://example.com/a", rate_limit=False)
+        assert readonly.action == "proceed"
+        # The read-only check must not advance the reservation.
+        assert state.reserved_slot == reserved_after_first
+
+    @pytest.mark.asyncio
+    async def test_aborted_delay_rollback_does_not_inflate_next_delay(self):
+        """An aborted delayed request must not leave a stale future reservation."""
+        mgr = PolitenessManager()
+        mgr._enabled = True
+        state = _DomainState(
+            robots_cached_at=time.time(),
+            crawl_delay=5.0,
+            last_request=time.time(),
+            robots_disallowed_paths=[],
+        )
+        mgr._domains["example.com"] = state
+
+        first = await mgr.check("https://example.com/a")
+        assert first.action == "delay"
+
+        # Simulate the request being aborted before its fetch: the caller
+        # rolls back the transient in-memory reservation.
+        mgr.rollback_reservation("https://example.com/a")
+
+        second = await mgr.check("https://example.com/a")
+        assert second.action == "delay"
+        # The correct delay never exceeds crawl_delay; a stale reservation
+        # would inflate it to ~2x crawl_delay.
+        assert second.delay_seconds <= state.crawl_delay
+
 
 # ── get_politeness_metadata ─────────────────────────────────────
 
@@ -323,3 +373,37 @@ class TestDomainExtraction:
 
     def test_invalid_url(self):
         assert PolitenessManager._domain_from_url("not-a-url") == ""
+
+
+# ── fetch.py rollback glue ──────────────────────────────────────
+
+
+class TestPolitenessCheckAndDelayRollback:
+    @pytest.mark.asyncio
+    async def test_aborted_delay_rolls_back_reservation(self):
+        """Cancelling the delay sleep rolls back the transient reservation."""
+        import scraper.fetch as fetch
+        from scraper.politeness import PolitenessResult
+
+        manager = MagicMock()
+        manager.enabled = True
+        manager.check = AsyncMock(
+            return_value=PolitenessResult(
+                action="delay",
+                delay_seconds=30.0,
+                domain="example.com",
+            )
+        )
+        manager.rollback_reservation = MagicMock()
+        manager.get_politeness_metadata = MagicMock(return_value={})
+
+        with patch("scraper.politeness.get_manager", return_value=manager):
+            task = asyncio.create_task(
+                fetch._politeness_check_and_delay("https://example.com/a")
+            )
+            await asyncio.sleep(0.01)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        manager.rollback_reservation.assert_called_once_with("https://example.com/a")

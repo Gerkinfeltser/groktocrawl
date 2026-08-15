@@ -97,6 +97,7 @@ async def _politeness_check_and_delay(
     url: str,
     ignore_robots_txt: bool = False,
     robots_user_agent: str | None = None,
+    rate_limit: bool = True,
 ) -> tuple[bool, dict | None]:
     """Check politeness policy for a URL.
 
@@ -106,6 +107,9 @@ async def _politeness_check_and_delay(
             apply rate limiting.
         robots_user_agent: Custom User-Agent string to use for robots.txt
             evaluation. If None, uses the default bot UA.
+        rate_limit: If False, only robots.txt enforcement runs (read-only for
+            rate limiting). Per-tier checks pass this to avoid reserving a new
+            slot and sleeping before every tier of a single scrape.
 
     Returns (proceed, error_dict):
         (True, None) — proceed with the request
@@ -121,7 +125,10 @@ async def _politeness_check_and_delay(
         return True, None
 
     result = await manager.check(
-        url, ignore_robots_txt=ignore_robots_txt, robots_user_agent=robots_user_agent
+        url,
+        ignore_robots_txt=ignore_robots_txt,
+        robots_user_agent=robots_user_agent,
+        rate_limit=rate_limit,
     )
     if result.action == "blocked":
         logger.info("Politeness blocked %s: %s", url, result.reason)
@@ -141,7 +148,13 @@ async def _politeness_check_and_delay(
             result.delay_seconds,
             result.domain,
         )
-        await asyncio.sleep(result.delay_seconds)
+        try:
+            await asyncio.sleep(result.delay_seconds)
+        except asyncio.CancelledError:
+            # Roll back the in-memory future-slot reservation so an aborted
+            # delayed request does not inflate the next request's delay.
+            manager.rollback_reservation(url)
+            raise
 
     return True, None
 
@@ -167,8 +180,13 @@ async def _enrich_with_politeness(result: dict, url: str) -> dict:
 
 
 async def _politeness_check_for_tier(url: str, tier_label: str) -> dict | None:
-    """Check politeness before a tier. Returns None to proceed, error dict to return."""
-    _proceed, blocked = await _politeness_check_and_delay(url)
+    """Check politeness before a tier. Returns None to proceed, error dict to return.
+
+    Rate limiting is read-only here: the top-level politeness gate already
+    reserved a slot and slept, so per-tier checks must not reserve another
+    slot (which would compound per-scrape latency).
+    """
+    _proceed, blocked = await _politeness_check_and_delay(url, rate_limit=False)
     if blocked:
         logger.info("Politeness blocked %s at %s", url, tier_label)
         return blocked
@@ -362,6 +380,7 @@ async def smart_scrape(
             url,
             ignore_robots_txt=ignore_robots_txt,
             robots_user_agent=robots_user_agent,
+            rate_limit=False,
         )
         if blocked:
             return blocked
@@ -465,6 +484,7 @@ async def smart_scrape(
                 url,
                 ignore_robots_txt=ignore_robots_txt,
                 robots_user_agent=robots_user_agent,
+                rate_limit=False,
             )
             if blocked:
                 return blocked
@@ -482,6 +502,7 @@ async def smart_scrape(
                 url,
                 ignore_robots_txt=ignore_robots_txt,
                 robots_user_agent=robots_user_agent,
+                rate_limit=False,
             )
             if blocked:
                 return blocked
@@ -531,6 +552,7 @@ async def smart_scrape(
         url,
         ignore_robots_txt=ignore_robots_txt,
         robots_user_agent=robots_user_agent,
+        rate_limit=False,
     )
     if blocked:
         return blocked
@@ -579,6 +601,7 @@ async def smart_scrape(
         url,
         ignore_robots_txt=ignore_robots_txt,
         robots_user_agent=robots_user_agent,
+        rate_limit=False,
     )
     if blocked:
         return blocked
