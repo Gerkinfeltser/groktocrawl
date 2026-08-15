@@ -136,13 +136,22 @@ async def _playwright_fetch_unbounded(
         browser = None
         setup_started = time.monotonic()
         try:
-            browser, cloakbrowser = await create_stealth_browser(p, url)
-            context = await create_stealth_context(
-                browser, cloakbrowser=cloakbrowser, **context_kwargs
-            )
-            page = await context.new_page()
-            # Inject cached Cloudflare clearance cookies before navigation
-            await inject_cookies(url, context)
+            try:
+                browser, cloakbrowser = await create_stealth_browser(p, url)
+                context = await create_stealth_context(
+                    browser, cloakbrowser=cloakbrowser, **context_kwargs
+                )
+                page = await context.new_page()
+                # Inject cached Cloudflare clearance cookies before navigation
+                await inject_cookies(url, context)
+            except Exception:
+                observe_elapsed(
+                    _BROWSER_SETUP_SECONDS,
+                    "Browser launch, context, page, and cookie-injection latency",
+                    {},
+                    setup_started,
+                )
+                raise
             observe_elapsed(
                 _BROWSER_SETUP_SECONDS,
                 "Browser launch, context, page, and cookie-injection latency",
@@ -154,7 +163,16 @@ async def _playwright_fetch_unbounded(
             # networkidle because the challenge keeps the network busy. We load the
             # initial HTML fast, detect the challenge, then actively poll for resolution.
             navigation_started = time.monotonic()
-            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            except Exception:
+                observe_elapsed(
+                    _BROWSER_NAVIGATION_SECONDS,
+                    "Browser goto and challenge-resolution latency",
+                    {},
+                    navigation_started,
+                )
+                raise
 
             # Check for bot challenges (Cloudflare / DDoS-Guard)
             title = await page.title()
