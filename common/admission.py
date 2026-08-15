@@ -179,6 +179,12 @@ class AdmissionController:
                 f"wait timed out after {timeout}s"
             )
         except asyncio.CancelledError:
+            # Refund the weight if _drain already granted this waiter before the
+            # cancellation was delivered (future resolved, waiter popped, _active
+            # incremented); otherwise the budget unit leaks forever.
+            if waiter.future.done() and not waiter.future.cancelled():
+                self._active[resource_class] -= waiter.weight
+                self._set_active(resource_class)
             self._drop_waiter(resource_class, waiter)
             self._cancelled.inc({"class": resource_class})
             raise

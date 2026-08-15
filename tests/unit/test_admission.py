@@ -93,6 +93,33 @@ class TestAdmissionController:
         assert controller.queue_depth("llm") == 0
 
     @pytest.mark.asyncio
+    async def test_granted_waiter_then_cancelled_refunds_weight(self):
+        controller = AdmissionController(limits={"llm": 4})
+        await controller.acquire("llm", weight=4)  # saturate the budget
+        assert controller.active("llm") == 4
+
+        waiter = asyncio.create_task(controller.acquire("llm", weight=4))
+        await asyncio.sleep(0.01)
+        assert controller.queue_depth("llm") == 1
+
+        # Release grants the waiter synchronously (future resolved, waiter
+        # popped, _active incremented), then cancel before it resumes so the
+        # CancelledError is delivered at ``await future`` even though the
+        # future already holds a result.
+        controller.release("llm", weight=4)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+        # The granted weight was refunded: _active returns to its prior value
+        # and a subsequent acquire succeeds immediately instead of leaking.
+        assert controller.active("llm") == 0
+        assert controller.queue_depth("llm") == 0
+        await controller.acquire("llm", weight=4)
+        assert controller.active("llm") == 4
+        controller.release("llm", weight=4)
+
+    @pytest.mark.asyncio
     async def test_resource_context_manager_releases(self):
         controller = AdmissionController(limits={"lightweight_fetch": 2})
         async with controller.resource("lightweight_fetch"):
