@@ -243,6 +243,50 @@ async def test_browser_destroy_expired_records_reason(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_browser_execute_expired_records_reason(monkeypatch):
+    import browser_svc.app as bapp
+    from browser_svc.app import BrowserExecuteRequest, SessionData
+
+    bapp._sessions.clear()
+    session = SessionData(object(), object(), object(), ttl=-1, playwright=object())
+    bapp._sessions["sid"] = session
+
+    destroyed: list[tuple[str, str]] = []
+
+    async def fake_destroy(sid, reason="deleted"):
+        destroyed.append((sid, reason))
+
+    monkeypatch.setattr(bapp, "_destroy_session", fake_destroy)
+
+    with pytest.raises(bapp.HTTPException, match="Session expired"):
+        await bapp.execute_action(
+            "sid", BrowserExecuteRequest(action="navigate", url="https://example.test")
+        )
+    assert destroyed == [("sid", "expired")]
+
+
+@pytest.mark.asyncio
+async def test_browser_list_expired_records_reason(monkeypatch):
+    import browser_svc.app as bapp
+    from browser_svc.app import SessionData
+
+    bapp._sessions.clear()
+    session = SessionData(object(), object(), object(), ttl=-1, playwright=object())
+    bapp._sessions["sid"] = session
+
+    destroyed: list[tuple[str, str]] = []
+
+    async def fake_destroy(sid, reason="deleted"):
+        destroyed.append((sid, reason))
+
+    monkeypatch.setattr(bapp, "_destroy_session", fake_destroy)
+
+    result = await bapp.list_browsers()
+    assert destroyed == [("sid", "expired")]
+    assert result.success is True
+
+
+@pytest.mark.asyncio
 async def test_browser_create_success_records_active_sessions(monkeypatch):
     from unittest.mock import AsyncMock, MagicMock
 
