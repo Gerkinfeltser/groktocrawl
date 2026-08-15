@@ -373,7 +373,9 @@ async def create_browser(req: BrowserCreateRequest):
         logger.info("Created browser session %s (TTL: %ds)", session_id, req.ttl)
         return BrowserCreateResponse(id=session_id)
     except Exception as e:
-        _record_session_destroyed("create_failed")
+        # The session was never added to ``_sessions``, so it must not be
+        # counted as destroyed. The failure is already observable via the
+        # flat ``browser_sessions_created_total`` counter + the 500 response.
         await _cleanup_resources(session_id, page, context, browser, p)
         logger.error("Failed to create browser session: %s", e)
         raise HTTPException(
