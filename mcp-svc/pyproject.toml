@@ -12,8 +12,9 @@ dependencies = [
 
 [tool.setuptools]
 py-modules = [
-    'mcp_server',
+    'browser_handler',
     'groktocrawl_client',
+    'mcp_server',
     'session_store',
 ]
 

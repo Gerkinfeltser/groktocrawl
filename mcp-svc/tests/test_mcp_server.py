@@ -129,15 +129,15 @@ class TestTransportSecurity:
 
 
 class TestToolDiscovery:
-    """VAL-MCP-B01: tools/list returns exactly 20 tools."""
+    """VAL-MCP-B01: tools/list returns exactly 35 tools."""
 
     async def test_tool_count(self):
-        """tools/list returns exactly 20 tools."""
+        """tools/list returns exactly 35 tools."""
         tools = await mcp.list_tools()
-        assert len(tools) == 20, f"Expected 20 tools, got {len(tools)}"
+        assert len(tools) == 35, f"Expected 35 tools, got {len(tools)}"
 
     async def test_all_tool_names(self):
-        """All 20 expected tool names are present."""
+        """All 35 expected tool names are present."""
         tools = await mcp.list_tools()
         names = {t.name for t in tools}
         expected = {
@@ -147,9 +147,11 @@ class TestToolDiscovery:
             "get_crawl_status",
             "cancel_crawl",
             "get_crawl_errors",
+            "get_active_crawls",
             "map",
             "agent",
             "get_agent_status",
+            "cancel_agent",
             "answer",
             "extract",
             "get_extract_status",
@@ -159,8 +161,21 @@ class TestToolDiscovery:
             "generate_llmstxt",
             "get_activity",
             "get_batch_scrape_status",
+            "cancel_batch_scrape",
+            "get_batch_scrape_errors",
             "get_llmstxt_status",
             "resolve_citations",
+            "parse",
+            "create_browser_session",
+            "browser_execute",
+            "list_browser_sessions",
+            "destroy_browser_session",
+            "create_monitor",
+            "list_monitors",
+            "get_monitor",
+            "update_monitor",
+            "run_monitor",
+            "delete_monitor",
         }
         missing = expected - names
         extra = names - expected
@@ -186,7 +201,13 @@ class TestToolDiscovery:
     async def test_async_tools_mention_job_id(self):
         """VAL-MCP-F03: async tools mention job ID + polling in description."""
         tools = await mcp.list_tools()
-        async_tools = {"crawl", "extract", "batch_scrape", "generate_llmstxt"}
+        async_tools = {
+            "crawl",
+            "extract",
+            "batch_scrape",
+            "generate_llmstxt",
+            "agent",
+        }
         for t in tools:
             if t.name in async_tools:
                 desc_lower = t.description.lower()
@@ -227,11 +248,20 @@ class TestToolDiscovery:
             "agent": "prompt",
             "answer": "query",
             "extract": "urls",
-            "enrich": "url",
             "find_similar": "url",
             "batch_scrape": "urls",
             "generate_llmstxt": "url",
             "resolve_citations": "text",
+            "parse": "file_url",
+            "cancel_agent": "job_id",
+            "cancel_batch_scrape": "job_id",
+            "get_batch_scrape_errors": "job_id",
+            "browser_execute": "session_id",
+            "destroy_browser_session": "session_id",
+            "get_monitor": "monitor_id",
+            "update_monitor": "monitor_id",
+            "run_monitor": "monitor_id",
+            "delete_monitor": "monitor_id",
         }
 
         for t in tools:
@@ -265,10 +295,23 @@ class TestToolAnnotations:
             "get_agent_status",
             "get_extract_status",
             "get_crawl_errors",
+            "get_active_crawls",
             "get_activity",
             "get_batch_scrape_status",
+            "get_batch_scrape_errors",
             "get_llmstxt_status",
             "resolve_citations",
+            # Job/session creators are not destructive — they allocate
+            # server-side resources without destroying anything.
+            "crawl",
+            "batch_scrape",
+            "generate_llmstxt",
+            "parse",
+            "create_browser_session",
+            "create_monitor",
+            "list_browser_sessions",
+            "list_monitors",
+            "get_monitor",
         }
         for t in tools:
             if t.name in readonly_tools:
@@ -282,13 +325,14 @@ class TestToolAnnotations:
                 )
 
     async def test_destructive_tools(self):
-        """Tools that modify state have destructiveHint=True."""
+        """Tools that cancel/delete/destroy have destructiveHint=True."""
         tools = await mcp.list_tools()
         destructive_tools = {
-            "crawl",
             "cancel_crawl",
-            "batch_scrape",
-            "generate_llmstxt",
+            "cancel_agent",
+            "cancel_batch_scrape",
+            "destroy_browser_session",
+            "delete_monitor",
         }
         for t in tools:
             if t.name in destructive_tools:
@@ -299,6 +343,25 @@ class TestToolAnnotations:
                 )
                 assert anno.readOnlyHint is False, (
                     f"Tool {t.name}: expected readOnlyHint=False, got {anno.readOnlyHint}"
+                )
+
+    async def test_neutral_tools(self):
+        """Tools that modify state non-destructively carry neither hint."""
+        tools = await mcp.list_tools()
+        neutral_tools = {
+            "browser_execute",
+            "update_monitor",
+            "run_monitor",
+        }
+        for t in tools:
+            if t.name in neutral_tools:
+                anno = t.annotations
+                assert anno is not None, f"Tool {t.name} missing annotations"
+                assert anno.readOnlyHint is False, (
+                    f"Tool {t.name}: expected readOnlyHint=False, got {anno.readOnlyHint}"
+                )
+                assert anno.destructiveHint is False, (
+                    f"Tool {t.name}: expected destructiveHint=False, got {anno.destructiveHint}"
                 )
 
     async def test_tool_annotations_consistent(self):
@@ -340,6 +403,19 @@ class TestContentBlocks:
             },
         )
         result = await mcp.call_tool("crawl", {"url": "https://example.com"})
+        data = json.loads(_text(result))
+        assert data.get("success") is True
+        assert "id" in data
+
+    async def test_agent_returns_json_with_id(self, monkeypatch):
+        """Agent (job-creating tool) returns the job ID immediately."""
+        _patch_client(
+            monkeypatch,
+            {
+                "create_agent": {"success": True, "id": "agent-job-123"},
+            },
+        )
+        result = await mcp.call_tool("agent", {"prompt": "research something"})
         data = json.loads(_text(result))
         assert data.get("success") is True
         assert "id" in data
@@ -477,27 +553,41 @@ class TestToolCallRouting:
         assert captured.get("num_sources") == 3
 
     async def test_agent_passes_model_override(self, monkeypatch):
-        """Agent passes model override through to client."""
+        """Agent passes model override + research params through to client."""
         captured: dict[str, Any] = {}
 
-        async def _fake_agent(**kwargs: Any) -> dict:
+        async def _fake_create_agent(**kwargs: Any) -> dict:
             captured.update(kwargs)
-            return {"status": "completed", "data": {"result": "ok"}}
+            return {"success": True, "id": "agent-1"}
 
         monkeypatch.setattr(
             __import__("mcp_server", fromlist=["_client"])._client,
-            "agent",
-            _fake_agent,
+            "create_agent",
+            _fake_create_agent,
         )
         await mcp.call_tool(
             "agent",
             {
                 "prompt": "test research",
                 "model": "gpt-4o",
+                "urls": ["https://a.com"],
+                "output_schema": {"type": "object"},
+                "citation_style": "compact",
+                "max_credits": 5,
+                "include_images": True,
+                "force_fresh": True,
+                "search_type": "focused",
             },
         )
         assert captured.get("prompt") == "test research"
         assert captured.get("model") == "gpt-4o"
+        assert captured.get("urls") == ["https://a.com"]
+        assert captured.get("output_schema") == {"type": "object"}
+        assert captured.get("citation_style") == "compact"
+        assert captured.get("max_credits") == 5
+        assert captured.get("include_images") is True
+        assert captured.get("force_fresh") is True
+        assert captured.get("search_type") == "focused"
 
     async def test_map_passes_limit(self, monkeypatch):
         """Map passes limit through."""
@@ -613,6 +703,370 @@ class TestToolCallRouting:
         assert captured.get("text") == "See [1]"
         assert captured.get("sources") == [{"url": "https://a.com", "title": "A"}]
         assert captured.get("style") == "compact"
+
+    # ── New surface routing ──
+
+    async def test_crawl_passes_path_filters(self, monkeypatch):
+        """Crawl passes include/exclude paths and concurrency through."""
+        captured: dict[str, Any] = {}
+
+        async def _fake_create_crawl(**kwargs: Any) -> dict:
+            captured.update(kwargs)
+            return {"success": True, "id": "crawl-1"}
+
+        monkeypatch.setattr(
+            __import__("mcp_server", fromlist=["_client"])._client,
+            "create_crawl",
+            _fake_create_crawl,
+        )
+        await mcp.call_tool(
+            "crawl",
+            {
+                "url": "https://example.com",
+                "include_paths": ["/docs"],
+                "exclude_paths": ["/admin"],
+                "sitemap": "only",
+                "ignore_robots_txt": True,
+                "max_concurrency": 10,
+                "delay": 0.5,
+                "allow_subdomains": True,
+                "allow_external_links": True,
+                "prompt": "crawl the docs section",
+            },
+        )
+        assert captured.get("include_paths") == ["/docs"]
+        assert captured.get("exclude_paths") == ["/admin"]
+        assert captured.get("sitemap") == "only"
+        assert captured.get("ignore_robots_txt") is True
+        assert captured.get("max_concurrency") == 10
+        assert captured.get("delay") == 0.5
+        assert captured.get("allow_subdomains") is True
+        assert captured.get("allow_external_links") is True
+        assert captured.get("prompt") == "crawl the docs section"
+
+    async def test_search_passes_sources_and_categories(self, monkeypatch):
+        """Search passes sources/categories/retrieval_mode through."""
+        captured: dict[str, Any] = {}
+
+        async def _fake_search(**kwargs: Any) -> dict:
+            captured.update(kwargs)
+            return {"data": {"web": []}}
+
+        monkeypatch.setattr(
+            __import__("mcp_server", fromlist=["_client"])._client,
+            "search",
+            _fake_search,
+        )
+        await mcp.call_tool(
+            "search",
+            {
+                "query": "rust",
+                "sources": ["github"],
+                "categories": ["research"],
+                "retrieval_mode": "hybrid",
+                "output_schema": {"type": "object"},
+                "system_prompt": "be concise",
+            },
+        )
+        assert captured.get("sources") == ["github"]
+        assert captured.get("categories") == ["research"]
+        assert captured.get("retrieval_mode") == "hybrid"
+        assert captured.get("output_schema") == {"type": "object"}
+        assert captured.get("system_prompt") == "be concise"
+
+    async def test_answer_passes_model_override(self, monkeypatch):
+        """Answer passes model/output_schema/citation_style through."""
+        captured: dict[str, Any] = {}
+
+        async def _fake_answer(**kwargs: Any) -> dict:
+            captured.update(kwargs)
+            return {"answer": "ok", "sources": []}
+
+        monkeypatch.setattr(
+            __import__("mcp_server", fromlist=["_client"])._client,
+            "answer",
+            _fake_answer,
+        )
+        await mcp.call_tool(
+            "answer",
+            {
+                "query": "q",
+                "model": "gpt-4o",
+                "output_schema": {"type": "object"},
+                "citation_style": "compact",
+                "search_type": "auto",
+                "retrieval_mode": "semantic",
+            },
+        )
+        assert captured.get("model") == "gpt-4o"
+        assert captured.get("output_schema") == {"type": "object"}
+        assert captured.get("citation_style") == "compact"
+        assert captured.get("search_type") == "auto"
+        assert captured.get("retrieval_mode") == "semantic"
+
+    async def test_cancel_agent_routing(self, monkeypatch):
+        """cancel_agent passes job_id through."""
+        captured: dict[str, Any] = {}
+
+        async def _fake_cancel_agent(job_id: str) -> dict:
+            captured["job_id"] = job_id
+            return {"success": True}
+
+        monkeypatch.setattr(
+            __import__("mcp_server", fromlist=["_client"])._client,
+            "cancel_agent",
+            _fake_cancel_agent,
+        )
+        await mcp.call_tool("cancel_agent", {"job_id": "agent-1"})
+        assert captured.get("job_id") == "agent-1"
+
+    async def test_cancel_batch_scrape_routing(self, monkeypatch):
+        """cancel_batch_scrape passes job_id through."""
+        captured: dict[str, Any] = {}
+
+        async def _fake_cancel_batch_scrape(job_id: str) -> dict:
+            captured["job_id"] = job_id
+            return {"success": True}
+
+        monkeypatch.setattr(
+            __import__("mcp_server", fromlist=["_client"])._client,
+            "cancel_batch_scrape",
+            _fake_cancel_batch_scrape,
+        )
+        await mcp.call_tool("cancel_batch_scrape", {"job_id": "batch-1"})
+        assert captured.get("job_id") == "batch-1"
+
+    async def test_get_active_crawls_routing(self, monkeypatch):
+        """get_active_crawls calls the client with no args."""
+        captured: dict[str, Any] = {}
+
+        async def _fake_get_active_crawls() -> dict:
+            captured["called"] = True
+            return {"data": []}
+
+        monkeypatch.setattr(
+            __import__("mcp_server", fromlist=["_client"])._client,
+            "get_active_crawls",
+            _fake_get_active_crawls,
+        )
+        await mcp.call_tool("get_active_crawls", {})
+        assert captured.get("called") is True
+
+    async def test_parse_routing(self, monkeypatch):
+        """parse passes file_url through."""
+        captured: dict[str, Any] = {}
+
+        async def _fake_parse(file_url: str) -> dict:
+            captured["file_url"] = file_url
+            return {"success": True, "data": {"markdown": "# doc"}}
+
+        monkeypatch.setattr(
+            __import__("mcp_server", fromlist=["_client"])._client,
+            "parse",
+            _fake_parse,
+        )
+        await mcp.call_tool("parse", {"file_url": "https://x.com/doc.pdf"})
+        assert captured.get("file_url") == "https://x.com/doc.pdf"
+
+    async def test_create_browser_session_routing(self, monkeypatch):
+        """create_browser_session delegates to the browser handler."""
+        captured: dict[str, Any] = {}
+
+        async def _fake_create_session(ttl: int = 300) -> dict:
+            captured["ttl"] = ttl
+            return {"id": "session-1"}
+
+        monkeypatch.setattr(
+            __import__("mcp_server", fromlist=["_browser_handler"])._browser_handler,
+            "create_session",
+            _fake_create_session,
+        )
+        await mcp.call_tool("create_browser_session", {"ttl": 600})
+        assert captured.get("ttl") == 600
+
+    async def test_browser_execute_routing(self, monkeypatch):
+        """browser_execute delegates to the browser handler with action."""
+        captured: dict[str, Any] = {}
+
+        async def _fake_execute_action(
+            session_id: str, action: str, **kwargs: Any
+        ) -> dict:
+            captured["session_id"] = session_id
+            captured["action"] = action
+            captured.update(kwargs)
+            return {"result": "ok"}
+
+        monkeypatch.setattr(
+            __import__("mcp_server", fromlist=["_browser_handler"])._browser_handler,
+            "execute_action",
+            _fake_execute_action,
+        )
+        await mcp.call_tool(
+            "browser_execute",
+            {"session_id": "s1", "action": "navigate", "url": "https://a.com"},
+        )
+        assert captured.get("session_id") == "s1"
+        assert captured.get("action") == "navigate"
+        assert captured.get("url") == "https://a.com"
+
+    async def test_destroy_browser_session_routing(self, monkeypatch):
+        """destroy_browser_session delegates to the browser handler."""
+        captured: dict[str, Any] = {}
+
+        async def _fake_destroy_session(session_id: str) -> dict:
+            captured["session_id"] = session_id
+            return {"success": True}
+
+        monkeypatch.setattr(
+            __import__("mcp_server", fromlist=["_browser_handler"])._browser_handler,
+            "destroy_session",
+            _fake_destroy_session,
+        )
+        await mcp.call_tool("destroy_browser_session", {"session_id": "s1"})
+        assert captured.get("session_id") == "s1"
+
+    async def test_create_monitor_routing(self, monkeypatch):
+        """create_monitor passes search config through."""
+        captured: dict[str, Any] = {}
+
+        async def _fake_monitor_create(**kwargs: Any) -> dict:
+            captured.update(kwargs)
+            return {"id": "m-1"}
+
+        monkeypatch.setattr(
+            __import__("mcp_server", fromlist=["_client"])._client,
+            "monitor_create",
+            _fake_monitor_create,
+        )
+        await mcp.call_tool(
+            "create_monitor",
+            {
+                "monitor_type": "search",
+                "query": "rust",
+                "sources": ["github"],
+                "num_results": 5,
+            },
+        )
+        assert captured.get("monitor_type") == "search"
+        assert captured.get("search_config") == {
+            "query": "rust",
+            "sources": ["github"],
+            "numResults": 5,
+        }
+
+    async def test_update_monitor_routing(self, monkeypatch):
+        """update_monitor passes fields through."""
+        captured: dict[str, Any] = {}
+
+        async def _fake_monitor_update(**kwargs: Any) -> dict:
+            captured.update(kwargs)
+            return {"success": True}
+
+        monkeypatch.setattr(
+            __import__("mcp_server", fromlist=["_client"])._client,
+            "monitor_update",
+            _fake_monitor_update,
+        )
+        await mcp.call_tool(
+            "update_monitor", {"monitor_id": "m-1", "schedule": "0 0 * * *"}
+        )
+        assert captured.get("monitor_id") == "m-1"
+        assert captured.get("schedule") == "0 0 * * *"
+
+    async def test_update_monitor_preserves_existing_query(self, monkeypatch):
+        """update_monitor merges the existing query on partial search updates."""
+        import mcp_server
+
+        updated: dict[str, Any] = {}
+
+        async def _fake_monitor_get(monitor_id: str) -> dict:
+            return {
+                "id": monitor_id,
+                "monitor_type": "search",
+                "search_config": {"query": "rust", "numResults": 5},
+            }
+
+        async def _fake_monitor_update(**kwargs: Any) -> dict:
+            updated.update(kwargs)
+            return {"success": True}
+
+        monkeypatch.setattr(mcp_server._client, "monitor_get", _fake_monitor_get)
+        monkeypatch.setattr(mcp_server._client, "monitor_update", _fake_monitor_update)
+
+        await mcp.call_tool(
+            "update_monitor",
+            {"monitor_id": "m-1", "sources": ["github"]},
+        )
+        # Existing query preserved; sources merged in.
+        assert updated.get("search_config") == {
+            "query": "rust",
+            "sources": ["github"],
+        }
+
+    async def test_update_monitor_search_fields_require_query(self, monkeypatch):
+        """update_monitor refuses search-field updates when no query exists."""
+        import mcp_server
+
+        async def _fake_monitor_get(monitor_id: str) -> dict:
+            return {"id": monitor_id, "monitor_type": "scrape", "search_config": None}
+
+        monkeypatch.setattr(mcp_server._client, "monitor_get", _fake_monitor_get)
+
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        with pytest.raises(ToolError, match="no search query"):
+            await mcp.call_tool(
+                "update_monitor",
+                {"monitor_id": "m-1", "sources": ["github"]},
+            )
+
+    async def test_create_monitor_requires_query_for_search(self, monkeypatch):
+        """create_monitor with search type but no query raises a clear error."""
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        with pytest.raises(ToolError, match="query is required"):
+            await mcp.call_tool(
+                "create_monitor", {"monitor_type": "search", "query": ""}
+            )
+
+    async def test_create_monitor_requires_url_for_scrape(self, monkeypatch):
+        """create_monitor with scrape type but no url raises a clear error."""
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        with pytest.raises(ToolError, match="url is required"):
+            await mcp.call_tool("create_monitor", {"monitor_type": "scrape", "url": ""})
+
+    async def test_run_monitor_routing(self, monkeypatch):
+        """run_monitor passes monitor_id through."""
+        captured: dict[str, Any] = {}
+
+        async def _fake_monitor_run(monitor_id: str) -> dict:
+            captured["monitor_id"] = monitor_id
+            return {"id": "m-1"}
+
+        monkeypatch.setattr(
+            __import__("mcp_server", fromlist=["_client"])._client,
+            "monitor_run",
+            _fake_monitor_run,
+        )
+        await mcp.call_tool("run_monitor", {"monitor_id": "m-1"})
+        assert captured.get("monitor_id") == "m-1"
+
+    async def test_delete_monitor_routing(self, monkeypatch):
+        """delete_monitor passes monitor_id through."""
+        captured: dict[str, Any] = {}
+
+        async def _fake_monitor_delete(monitor_id: str) -> dict:
+            captured["monitor_id"] = monitor_id
+            return {"success": True}
+
+        monkeypatch.setattr(
+            __import__("mcp_server", fromlist=["_client"])._client,
+            "monitor_delete",
+            _fake_monitor_delete,
+        )
+        await mcp.call_tool("delete_monitor", {"monitor_id": "m-1"})
+        assert captured.get("monitor_id") == "m-1"
 
 
 # ── Error Handling (VAL-MCP-G01) ──────────────────────────────────
@@ -794,6 +1248,69 @@ class TestErrorHandling:
         data = json.loads(text)
         assert data.get("success") is True
         assert "data" in data
+
+    async def test_failed_job_status_raises_tool_error(self, monkeypatch):
+        """A failed background job (status=failed + error) raises ToolError.
+
+        Status endpoints return HTTP 200 with ``success: true`` even when
+        the underlying job failed; the MCP server must still surface the
+        failure as isError:true so clients can detect it programmatically.
+        """
+        _patch_client(
+            monkeypatch,
+            {
+                "get_agent_status": {
+                    "success": True,
+                    "status": "failed",
+                    "error": "Research pipeline exhausted credits",
+                },
+            },
+        )
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        with pytest.raises(ToolError) as exc_info:
+            await mcp.call_tool("get_agent_status", {"job_id": "agent-1"})
+        err_text = str(exc_info.value)
+        assert "failed" in err_text.lower()
+        assert "credits" in err_text.lower()
+
+    async def test_cancelled_job_status_not_error(self, monkeypatch):
+        """A cancelled job is informative, not an error.
+
+        ``status: cancelled`` returns normally so the client can see the
+        terminal state without a spurious error.
+        """
+        _patch_client(
+            monkeypatch,
+            {
+                "get_crawl_status": {
+                    "success": True,
+                    "status": "cancelled",
+                    "error": None,
+                },
+            },
+        )
+        result = await mcp.call_tool("get_crawl_status", {"job_id": "crawl-1"})
+        data = json.loads(_text(result))
+        assert data.get("status") == "cancelled"
+
+    async def test_retry_scheduled_status_not_error(self, monkeypatch):
+        """A retry_scheduled job is pending, not an error."""
+        _patch_client(
+            monkeypatch,
+            {
+                "get_agent_status": {
+                    "success": True,
+                    "status": "retry_scheduled",
+                    "retryable": True,
+                    "retry_reason": "RATE_LIMITED",
+                    "error": None,
+                },
+            },
+        )
+        result = await mcp.call_tool("get_agent_status", {"job_id": "agent-1"})
+        data = json.loads(_text(result))
+        assert data.get("status") == "retry_scheduled"
 
 
 # ── Session Consistency (VAL-MCP-B04) ─────────────────────────────
@@ -1070,7 +1587,7 @@ class TestDockerDeployment:
         assert "EXPOSE 8002" in content, "Dockerfile must EXPOSE port 8002"
 
     def test_dockerfile_copies_all_source_files(self):
-        """Dockerfile copies mcp_server.py, groktocrawl_client.py, session_store.py."""
+        """Dockerfile copies mcp_server.py, groktocrawl_client.py, session_store.py, browser_handler.py."""
         import os
 
         dockerfile_path = os.path.join(os.path.dirname(__file__), "..", "Dockerfile")
@@ -1079,6 +1596,7 @@ class TestDockerDeployment:
         assert "COPY mcp_server.py" in content
         assert "COPY groktocrawl_client.py" in content
         assert "COPY session_store.py" in content
+        assert "COPY browser_handler.py" in content
 
     def test_dockerfile_installs_pinned_dependencies(self):
         """Dockerfile installs mcp, httpx, pydantic with pinned versions."""
@@ -1184,4 +1702,44 @@ class TestDockerDeployment:
             content = f.read()
         assert "session_store" in content, (
             "pyproject.toml must include session_store in py-modules"
+        )
+
+    def test_pyproject_includes_browser_handler_module(self):
+        """pyproject.toml lists browser_handler as a py-module."""
+        import os
+
+        pyproject_path = os.path.join(os.path.dirname(__file__), "..", "pyproject.toml")
+        with open(pyproject_path) as f:
+            content = f.read()
+        assert "browser_handler" in content, (
+            "pyproject.toml must include browser_handler in py-modules"
+        )
+
+
+# ── MCP surface coverage gate (mirrors CLI coverage policy) ────────
+
+
+class TestMCPSurfaceCoverage:
+    """scripts/check-mcp-coverage.py must pass.
+
+    Every expressible agent-svc /v2 endpoint needs an MCP tool; the
+    script is the drift guard (same policy as check-cli-coverage.py for
+    the CLI surface).
+    """
+
+    def test_check_mcp_coverage_passes(self):
+        import os
+        import subprocess
+        import sys
+
+        script = os.path.join(
+            os.path.dirname(__file__), "..", "..", "scripts", "check-mcp-coverage.py"
+        )
+        proc = subprocess.run(
+            [sys.executable, script],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, (
+            f"check-mcp-coverage.py failed:\n{proc.stdout}\n{proc.stderr}"
         )

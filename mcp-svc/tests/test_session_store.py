@@ -94,6 +94,32 @@ async def test_get_returns_none_for_expired(store):
 
 
 @pytest.mark.asyncio
+async def test_per_session_ttl_short_circuits_global_ttl(store):
+    """A per-session ttl expires the session before the store-wide TTL."""
+    # store has TTL 2s; a per-session TTL of 1s must win.
+    sid_short = await store.create({"short": True}, ttl=1)
+    sid_long = await store.create({"long": True}, ttl=10)
+    assert await store.get(sid_short) is not None
+    await asyncio.sleep(1.5)
+    assert await store.get(sid_short) is None
+    assert await store.get(sid_long) is not None
+
+
+@pytest.mark.asyncio
+async def test_sweep_honors_per_session_ttl(store):
+    """sweep() removes sessions expired by their per-session ttl."""
+    sid_short = await store.create({"short": True}, ttl=1)
+    sid_long = await store.create({"long": True}, ttl=10)
+    # Stop background sweep so it doesn't pre-clean expired sessions
+    await store.stop_sweep()
+    await asyncio.sleep(1.5)
+    removed = await store.sweep()
+    assert removed == 1
+    assert await store.get(sid_short) is None
+    assert await store.get(sid_long) is not None
+
+
+@pytest.mark.asyncio
 async def test_get_returns_copy_not_reference(store):
     """get() returns a shallow copy — mutations don't affect the store."""
     sid = await store.create({"key": "original"})
