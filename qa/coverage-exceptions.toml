@@ -19,3 +19,10 @@ reviewer = "magnus919"
 expires = "2026-12-31"
 reason = "Issue #528 browser session lifecycle telemetry. This module runs in the separate browser-svc container, so the integration lane's in-process agent-svc pytest cannot execute it, and playwright is not installed in the integration container. The changed lines are covered >=90% by tests/unit/test_stage_metrics_service_modules.py in the Fast Tests lane."
 reviewed = true
+
+[exceptions."scraper-svc/scraper/fetch.py"]
+issue = "#530"
+reviewer = "magnus919"
+expires = "2026-12-31"
+reason = "Issue #530 lightweight-only scrape short-circuit. This module runs in the separate scraper-svc container, so the integration lane's in-process agent-svc pytest cannot execute it, and curl_cffi/playwright are not installed in the integration container. The changed lines are covered >=90% by tests/unit/test_lightweight_only.py in the Fast Tests lane."
+reviewed = true

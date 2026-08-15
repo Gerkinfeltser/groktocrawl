@@ -45,6 +45,17 @@ research-memory lookups (`fresh`/`aging`/`stale`/`miss`/`error`) and for
 scrape-cache lookups (`hit`/`miss`/`stale`/`error`) are shared with the
 cache-freshness model so they compose across services.
 
+## Deduplication and retry counters
+
+`agent-svc` exports two counters so deduplicated fetches and explicit retries
+are observable separately. Label values are bounded, enum-like constants; raw
+URLs, content, and tokens are never metric labels.
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `fetches_deduped_total` | `reason` (`rerank_reuse`) | Scrapes avoided by reusing source content already fetched during ranking |
+| `scrape_retries_total` | `stage` (`generic_to_browser`) | Explicit scrape retries by stage transition |
+
 ## Verification
 
 1. Validate the deployment's Prometheus configuration and rules with its native check commands.
