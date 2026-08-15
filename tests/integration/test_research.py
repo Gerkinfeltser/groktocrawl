@@ -81,16 +81,16 @@ class TestScrapeUrls:
             "data": {"markdown": "# Hello", "source": "llms.txt"},
         }
 
-        docs, details = await _scrape_urls(
+        artifacts = await _scrape_urls(
             ["https://a.com"],
             mock_scraper,
             min_sources=1,
             max_attempts=5,
         )
 
-        assert len(docs) == 1
-        assert "a.com" in docs[0]
-        assert details[0]["url"] == "https://a.com"
+        assert len(artifacts) == 1
+        assert "a.com" in artifacts[0].to_document()
+        assert artifacts[0].url == "https://a.com"
 
     @pytest.mark.asyncio
     async def test_respects_min_sources(self, mock_scraper):
@@ -101,14 +101,14 @@ class TestScrapeUrls:
             "data": {"markdown": "# Content", "source": "test"},
         }
 
-        docs, _details = await _scrape_urls(
+        artifacts = await _scrape_urls(
             ["https://a.com", "https://b.com", "https://c.com"],
             mock_scraper,
             min_sources=2,
             max_attempts=5,
         )
 
-        assert len(docs) >= 2
+        assert len(artifacts) >= 2
 
     @pytest.mark.asyncio
     async def test_handles_scrape_failures(self, mock_scraper):
@@ -119,15 +119,15 @@ class TestScrapeUrls:
             {"success": True, "data": {"markdown": "# Content", "source": "test"}},
         ]
 
-        docs, details = await _scrape_urls(
+        artifacts = await _scrape_urls(
             ["https://fail.com", "https://ok.com"],
             mock_scraper,
             min_sources=1,
             max_attempts=5,
         )
 
-        assert len(docs) == 1
-        assert details[0]["url"] == "https://ok.com"
+        assert len(artifacts) == 1
+        assert artifacts[0].url == "https://ok.com"
 
     @pytest.mark.asyncio
     async def test_handles_exception(self, mock_scraper):
@@ -135,13 +135,13 @@ class TestScrapeUrls:
 
         mock_scraper.scrape.side_effect = RuntimeError("network error")
 
-        docs, _details = await _scrape_urls(
+        artifacts = await _scrape_urls(
             ["https://err.com"],
             mock_scraper,
             min_sources=1,
             max_attempts=5,
         )
-        assert len(docs) == 0
+        assert len(artifacts) == 0
 
 
 class TestRunResearch:
@@ -1105,7 +1105,10 @@ class TestRunAnswerStream:
             patch("agent.research.loop.SearXNGClient", return_value=searxng),
             patch("agent.research.loop.ScraperClient", return_value=scraper),
             patch("agent.research.loop.LLMClient", return_value=llm),
-            patch("agent.research.rerank._rerank_answer_sources") as mock_rerank,
+            patch(
+                "agent.research.rerank._rerank_answer_sources",
+                new=AsyncMock(return_value=([], [])),
+            ) as mock_rerank,
         ):
             events = []
             async for event in run_answer_stream(
@@ -1113,7 +1116,7 @@ class TestRunAnswerStream:
             ):
                 events.append(event)
 
-        mock_rerank.assert_not_called()
+        mock_rerank.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_semantic_retrieval_mode(self):
@@ -1157,7 +1160,10 @@ class TestRunAnswerStream:
             patch("agent.research.loop.SearXNGClient", return_value=searxng),
             patch("agent.research.loop.ScraperClient", return_value=scraper),
             patch("agent.research.loop.LLMClient", return_value=llm),
-            patch("agent.research.rerank._rerank_answer_sources") as mock_rerank,
+            patch(
+                "agent.research.rerank._rerank_answer_sources",
+                new=AsyncMock(return_value=([], [])),
+            ) as mock_rerank,
         ):
             events = []
             async for event in run_answer_stream(
@@ -1165,7 +1171,7 @@ class TestRunAnswerStream:
             ):
                 events.append(event)
 
-        mock_rerank.assert_called_once()
+        mock_rerank.assert_awaited_once()
 
 
 class TestRunRichSearch:
@@ -1405,7 +1411,7 @@ class TestRerankAnswerSources:
             {"url": "https://b.com", "title": "B", "description": "desc b"},
         ]
 
-        result = await _rerank_answer_sources(
+        ranked, artifacts = await _rerank_answer_sources(
             search_results=search_results,
             query="test query",
             retrieval_mode="keyword",
@@ -1414,14 +1420,15 @@ class TestRerankAnswerSources:
             limit=5,
         )
 
-        assert result == search_results
+        assert ranked == search_results
+        assert artifacts == []
 
     @pytest.mark.asyncio
     async def test_no_results_returns_empty(self):
         """Verify empty search_results returns []."""
         from agent.research import _rerank_answer_sources
 
-        result = await _rerank_answer_sources(
+        ranked, artifacts = await _rerank_answer_sources(
             search_results=[],
             query="test",
             retrieval_mode="semantic",
@@ -1430,7 +1437,8 @@ class TestRerankAnswerSources:
             limit=5,
         )
 
-        assert result == []
+        assert ranked == []
+        assert artifacts == []
 
     @pytest.mark.asyncio
     async def test_semantic_mode(self):
@@ -1464,7 +1472,7 @@ class TestRerankAnswerSources:
             patch("agent.research.rerank.SemanticClient", return_value=mock_semantic),
             patch("agent.research.rerank.ScraperClient", return_value=mock_scraper),
         ):
-            result = await _rerank_answer_sources(
+            ranked, artifacts = await _rerank_answer_sources(
                 search_results=search_results,
                 query="test",
                 retrieval_mode="semantic",
@@ -1474,8 +1482,9 @@ class TestRerankAnswerSources:
             )
 
         # Result A (higher similarity) should be first
-        assert len(result) == 2
-        assert result[0]["url"] == "https://a.com"
+        assert len(ranked) == 2
+        assert ranked[0]["url"] == "https://a.com"
+        assert len(artifacts) == 2
         mock_semantic.embed.assert_called_once()
 
     @pytest.mark.asyncio
@@ -1503,7 +1512,7 @@ class TestRerankAnswerSources:
             patch("agent.research.rerank.SemanticClient", return_value=mock_semantic),
             patch("agent.research.rerank.ScraperClient", return_value=mock_scraper),
         ):
-            result = await _rerank_answer_sources(
+            ranked, artifacts = await _rerank_answer_sources(
                 search_results=search_results,
                 query="test",
                 retrieval_mode="vector",
@@ -1512,8 +1521,9 @@ class TestRerankAnswerSources:
                 limit=5,
             )
 
-        assert len(result) == 2
-        assert result[0]["url"] == "https://vector-result.com"
+        assert len(ranked) == 2
+        assert ranked[0]["url"] == "https://vector-result.com"
+        assert artifacts == []
         mock_semantic.search_vector.assert_called_once()
 
     @pytest.mark.asyncio
@@ -1535,14 +1545,23 @@ class TestRerankAnswerSources:
         )
         mock_semantic.close = AsyncMock()
 
-        mock_scraper = MagicMock()
-        mock_scraper.close = AsyncMock()
+        class _Scraper:
+            async def scrape_with_fallback(self, url: str, **kwargs) -> dict:
+                return {
+                    "success": True,
+                    "data": {"markdown": f"content {url}", "source": "test"},
+                }
+
+            async def close(self) -> None:
+                pass
+
+        mock_scraper = _Scraper()
 
         with (
             patch("agent.research.rerank.SemanticClient", return_value=mock_semantic),
             patch("agent.research.rerank.ScraperClient", return_value=mock_scraper),
         ):
-            result = await _rerank_answer_sources(
+            ranked, artifacts = await _rerank_answer_sources(
                 search_results=search_results,
                 query="test",
                 retrieval_mode="hybrid_vector",
@@ -1552,6 +1571,8 @@ class TestRerankAnswerSources:
             )
 
         # Should have 3 unique results (a.com, b.com, c.com), deduplicated
-        assert len(result) == 3
-        urls = [r["url"] for r in result]
+        assert len(ranked) == 3
+        urls = [r["url"] for r in ranked]
         assert urls == ["https://a.com", "https://b.com", "https://c.com"]
+        assert {a.url for a in artifacts} == set(urls)
+        assert all(a.markdown for a in artifacts)

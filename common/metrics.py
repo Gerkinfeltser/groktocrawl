@@ -24,9 +24,11 @@ Usage::
     print(METRICS.generate_openmetrics())
 """
 
+import contextlib
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Iterator
 
 DEFAULT_BUCKETS = [
     0.005,
@@ -119,6 +121,18 @@ class _SafeGauge:
         with self._lock:
             self._data[key] = value
 
+    def inc(self, labels: dict[str, str] | None = None, value: float = 1.0) -> None:
+        """Increment the gauge by ``value`` (useful for active-work counters)."""
+        key = tuple(sorted(labels.items())) if labels else ()
+        with self._lock:
+            self._data[key] += value
+
+    def dec(self, labels: dict[str, str] | None = None, value: float = 1.0) -> None:
+        """Decrement the gauge by ``value`` (clamped at zero)."""
+        key = tuple(sorted(labels.items())) if labels else ()
+        with self._lock:
+            self._data[key] = max(0.0, self._data[key] - value)
+
     def _collect(self) -> list[tuple[tuple, float]]:
         with self._lock:
             return list(self._data.items())
@@ -183,6 +197,30 @@ class MetricsCollector:
             gauge = _SafeGauge()
             self._gauges[name] = (family, gauge)
             return gauge
+
+    @contextlib.contextmanager
+    def timer(
+        self,
+        name: str,
+        help_text: str,
+        labels: dict[str, str] | None = None,
+    ) -> Iterator[None]:
+        """Observe elapsed wall-clock time for the body of a ``with`` block.
+
+        Usage::
+
+            with METRICS.timer("stage_seconds", "Stage latency", {"stage": "plan"}):
+                do_work()
+
+        The histogram is created on entry and observed exactly once on exit,
+        even if the body raises.
+        """
+        histogram = self.histogram(name, help_text, sorted(labels or []))
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            histogram.observe(labels, time.monotonic() - started)
 
     def generate_openmetrics(self) -> str:
         lines: list[str] = []

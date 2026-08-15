@@ -97,6 +97,7 @@ async def _politeness_check_and_delay(
     url: str,
     ignore_robots_txt: bool = False,
     robots_user_agent: str | None = None,
+    rate_limit: bool = True,
 ) -> tuple[bool, dict | None]:
     """Check politeness policy for a URL.
 
@@ -106,6 +107,9 @@ async def _politeness_check_and_delay(
             apply rate limiting.
         robots_user_agent: Custom User-Agent string to use for robots.txt
             evaluation. If None, uses the default bot UA.
+        rate_limit: If False, only robots.txt enforcement runs (read-only for
+            rate limiting). Per-tier checks pass this to avoid reserving a new
+            slot and sleeping before every tier of a single scrape.
 
     Returns (proceed, error_dict):
         (True, None) — proceed with the request
@@ -121,7 +125,10 @@ async def _politeness_check_and_delay(
         return True, None
 
     result = await manager.check(
-        url, ignore_robots_txt=ignore_robots_txt, robots_user_agent=robots_user_agent
+        url,
+        ignore_robots_txt=ignore_robots_txt,
+        robots_user_agent=robots_user_agent,
+        rate_limit=rate_limit,
     )
     if result.action == "blocked":
         logger.info("Politeness blocked %s: %s", url, result.reason)
@@ -141,7 +148,13 @@ async def _politeness_check_and_delay(
             result.delay_seconds,
             result.domain,
         )
-        await asyncio.sleep(result.delay_seconds)
+        try:
+            await asyncio.sleep(result.delay_seconds)
+        except asyncio.CancelledError:
+            # Roll back the in-memory future-slot reservation so an aborted
+            # delayed request does not inflate the next request's delay.
+            manager.rollback_reservation(url)
+            raise
 
     return True, None
 
@@ -167,8 +180,13 @@ async def _enrich_with_politeness(result: dict, url: str) -> dict:
 
 
 async def _politeness_check_for_tier(url: str, tier_label: str) -> dict | None:
-    """Check politeness before a tier. Returns None to proceed, error dict to return."""
-    _proceed, blocked = await _politeness_check_and_delay(url)
+    """Check politeness before a tier. Returns None to proceed, error dict to return.
+
+    Rate limiting is read-only here: the top-level politeness gate already
+    reserved a slot and slept, so per-tier checks must not reserve another
+    slot (which would compound per-scrape latency).
+    """
+    _proceed, blocked = await _politeness_check_and_delay(url, rate_limit=False)
     if blocked:
         logger.info("Politeness blocked %s at %s", url, tier_label)
         return blocked
@@ -246,6 +264,7 @@ async def _head_probe(url: str, client: httpx.AsyncClient) -> dict:
 async def smart_scrape(
     url: str,
     force_browser: bool = False,
+    lightweight_only: bool = False,
     ignore_robots_txt: bool = False,
     robots_user_agent: str | None = None,
     scrape_options: dict | None = None,
@@ -259,6 +278,12 @@ async def smart_scrape(
     going straight to Tier 3 (Playwright render). Used for Cloudflare-
     protected pages where the lightweight tiers would fail or timeout.
 
+    When ``lightweight_only`` is True, the pipeline runs only the lightweight
+    tiers (adapter, cache, Tier 1 llms.txt, Tier 2 content negotiation) and
+    short-circuits before Tier 3 (Playwright). Callers use this for the
+    generic fallback stage so it can never silently enter the browser tier
+    before a separate forced-browser retry.
+
     When SCRAPER_POLITENESS_ENABLED=true, checks robots.txt and enforces
     per-domain rate limits before each tier.
 
@@ -271,6 +296,7 @@ async def smart_scrape(
     Args:
         url: The URL to scrape.
         force_browser: If True, skip lightweight tiers.
+        lightweight_only: If True, stop before the browser tier.
         ignore_robots_txt: If True, skip robots.txt enforcement.
         robots_user_agent: Custom UA for robots.txt evaluation.
 
@@ -354,6 +380,7 @@ async def smart_scrape(
             url,
             ignore_robots_txt=ignore_robots_txt,
             robots_user_agent=robots_user_agent,
+            rate_limit=False,
         )
         if blocked:
             return blocked
@@ -457,6 +484,7 @@ async def smart_scrape(
                 url,
                 ignore_robots_txt=ignore_robots_txt,
                 robots_user_agent=robots_user_agent,
+                rate_limit=False,
             )
             if blocked:
                 return blocked
@@ -474,6 +502,7 @@ async def smart_scrape(
                 url,
                 ignore_robots_txt=ignore_robots_txt,
                 robots_user_agent=robots_user_agent,
+                rate_limit=False,
             )
             if blocked:
                 return blocked
@@ -487,11 +516,43 @@ async def smart_scrape(
                     await _set_cache(url, accepted, prior_entry=cached)
                     return accepted
 
+    # ── Lightweight-only short-circuit ──────────────────────────
+    # The generic fallback stage must not silently enter the browser tier.
+    # Return the best effort produced by the lightweight tiers (or a failure)
+    # and let the caller decide whether to force a separate browser retry.
+    if lightweight_only:
+        if best_effort:
+            best = max(
+                best_effort, key=lambda r: r.get("quality", {}).get("score", 0.0)
+            )
+            bq = best.get("quality", {})
+            bs = bq.get("score", 0.0)
+            logger.warning(
+                "lightweight_only for %s, returning best effort (quality=%.2f)",
+                url,
+                bs,
+            )
+            best["warning"] = (
+                f"Lightweight-only content — quality ({bs:.2f}) below threshold "
+                f"({QA_MIN_QUALITY_THRESHOLD:.2f})"
+            )
+            return await _enrich_with_politeness(best, url)
+        return await _enrich_with_politeness(
+            {
+                "error": f"Could not extract content from {url} using lightweight tiers",
+                "markdown": "",
+                "source": "none",
+                "url": url,
+            },
+            url,
+        )
+
     # Tier 3: Playwright render + readability (no shared client needed)
     _proceed, blocked = await _politeness_check_and_delay(
         url,
         ignore_robots_txt=ignore_robots_txt,
         robots_user_agent=robots_user_agent,
+        rate_limit=False,
     )
     if blocked:
         return blocked
@@ -540,6 +601,7 @@ async def smart_scrape(
         url,
         ignore_robots_txt=ignore_robots_txt,
         robots_user_agent=robots_user_agent,
+        rate_limit=False,
     )
     if blocked:
         return blocked

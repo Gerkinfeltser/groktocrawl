@@ -211,6 +211,79 @@
         }
       ],
       "gridPos": {"h": 8, "w": 6, "x": 6, "y": 16}
+    },
+    {
+      "title": "Active Jobs by Workload Class",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "showPoints": "never"
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "groktocrawl_active_jobs{job=\"agent-svc\"}",
+          "legendFormat": "{{type}}"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 24}
+    },
+    {
+      "title": "Research Stage Latency (p95)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "showPoints": "never"
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(groktocrawl_research_total_seconds_bucket{job=\"agent-svc\"}[$__rate_interval])) by (le, search_type))",
+          "legendFormat": "research {{search_type}}"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(groktocrawl_llm_call_seconds_bucket{job=\"agent-svc\"}[$__rate_interval])) by (le, stage))",
+          "legendFormat": "llm {{stage}}"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 24}
+    },
+    {
+      "title": "Streaming Time to First Token (p95)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "showPoints": "never"
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(groktocrawl_time_to_first_token_seconds_bucket{job=\"agent-svc\"}[$__rate_interval])) by (le, stream_type))",
+          "legendFormat": "{{stream_type}}"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 32}
     }
   ]
 }

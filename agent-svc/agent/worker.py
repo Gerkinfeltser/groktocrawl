@@ -5,21 +5,37 @@ import logging
 import os
 import time
 from collections.abc import Callable, Coroutine
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from .admission import get_admission
+from .cancel import JobCancelledError, raise_if_cancelled, set_token
+from .exceptions import RetryableRateLimitError
 from .metrics import METRICS
 from .research import run_extract, run_research
-from .research.memory import admit_research_memory
+from .research.memory import finalize_and_admit, refresh_research_memory
+from .retry import (
+    RetryPolicy,
+    clamp_retry_delay,
+    default_retry_policy,
+    retry_sleep,
+)
 from .scraper_client import ScraperClient
 from .settings import load_settings
 from .store import JobStore
 from .webhook import deliver_webhook
+from .workload_metrics import record_job_cancelled, record_job_end, record_job_start
 
 logger = logging.getLogger(__name__)
 
 
 def _get_worker_settings() -> Any:
     return load_settings()
+
+
+def _iso_now_plus(seconds: float) -> str:
+    """ISO 8601 UTC timestamp ``seconds`` from now."""
+    return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
 
 
 async def _run_job_with_observability(
@@ -29,29 +45,163 @@ async def _run_job_with_observability(
     webhook_config: dict[str, Any] | None,
     work_fn: Callable[[], Coroutine[Any, Any, Any]],
     cleanup_fn: Callable[[], Coroutine[Any, Any, None]] | None = None,
+    retry_policy: RetryPolicy | None = None,
 ) -> None:
     """Execute work_fn with standard observability scaffolding.
 
     Encapsulates metrics recording, store completion/failure, webhook
-    delivery, and cleanup — the identical scaffolding shared by all
-    worker processing functions.
+    delivery, retry scheduling (ADR-0053), and cleanup — the identical
+    scaffolding shared by all worker processing functions.
+
+    Retry behavior: when ``work_fn`` raises ``RetryableRateLimitError``
+    and retry budget remains, the job transitions to the non-terminal
+    ``retry_scheduled`` state, a ``retry_scheduled`` webhook fires, and
+    the blocked operation is attempted again after a bounded, cancellable
+    delay. Retry budget exhaustion fails the job with rate-limit details;
+    a job cancelled while waiting to retry never starts another attempt.
     """
     start = time.monotonic()
     METRICS.counter("jobs_submitted_total", "Total jobs submitted", ["type"]).inc(
         {"type": job_type}
     )
+    record_job_start(job_type)
+    retry_policy = retry_policy or default_retry_policy()
+    attempt = 0
+    last_delay: float | None = None
     try:
-        result = await work_fn()
-        store.complete_job(job_id, result)
-        await deliver_webhook(webhook_config, "completed", job_id, result)
-        elapsed = time.monotonic() - start
-        METRICS.histogram(
-            "job_duration_seconds", "Job processing duration", ["type", "status"]
-        ).observe({"type": job_type, "status": "completed"}, elapsed)
-        METRICS.counter("jobs_completed_total", "Total completed jobs", ["type"]).inc(
-            {"type": job_type}
-        )
-        logger.info("%s job %s completed in %.2fs", job_type, job_id, elapsed)
+        while True:
+            attempt += 1
+            try:
+                result = await work_fn()
+            except RetryableRateLimitError as e:
+                if attempt >= retry_policy.max_attempts:
+                    # ── Retry budget exhausted → terminal failure ──
+                    error_message = (
+                        f"Rate limit retry budget exhausted after {attempt} "
+                        f"attempt(s) (reason={e.error_code}"
+                        + (
+                            f", last retry delay {last_delay:.0f}s)"
+                            if last_delay is not None
+                            else ")"
+                        )
+                    )
+                    logger.error("%s job %s %s", job_type, job_id, error_message)
+                    store.fail_job(job_id, error_message)
+                    await deliver_webhook(
+                        webhook_config,
+                        "failed",
+                        job_id,
+                        {"error": error_message},
+                        success=False,
+                        error=error_message,
+                    )
+                    elapsed = time.monotonic() - start
+                    METRICS.histogram(
+                        "job_duration_seconds",
+                        "Job processing duration",
+                        ["type", "status"],
+                    ).observe({"type": job_type, "status": "failed"}, elapsed)
+                    METRICS.counter(
+                        "jobs_failed_total", "Total failed jobs", ["type"]
+                    ).inc({"type": job_type})
+                    METRICS.counter(
+                        "job_retry_exhaustion_total",
+                        "Jobs that exhausted their rate-limit retry budget",
+                        ["type"],
+                    ).inc({"type": job_type})
+                    return
+
+                # ── Schedule a bounded, cancellable retry ──
+                delay = clamp_retry_delay(
+                    e.retry_after_seconds, attempt=attempt, policy=retry_policy
+                )
+                retry_at = _iso_now_plus(delay)
+                if not store.schedule_retry(
+                    job_id,
+                    retry_at=retry_at,
+                    retry_attempt=attempt,
+                    retry_limit=retry_policy.max_attempts,
+                    reason=e.error_code,
+                    retry_after_seconds=delay,
+                ):
+                    # The job was cancelled/completed concurrently — do not
+                    # schedule or start another attempt.
+                    logger.info(
+                        "%s job %s no longer retryable after rate limit",
+                        job_type,
+                        job_id,
+                    )
+                    return
+                await deliver_webhook(
+                    webhook_config,
+                    "retry_scheduled",
+                    job_id,
+                    data={
+                        "operation": job_type,
+                        "reason_code": e.error_code,
+                        "retry_attempt": attempt,
+                        "retry_limit": retry_policy.max_attempts,
+                        "retry_at": retry_at,
+                        "retry_after_seconds": delay,
+                    },
+                )
+                METRICS.counter(
+                    "job_retries_scheduled_total",
+                    "Jobs scheduled to retry after a rate-limit condition",
+                    ["type"],
+                ).inc({"type": job_type})
+                logger.info(
+                    "%s job %s rate limited — retry %d/%d scheduled in %.1fs",
+                    job_type,
+                    job_id,
+                    attempt,
+                    retry_policy.max_attempts,
+                    delay,
+                )
+                last_delay = delay
+                await retry_sleep(delay)
+                if not store.resume_retry(job_id):
+                    # Cancelled while waiting (DELETE) — do not start another
+                    # attempt; the store already records the terminal status.
+                    logger.info(
+                        "%s job %s cancelled while waiting to retry",
+                        job_type,
+                        job_id,
+                    )
+                    return
+                continue
+
+            # ── Success ─────────────────────────────────────────
+            store.complete_job(job_id, result)
+            await deliver_webhook(webhook_config, "completed", job_id, result)
+            elapsed = time.monotonic() - start
+            METRICS.histogram(
+                "job_duration_seconds", "Job processing duration", ["type", "status"]
+            ).observe({"type": job_type, "status": "completed"}, elapsed)
+            METRICS.counter(
+                "jobs_completed_total", "Total completed jobs", ["type"]
+            ).inc({"type": job_type})
+            if attempt > 1:
+                METRICS.counter(
+                    "job_retries_succeeded_total",
+                    "Jobs completed successfully after at least one rate-limit retry",
+                    ["type"],
+                ).inc({"type": job_type})
+            logger.info("%s job %s completed in %.2fs", job_type, job_id, elapsed)
+            return
+    except JobCancelledError:
+        # Cooperative cancellation: the DELETE handler already marked the job
+        # cancelled in the store. Do not overwrite it, deliver a completion
+        # webhook, or record completed/failed metrics.
+        record_job_cancelled(job_type)
+        logger.info("%s job %s cancelled", job_type, job_id)
+    except asyncio.CancelledError:
+        # Forced cancellation of the owning task. The DELETE handler already
+        # marked the job cancelled in the store; record cancellation and let
+        # the finally block run cleanup before the CancelledError unwinds.
+        record_job_cancelled(job_type)
+        logger.info("%s job %s cancelled (forced)", job_type, job_id)
+        raise
     except Exception as e:
         logger.exception("%s job %s failed", job_type, job_id)
         store.fail_job(job_id, str(e))
@@ -64,6 +214,7 @@ async def _run_job_with_observability(
             {"type": job_type}
         )
     finally:
+        record_job_end(job_type)
         if cleanup_fn:
             await cleanup_fn()
 
@@ -83,11 +234,17 @@ async def _process_agent_async(
     include_images: bool = False,
     citation_style: Any = None,
     force_fresh: bool = False,
+    stale_while_revalidate: bool = False,
+    max_stale_hours: float | None = None,
     user_id: str | None = None,
     research_memory: Any = None,
     search_type: str = "deep",
     max_searches_per_request: int = 5,
+    fingerprint: str | None = None,
+    task_tracker: Any = None,
 ) -> None:
+    if task_tracker is not None:
+        set_token(task_tracker.cancel_token(job_id))
     settings = _get_worker_settings()
     redis_url = (
         f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
@@ -113,6 +270,8 @@ async def _process_agent_async(
             cache_result = await research_memory.query(
                 prompt=prompt,
                 user_id=user_id if memory_scope == "per_user" else None,
+                fingerprint=fingerprint,
+                max_stale_hours=max_stale_hours if stale_while_revalidate else None,
             )
             if cache_result["hit"]:
                 freshness = cache_result.get("freshness", "stale")
@@ -157,6 +316,114 @@ async def _process_agent_async(
                         webhook_config, "completed", job_id, cached_payload
                     )
                     return
+                elif (
+                    freshness == "stale"
+                    and stale_while_revalidate
+                    and cache_result.get("swr_eligible")
+                ):
+                    # Stale-while-revalidate: serve stale immediately and start
+                    # ONE background refresh keyed by the compatibility fingerprint.
+                    logger.info(
+                        "Research memory stale hit for agent %s — serving stale and "
+                        "refreshing in background",
+                        job_id,
+                    )
+                    entry = cache_result["artifact"]
+                    sources = entry.get("sources", [])
+                    result_text = entry.get("artifact", "")
+                    from .research import _apply_citation_style
+
+                    result_text, _ = _apply_citation_style(result_text, sources, cs)
+                    stale_payload: dict[str, Any] = {
+                        "result": result_text,
+                        "sources": [s.get("url", "") for s in sources],
+                        "source_details": sources,
+                        "from_cache": True,
+                        "freshness": "stale",
+                        "refreshed": False,
+                        "age_hours": cache_result.get("age_hours"),
+                        "similarity": cache_result.get("similarity", 0),
+                        "memory_id": cache_result.get("memory_id", ""),
+                    }
+                    if cs == CitationStyle.compact:
+                        compact_sources = []
+                        for i, src in enumerate(sources, start=1):
+                            compact_sources.append(
+                                {"index": i, "url": src.get("url", "")}
+                            )
+                        stale_payload["sources_compact"] = compact_sources
+                        stale_payload["source_details"] = []
+                    store.complete_job(job_id, stale_payload)
+                    await deliver_webhook(
+                        webhook_config, "completed", job_id, stale_payload
+                    )
+
+                    async def _refresh_and_update() -> dict[str, Any] | None:
+                        try:
+                            fresh = await refresh_research_memory(
+                                research_memory,
+                                prompt=prompt,
+                                urls=urls,
+                                schema=schema_,
+                                searxng_url=searxng_url,
+                                scraper_url=scraper_url,
+                                llm_base_url=llm_base_url,
+                                llm_api_key=llm_api_key,
+                                llm_model=llm_model,
+                                requested_model=requested_model,
+                                max_searches_per_request=max_searches_per_request,
+                                include_images=include_images,
+                                citation_style=cs,
+                                search_type=search_type,
+                                user_id=user_id,
+                                fingerprint=fingerprint,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Background research memory refresh failed for "
+                                "agent %s",
+                                job_id,
+                                exc_info=True,
+                            )
+                            return None
+                        refreshed_payload: dict[str, Any] = {
+                            "result": fresh.get("result", ""),
+                            "sources": fresh.get("sources", []),
+                            "source_details": fresh.get("source_details", []),
+                            "from_cache": False,
+                            "freshness": "refreshed",
+                            "refreshed": True,
+                            "age_hours": 0.0,
+                            "research_memory_id": fresh.get("research_memory_id"),
+                        }
+                        if cs == CitationStyle.compact:
+                            refreshed_payload["sources_compact"] = fresh.get(
+                                "sources_compact", []
+                            )
+                            refreshed_payload["source_details"] = []
+                        return refreshed_payload
+
+                    refresh_key = fingerprint or f"prompt:{prompt}"
+                    refresh_task = research_memory.start_refresh(
+                        refresh_key, _refresh_and_update
+                    )
+
+                    def _write_refreshed(_future: asyncio.Future[Any]) -> None:
+                        try:
+                            fresh_payload = _future.result()
+                        except Exception:
+                            logger.warning(
+                                "Background research memory refresh failed for "
+                                "agent %s",
+                                job_id,
+                                exc_info=True,
+                            )
+                            return
+                        if fresh_payload:
+                            store.overwrite_job_data(job_id, fresh_payload)
+
+                    refresh_task.add_done_callback(_write_refreshed)
+                    return
                 else:
                     # Stale hit — run normal pipeline but note cached version
                     logger.info(
@@ -182,6 +449,15 @@ async def _process_agent_async(
         )
 
     async def work_fn() -> dict[str, Any]:
+        # Cooperative cancellation: DELETE /v2/agent/{job_id} marks the job
+        # cancelled in the store. Honour it before (and after) the research
+        # pipeline so a cancelled agent job raises JobCancelledError and is
+        # never recorded as completed — mirroring batch_scrape/plan_execute.
+        job_meta = store.get_job(job_id)
+        if job_meta and job_meta.get("status") == "cancelled":
+            logger.info("Agent job %s cancelled before research", job_id)
+            raise JobCancelledError("agent job cancelled via DELETE")
+
         result = await run_research(
             prompt=prompt,
             urls=urls,
@@ -197,48 +473,25 @@ async def _process_agent_async(
             search_type=search_type,
             max_searches_per_request=max_searches_per_request,
         )
+
+        job_meta = store.get_job(job_id)
+        if job_meta and job_meta.get("status") == "cancelled":
+            logger.info("Agent job %s cancelled during research", job_id)
+            raise JobCancelledError("agent job cancelled via DELETE")
+
         # Apply citation style to transform bare [N] markers to [N](url)
-        # for compact style, or leave them unchanged for inline style.
-        source_details = result.get("source_details", [])
-        from .research import _apply_citation_style
-
-        result_text, _ = _apply_citation_style(result["result"], source_details, cs)
-        result["result"] = result_text
-
-        # Save rich source_details for memory storage BEFORE compactifying
-        # the API response. Cache-hit paths expect sources as list[dict].
-        rich_source_details = source_details
-        memory_sources = rich_source_details or result.get("sources", [])
-
-        # When citation_style is compact, replace full source_details with
-        # a compact citations mapping (index → {url}) to reduce
-        # response payload size.
-        if cs == CitationStyle.compact:
-            compact_sources: list[dict[str, str | int]] = []
-            for i, src in enumerate(source_details, start=1):
-                compact_sources.append(
-                    {
-                        "index": i,
-                        "url": src.get("url", ""),
-                    }
-                )
-            result["sources_compact"] = compact_sources
-            # Drop the full source_details from the API response to save payload size
-            result["source_details"] = []
-
-        artifact_id = await admit_research_memory(
+        # for compact style, or leave them unchanged for inline style, then
+        # admit the post-transform artifact to research memory.
+        result = await finalize_and_admit(
             research_memory,
             prompt=prompt,
-            artifact=result.get("result", ""),
-            source_details=memory_sources,
-            model=llm_model,
-            citation_style=cs.value,
+            result=result,
+            llm_model=llm_model,
+            citation_style=cs,
             requested_model=requested_model,
-            latency_ms=result.get("latency_ms", 0),
             user_id=user_id,
+            fingerprint=fingerprint,
         )
-        if artifact_id:
-            result["research_memory_id"] = artifact_id
 
         # Note stale cache existence if applicable
         if stale_cache_hit:
@@ -251,6 +504,43 @@ async def _process_agent_async(
         return result
 
     await _run_job_with_observability(job_id, "agent", store, webhook_config, work_fn)
+
+
+def _record_crawl_cancelled_metrics(start: float) -> None:
+    """Record crawl-specific cancelled metrics (never as completed/failed)."""
+    METRICS.counter(
+        "groktocrawl_crawl_jobs_total", "Total crawl jobs by status", ["status"]
+    ).inc({"status": "cancelled"})
+    METRICS.histogram(
+        "groktocrawl_crawl_duration_seconds",
+        "Crawl job duration in seconds",
+        ["status"],
+    ).observe({"status": "cancelled"}, time.monotonic() - start)
+
+
+async def _deliver_crawl_completed_webhook(
+    job_id: str,
+    webhook_config: dict[str, Any] | None,
+    task_tracker: Any,
+) -> None:
+    """Deliver ``crawl.completed`` (empty data) for terminal crawl states."""
+    if task_tracker is not None:
+        task_tracker.create_background_task(
+            deliver_webhook(
+                webhook_config,
+                "crawl.completed",
+                job_id,
+                data=[],
+                task_tracker=task_tracker,
+            )
+        )
+    else:
+        await deliver_webhook(
+            webhook_config,
+            "crawl.completed",
+            job_id,
+            data=[],
+        )
 
 
 async def _process_crawl_async(
@@ -293,6 +583,8 @@ async def _process_crawl_async(
     store = JobStore(
         f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
     )
+    if task_tracker is not None:
+        set_token(task_tracker.cancel_token(job_id))
     scraper = ScraperClient(scraper_url)
     start = time.monotonic()
     job_type = "crawl"
@@ -300,6 +592,7 @@ async def _process_crawl_async(
     METRICS.counter("jobs_submitted_total", "Total jobs submitted", ["type"]).inc(
         {"type": job_type}
     )
+    record_job_start(job_type)
 
     try:
         # ── Fire crawl.started webhook ────────────────────────
@@ -407,71 +700,53 @@ async def _process_crawl_async(
         if was_cancelled:
             # Store is already marked cancelled by cancel_job();
             # do NOT overwrite with complete_job().
+            record_job_cancelled(job_type)
             logger.info("Crawl %s was cancelled — preserving cancelled status", job_id)
-            if task_tracker is not None:
-                task_tracker.create_background_task(
-                    deliver_webhook(
-                        webhook_config,
-                        "crawl.completed",
-                        job_id,
-                        data=[],
-                        task_tracker=task_tracker,
-                    )
-                )
-            else:
-                await deliver_webhook(
-                    webhook_config,
-                    "crawl.completed",
-                    job_id,
-                    data=[],
-                )
+            await _deliver_crawl_completed_webhook(job_id, webhook_config, task_tracker)
+            _record_crawl_cancelled_metrics(start)
         else:
             store.complete_job(job_id, payload)
-            if task_tracker is not None:
-                task_tracker.create_background_task(
-                    deliver_webhook(
-                        webhook_config,
-                        "crawl.completed",
-                        job_id,
-                        data=[],
-                        task_tracker=task_tracker,
-                    )
-                )
-            else:
-                await deliver_webhook(
-                    webhook_config,
-                    "crawl.completed",
-                    job_id,
-                    data=[],
-                )
+            await _deliver_crawl_completed_webhook(job_id, webhook_config, task_tracker)
 
-        elapsed = time.monotonic() - start
+            elapsed = time.monotonic() - start
+            METRICS.histogram(
+                "job_duration_seconds", "Job processing duration", ["type", "status"]
+            ).observe({"type": job_type, "status": "completed"}, elapsed)
+            METRICS.counter(
+                "jobs_completed_total", "Total completed jobs", ["type"]
+            ).inc({"type": job_type})
+            METRICS.counter(
+                "groktocrawl_crawl_jobs_total", "Total crawl jobs by status", ["status"]
+            ).inc({"status": "completed"})
+            METRICS.histogram(
+                "groktocrawl_crawl_duration_seconds",
+                "Crawl job duration in seconds",
+                ["status"],
+            ).observe({"status": "completed"}, elapsed)
+            METRICS.counter(
+                "groktocrawl_crawl_pages_scraped_total",
+                "Total pages scraped by crawl jobs",
+            ).inc(value=float(result.completed))
 
-        # ── Existing job-type-agnostic metrics (keep for backward compat) ──
-        METRICS.histogram(
-            "job_duration_seconds", "Job processing duration", ["type", "status"]
-        ).observe({"type": job_type, "status": "completed"}, elapsed)
-        METRICS.counter("jobs_completed_total", "Total completed jobs", ["type"]).inc(
-            {"type": job_type}
-        )
+            logger.info("Crawl job %s completed in %.2fs", job_id, elapsed)
 
-        # ── Crawl-specific metrics ──────────────────────────────────────────
-        crawl_status = "cancelled" if was_cancelled else "completed"
-        METRICS.counter(
-            "groktocrawl_crawl_jobs_total", "Total crawl jobs by status", ["status"]
-        ).inc({"status": crawl_status})
-        METRICS.histogram(
-            "groktocrawl_crawl_duration_seconds",
-            "Crawl job duration in seconds",
-            ["status"],
-        ).observe({"status": crawl_status}, elapsed)
-        METRICS.counter(
-            "groktocrawl_crawl_pages_scraped_total",
-            "Total pages scraped by crawl jobs",
-        ).inc(value=float(result.completed))
-
-        logger.info("Crawl job %s completed in %.2fs", job_id, elapsed)
-
+    except JobCancelledError:
+        # Cooperative cancellation: the token was set (DELETE). The store is
+        # already marked cancelled; record cancellation and the lifecycle
+        # webhook without overwriting status or recording completed metrics.
+        record_job_cancelled(job_type)
+        logger.info("Crawl %s cancelled", job_id)
+        await _deliver_crawl_completed_webhook(job_id, webhook_config, task_tracker)
+        _record_crawl_cancelled_metrics(start)
+    except asyncio.CancelledError:
+        # Forced cancellation of the owning task (DELETE cancels the task).
+        # The crawler's run() finally already awaited child tasks and closed
+        # the HTML client; record cancellation and re-raise to unwind.
+        record_job_cancelled(job_type)
+        logger.info("Crawl %s cancelled (forced)", job_id)
+        await _deliver_crawl_completed_webhook(job_id, webhook_config, task_tracker)
+        _record_crawl_cancelled_metrics(start)
+        raise
     except Exception as e:
         logger.exception("Crawl job %s failed", job_id)
         store.fail_job(job_id, str(e))
@@ -516,6 +791,7 @@ async def _process_crawl_async(
             ["status"],
         ).observe({"status": "failed"}, elapsed)
     finally:
+        record_job_end(job_type)
         await scraper.close()
 
 
@@ -525,89 +801,152 @@ async def _process_batch_scrape_async(
     scraper_url: str,
     webhook_config: dict[str, Any] | None = None,
     task_tracker: Any = None,
+    max_concurrency: int = 3,
 ) -> None:
     settings = _get_worker_settings()
     store = JobStore(
         f"redis://{settings.valkey_host}:{settings.valkey_port}/{settings.valkey_db}"
     )
+    if task_tracker is not None:
+        set_token(task_tracker.cancel_token(job_id))
     scraper = ScraperClient(scraper_url)
 
-    async def work_fn() -> dict[str, Any]:
-        pages: list[dict] = []
-        errors: list[dict] = []
-        _index_batch: list[dict] = []
-        total = len(urls)
-        for url in urls:
-            # Check for cancellation between URLs
-            job_meta = store.get_job(job_id)
-            if job_meta and job_meta.get("status") == "cancelled":
-                logger.info(
-                    "Batch scrape %s cancelled after %d/%d URLs",
-                    job_id,
-                    len(pages),
-                    total,
-                )
-                break
+    # Inner scheduling bound: the per-request max_concurrency AND the global
+    # lightweight-fetch admission budget (fetch weight = 1). The admission
+    # controller in ScraperClient.scrape() is the outer cap across jobs.
+    effective_concurrency = max(
+        1, min(max_concurrency, get_admission().budget_for("lightweight_fetch"))
+    )
 
-            try:
-                result = await scraper.scrape(url)
-            except Exception as e:
-                errors.append(
-                    {
+    async def work_fn() -> dict[str, Any]:
+        total = len(urls)
+
+        # Cooperative cancellation via DELETE: the store status is checked
+        # before any scrape (and per-URL) in addition to the cancel token.
+        job_meta = store.get_job(job_id)
+        if job_meta and job_meta.get("status") == "cancelled":
+            logger.info("Batch scrape %s cancelled before scraping", job_id)
+            raise JobCancelledError("batch scrape cancelled via DELETE")
+
+        # Index-keyed results so pages/errors stay in input URL order even
+        # though completion is out of order.
+        pages_by_index: dict[int, dict] = {}
+        errors_by_index: dict[int, dict] = {}
+        index_batch_by_index: dict[int, dict] = {}
+
+        # Bounded worker pool: only ``effective_concurrency`` coroutines are
+        # ever created, and each pulls work from the queue as it becomes
+        # available. This keeps a huge (unrate-limited) ``urls`` list from
+        # instantiating one task per URL up front and from bursting
+        # synchronous Valkey GETs ahead of the concurrency limit.
+        queue: asyncio.Queue[tuple[int, str] | None] = asyncio.Queue()
+        for i, u in enumerate(urls):
+            queue.put_nowait((i, u))
+        for _ in range(effective_concurrency):
+            queue.put_nowait(None)  # sentinel: tell each worker to stop
+
+        async def _scrape_worker() -> None:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    return
+                index, url = item
+
+                # Cancellation + store-status checks live inside the bounded
+                # worker so they never run as a synchronous pre-concurrency
+                # burst for a large batch.
+                raise_if_cancelled()
+                job_meta = store.get_job(job_id)
+                if job_meta and job_meta.get("status") == "cancelled":
+                    raise JobCancelledError("batch scrape cancelled via DELETE")
+
+                try:
+                    result = await scraper.scrape(url)
+                except JobCancelledError:
+                    raise
+                except Exception as e:
+                    errors_by_index[index] = {
                         "url": url,
                         "error": str(e),
                         "error_type": "scrape_error",
                         "error_code": "SCRAPE_ERROR",
                         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     }
-                )
+                else:
+                    if result.get("success"):
+                        data = result["data"]
+                        pages_by_index[index] = {
+                            "url": url,
+                            "markdown": data.get("markdown", ""),
+                        }
+                        metadata = data.get("metadata") or {}
+                        og = metadata.get("og") or {}
+                        meta = metadata.get("meta") or {}
+                        title = (
+                            og.get("title")
+                            or meta.get("title")
+                            or data.get("title", "")
+                        )
+                        index_batch_by_index[index] = {
+                            "url": url,
+                            "title": title,
+                            "content": data.get("markdown", "")[:2000],
+                        }
+                        store.increment_completed(job_id)
+                    else:
+                        error_message = result.get("error", "Scrape failed")
+                        error_code = result.get("error_code") or "SCRAPE_ERROR"
+                        errors_by_index[index] = {
+                            "url": url,
+                            "error": error_message,
+                            "error_type": (
+                                "captcha_unresolved"
+                                if error_code == "CAPTCHA_UNRESOLVED"
+                                else "scrape_error"
+                            ),
+                            "error_code": error_code,
+                            "timestamp": time.strftime(
+                                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                            ),
+                        }
+
+                # Order-preserving progress update after each completion.
                 store.update_job_progress(
                     job_id,
-                    pages=list(pages),
-                    errors=list(errors),
+                    pages=[pages_by_index[i] for i in sorted(pages_by_index)],
+                    errors=[errors_by_index[i] for i in sorted(errors_by_index)],
                     total=total,
                 )
-                continue
 
-            if result.get("success"):
-                data = result["data"]
-                pages.append({"url": url, "markdown": data.get("markdown", "")})
-                metadata = data.get("metadata") or {}
-                og = metadata.get("og") or {}
-                meta = metadata.get("meta") or {}
-                title = og.get("title") or meta.get("title") or data.get("title", "")
-                _index_batch.append(
-                    {
-                        "url": url,
-                        "title": title,
-                        "content": data.get("markdown", "")[:2000],
-                    }
+        workers = [
+            asyncio.create_task(_scrape_worker()) for _ in range(effective_concurrency)
+        ]
+        pending = set(workers)
+        try:
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
                 )
-                store.increment_completed(job_id)
-            else:
-                error_message = result.get("error", "Scrape failed")
-                error_code = result.get("error_code") or "SCRAPE_ERROR"
-                errors.append(
-                    {
-                        "url": url,
-                        "error": error_message,
-                        "error_type": (
-                            "captcha_unresolved"
-                            if error_code == "CAPTCHA_UNRESOLVED"
-                            else "scrape_error"
-                        ),
-                        "error_code": error_code,
-                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    }
-                )
+                for task in done:
+                    try:
+                        task.result()
+                    except (JobCancelledError, asyncio.CancelledError):
+                        raise
+                    except Exception:
+                        logger.warning(
+                            "Batch scrape worker failed unexpectedly", exc_info=True
+                        )
+        finally:
+            # Await all remaining (possibly cancelled) workers so no
+            # speculative scrape/browser/HTTP task is destroyed pending.
+            if pending:
+                for p in pending:
+                    p.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
 
-            # Update progress after each URL for real-time status polling
-            store.update_job_progress(
-                job_id,
-                pages=list(pages),
-                errors=list(errors),
-                total=total,
-            )
+        pages = [pages_by_index[i] for i in sorted(pages_by_index)]
+        errors = [errors_by_index[i] for i in sorted(errors_by_index)]
+        _index_batch = [index_batch_by_index[i] for i in sorted(index_batch_by_index)]
 
         if _index_batch:
             if task_tracker is not None:
@@ -784,7 +1123,7 @@ async def _process_plan_execution_async(
                         phase_idx + 1,
                         len(phases),
                     )
-                    break
+                    raise JobCancelledError("plan execution cancelled via DELETE")
 
                 action = phase.get("action", "search")
                 description = phase.get("description", "")
@@ -803,8 +1142,16 @@ async def _process_plan_execution_async(
                                 break
 
                     try:
-                        results, _health = await searxng.search(query, limit=10)
-                    except Exception:
+                        results, _health = await searxng.search(
+                            query, limit=10, raise_on_rate_limit=True
+                        )
+                    except Exception as e:
+                        from .exceptions import RetryableRateLimitError
+
+                        if isinstance(e, RetryableRateLimitError):
+                            # Downstream capacity condition: propagate so the
+                            # worker schedules a bounded retry (ADR-0053).
+                            raise
                         results = []
 
                     new_urls = []
@@ -822,16 +1169,14 @@ async def _process_plan_execution_async(
                             )
 
                     if new_urls:
-                        scraped_docs, scraped_details = await _scrape_urls(
+                        artifacts = await _scrape_urls(
                             new_urls[:5],
                             scraper,
                             min_sources=1,
                             max_attempts=min(5, len(new_urls)),
                         )
-                        for doc, _detail in zip(
-                            scraped_docs, scraped_details, strict=False
-                        ):
-                            accumulated_context_parts.append(doc)
+                        for artifact in artifacts:
+                            accumulated_context_parts.append(artifact.to_document())
 
                 elif action == "synthesize":
                     context = (
@@ -882,6 +1227,7 @@ async def _process_plan_execution_async(
                         ),
                         user_prompt=synthesis_prompt,
                         context=context or None,
+                        stage="plan_execute",
                     )
                     if full_synthesis:
                         accumulated_context_parts.append(full_synthesis)

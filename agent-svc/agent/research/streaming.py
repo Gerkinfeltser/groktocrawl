@@ -9,6 +9,8 @@ import logging
 import time as _time
 from typing import Any
 
+from common.stage_metrics import StreamTiming
+
 from ..models import CitationStyle
 from .citations import _apply_citation_style
 from .loop import run_research_stream
@@ -25,10 +27,15 @@ async def stream_cached_artifact(
     similarity: float,
     citation_style: CitationStyle,
     has_schema: bool,
+    age_hours: float | None = None,
+    refresh_awaitable: Any = None,
 ) -> Any:
     """Replay cached agent results as SSE token events.
 
     Preserves citation style transformation and schema-mode skip logic.
+    When ``refresh_awaitable`` is supplied (stale-while-revalidate), the
+    stale result is emitted first and the refreshed result follows as a
+    ``refreshed`` event.
     """
     stream_start = _time.monotonic()
 
@@ -56,6 +63,9 @@ async def stream_cached_artifact(
         "similarity": similarity,
         "citation_style": citation_style.value,
     }
+    if age_hours is not None:
+        done_payload["age_hours"] = age_hours
+        done_payload["refreshed"] = False
     if citation_style == CitationStyle.compact:
         compact_srcs = []
         for i, src in enumerate(sources, start=1):
@@ -65,6 +75,29 @@ async def stream_cached_artifact(
     else:
         done_payload["source_details"] = sources
     yield f"data: {json.dumps(done_payload)}\n\n"
+
+    # ── Stale-while-revalidate: await the single-flight refresh ──
+    if refresh_awaitable is not None:
+        try:
+            refreshed = await refresh_awaitable
+        except Exception:
+            logger.warning("Background research memory refresh failed", exc_info=True)
+            refreshed = None
+        if refreshed:
+            refreshed_payload: dict = {
+                "type": "refreshed",
+                "result": refreshed.get("result", ""),
+                "sources": refreshed.get("sources", []),
+                "memory_id": refreshed.get("research_memory_id", ""),
+                "freshness": "refreshed",
+                "age_hours": 0.0,
+            }
+            if citation_style == CitationStyle.compact:
+                refreshed_payload["sources_compact"] = refreshed.get(
+                    "sources_compact", []
+                )
+            yield f"data: {json.dumps(refreshed_payload)}\n\n"
+
     yield "data: [DONE]\n\n"
 
 
@@ -84,12 +117,18 @@ async def stream_research_live(
     search_type: str = "deep",
     research_memory: Any = None,
     user_id: str | None = None,
+    fingerprint: str | None = None,
 ) -> Any:
     """Orchestrate full research SSE pipeline for cache-miss or force-fresh.
 
     Forwards all 8 SSE event types: token, done, sources_pending,
     source_scraped, sources, error, status, research_plan, research_pass.
     """
+    timing = StreamTiming("agent")
+    # ``status`` / ``research_plan`` / ``research_pass`` are immediate
+    # sentinels emitted before any real work; TTFB must reflect the first
+    # content-bearing event, not the planning placeholder.
+    _content_events = {"sources_pending", "source_scraped", "sources", "token", "done"}
     async for event in run_research_stream(
         prompt=prompt,
         urls=urls,
@@ -105,6 +144,8 @@ async def stream_research_live(
         citation_style=citation_style,
         search_type=search_type,
     ):
+        if event["type"] in _content_events:
+            timing.on_first_event()
         if event["type"] == "sources_pending":
             yield f"data: {json.dumps({'type': 'sources_pending', 'sources': event['sources']})}\n\n"
         elif event["type"] == "source_scraped":
@@ -112,6 +153,7 @@ async def stream_research_live(
         elif event["type"] == "sources":
             yield f"data: {json.dumps({'type': 'sources', 'sources': event['sources']})}\n\n"
         elif event["type"] == "token":
+            timing.on_first_token()
             yield f"data: {json.dumps({'type': 'token', 'content': event['content']})}\n\n"
         elif event["type"] == "done":
             # Apply citation_style to transform result text markers
@@ -132,6 +174,7 @@ async def stream_research_live(
                     requested_model=requested_model,
                     latency_ms=event["latency_ms"],
                     user_id=user_id,
+                    fingerprint=fingerprint,
                 )
 
             done_payload: dict = {

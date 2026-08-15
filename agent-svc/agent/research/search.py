@@ -7,6 +7,8 @@ import logging
 import time
 from typing import Any
 
+from common.stage_metrics import StreamTiming
+
 from ..llm import LLMClient
 from ..scraper_client import ScraperClient
 from ..searxng_client import SearXNGClient
@@ -70,6 +72,7 @@ async def run_deep_search(
             gap_result = await llm.generate(
                 system_prompt=DEEP_SEARCH_GAP_PROMPT,
                 user_prompt=gap_prompt,
+                stage="deep_search_gap",
             )
             if gap_result and not gap_result.startswith("Error:"):
                 # Parse the JSON array from the LLM response
@@ -226,6 +229,7 @@ async def run_rich_search(
         content = await llm.generate(
             system_prompt=effective_system,
             user_prompt=prompt,
+            stage="rich_search",
         )
 
         result: dict[str, Any] = {}
@@ -303,6 +307,7 @@ async def run_search_stream(
       {"type": "error", "content": "..."}
     """
     start = time.monotonic()
+    timing = StreamTiming("search")
     if llm_model is None:
         raise ValueError("llm_model is required — set via LLM_MODEL env var")
 
@@ -327,27 +332,19 @@ async def run_search_stream(
 
         elif retrieval_mode == "hybrid_vector":
             from ..semantic_client import SemanticClient
+            from .hybrid import plan_hybrid_retrieval
 
             semantic = SemanticClient(semantic_url)
             try:
-                searxng_results, _health = await searxng.search(
-                    query, limit=limit, categories=categories, sources=sources
+                plan = await plan_hybrid_retrieval(
+                    query=query,
+                    limit=limit,
+                    searxng=searxng,
+                    semantic=semantic,
+                    categories=categories,
+                    sources=sources,
                 )
-                vector_results = await semantic.search_vector(query, limit=limit)
-
-                seen: set[str] = set()
-                merged: list[dict] = []
-                for r in searxng_results:
-                    if r["url"] not in seen:
-                        seen.add(r["url"])
-                        merged.append(r)
-                for r in vector_results:
-                    if r["url"] not in seen:
-                        seen.add(r["url"])
-                        merged.append(
-                            {"url": r["url"], "title": r["title"], "description": ""}
-                        )
-                search_results = merged[:limit]
+                search_results = plan.results
             finally:
                 await semantic.close()
 
@@ -360,6 +357,7 @@ async def run_search_stream(
 
         # ── Yield search_result events ──────────────────────────
         for r in search_results:
+            timing.on_first_event()
             yield {
                 "type": "search_result",
                 "result": {
@@ -508,6 +506,7 @@ async def run_search_stream(
                     content = await llm.generate(
                         system_prompt=effective_system,
                         user_prompt=prompt,
+                        stage="rich_search",
                     )
 
                     parsed_output: Any = content
@@ -539,8 +538,10 @@ async def run_search_stream(
                     async for event in llm.generate_stream(
                         system_prompt=effective_system,
                         user_prompt=prompt,
+                        stage="rich_search",
                     ):
                         if event["type"] == "token":
+                            timing.on_first_token()
                             full_result += event["content"]
                             yield {"type": "token", "content": event["content"]}
                         elif event["type"] == "error":
@@ -565,6 +566,11 @@ async def run_search_stream(
         }
         if output is not None:
             done_event["output"] = output
+        # Ensure TTFB is sampled even when zero results were returned: the
+        # terminal ``done`` event is the only event delivered in that case.
+        # ``on_first_event`` is idempotent, so the loop-entry call for the
+        # normal path is unaffected.
+        timing.on_first_event()
         yield done_event
 
     finally:

@@ -18,7 +18,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+from common.stage_metrics import inc_counter
+
 logger = logging.getLogger(__name__)
+
+_ADAPTER_DISPATCH_TOTAL = "groktocrawl_adapter_dispatch_total"
+_ADAPTER_DISPATCH_TOTAL_HELP = "Adapter dispatches by bounded adapter group and outcome"
 
 
 # ── Error types ──────────────────────────────────────────────────
@@ -206,10 +211,21 @@ class AdapterRegistry:
                 continue
             logger.info("Adapter %s matched for %s", entry.name, url)
             try:
-                return await entry.scrape(url, ctx)
+                result = await entry.scrape(url, ctx)
             except AdapterError as exc:
+                inc_counter(
+                    _ADAPTER_DISPATCH_TOTAL,
+                    _ADAPTER_DISPATCH_TOTAL_HELP,
+                    {"adapter_group": entry.name, "outcome": "error"},
+                )
                 logger.info("Adapter %s failed for %s: %s", entry.name, url, exc)
                 continue
+            inc_counter(
+                _ADAPTER_DISPATCH_TOTAL,
+                _ADAPTER_DISPATCH_TOTAL_HELP,
+                {"adapter_group": entry.name, "outcome": "hit"},
+            )
+            return result
         return None
 
 

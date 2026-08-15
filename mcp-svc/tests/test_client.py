@@ -10,6 +10,7 @@ import asyncio
 from typing import Any
 
 import httpx
+import pytest
 from groktocrawl_client import GroktocrawlClient, _extract_response_detail
 
 # ── helpers ──
@@ -797,6 +798,506 @@ class TestAllTools:
         assert result["resolved_text"] == "See [1](https://a.com)"
         assert result["citation_count"] == 1
         assert result["style"] == "compact"
+
+
+# ── New surface: agent create/cancel, batch cancel/errors, browser, monitor ──
+
+
+class TestExpandedSurface:
+    """Verify the expanded client surface hits the right endpoints."""
+
+    def test_create_agent_creates_without_polling(self):
+        call_count = 0
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if request.method == "POST" and request.url.path == "/v2/agent":
+                return httpx.Response(
+                    200, json={"success": True, "id": "agent-1"}, request=request
+                )
+            return httpx.Response(404, json={"error": "not found"}, request=request)
+
+        transport = httpx.MockTransport(_handler)
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        client._client = httpx.AsyncClient(
+            base_url=client._base_url, headers=client._headers(), transport=transport
+        )
+
+        async def run():
+            return await client.create_agent("explain gravity", model="gpt-4o")
+
+        result = asyncio.run(run())
+        assert result["id"] == "agent-1"
+        # create_agent must NOT poll — exactly one request
+        assert call_count == 1
+
+    def test_create_agent_passes_optional_params(self):
+        captured: dict[str, Any] = {}
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            captured["body"] = json.loads(request.content or b"{}")
+            return httpx.Response(
+                200, json={"success": True, "id": "a1"}, request=request
+            )
+
+        transport = httpx.MockTransport(_handler)
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        client._client = httpx.AsyncClient(
+            base_url=client._base_url, headers=client._headers(), transport=transport
+        )
+
+        async def run():
+            return await client.create_agent(
+                "p",
+                urls=["https://a.com"],
+                output_schema={"type": "object"},
+                citation_style="compact",
+                max_credits=3,
+                include_images=True,
+                force_fresh=True,
+                search_type="focused",
+            )
+
+        asyncio.run(run())
+        body = captured["body"]
+        assert body["urls"] == ["https://a.com"]
+        assert body["output_schema"] == {"type": "object"}
+        assert body["citation_style"] == "compact"
+        assert body["max_credits"] == 3
+        assert body["include_images"] is True
+        assert body["force_fresh"] is True
+        assert body["search_type"] == "focused"
+
+    def test_cancel_agent_verb(self):
+        client = _make_matched_client(
+            {("DELETE", "/v2/agent/agent-1"): _json_handler({"success": True})}
+        )
+
+        async def run():
+            return await client.cancel_agent("agent-1")
+
+        result = asyncio.run(run())
+        assert result["success"] is True
+
+    def test_cancel_batch_scrape_verb(self):
+        client = _make_matched_client(
+            {("DELETE", "/v2/batch/scrape/batch-1"): _json_handler({"success": True})}
+        )
+
+        async def run():
+            return await client.cancel_batch_scrape("batch-1")
+
+        result = asyncio.run(run())
+        assert result["success"] is True
+
+    def test_get_batch_scrape_errors_verb(self):
+        client = _make_matched_client(
+            {
+                ("GET", "/v2/batch/scrape/batch-1/errors"): _json_handler(
+                    {"errors": [{"url": "https://x.com"}]}
+                )
+            }
+        )
+
+        async def run():
+            return await client.get_batch_scrape_errors("batch-1")
+
+        result = asyncio.run(run())
+        assert result["errors"][0]["url"] == "https://x.com"
+
+    def test_get_active_crawls_verb(self):
+        client = _make_matched_client(
+            {
+                ("GET", "/v2/crawl/active"): _json_handler(
+                    {"data": [{"id": "c1", "status": "processing"}]}
+                )
+            }
+        )
+
+        async def run():
+            return await client.get_active_crawls()
+
+        result = asyncio.run(run())
+        assert result["data"][0]["id"] == "c1"
+
+    def test_browser_list_verb(self):
+        client = _make_matched_client(
+            {("GET", "/v2/browser"): _json_handler({"sessions": [{"id": "s1"}]})}
+        )
+
+        async def run():
+            return await client.browser_list()
+
+        result = asyncio.run(run())
+        assert result["sessions"][0]["id"] == "s1"
+
+    def test_monitor_get_verb(self):
+        client = _make_matched_client(
+            {
+                ("GET", "/v2/monitor/m-1"): _json_handler(
+                    {"id": "m-1", "monitor_type": "scrape", "schedule": "* * * * *"}
+                )
+            }
+        )
+
+        async def run():
+            return await client.monitor_get("m-1")
+
+        result = asyncio.run(run())
+        assert result["id"] == "m-1"
+
+    def test_monitor_update_verb(self):
+        captured: dict[str, Any] = {}
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            captured["method"] = request.method
+            captured["body"] = json.loads(request.content or b"{}")
+            return httpx.Response(200, json={"success": True}, request=request)
+
+        transport = httpx.MockTransport(_handler)
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        client._client = httpx.AsyncClient(
+            base_url=client._base_url, headers=client._headers(), transport=transport
+        )
+
+        async def run():
+            return await client.monitor_update("m-1", schedule="0 * * * *")
+
+        asyncio.run(run())
+        assert captured["method"] == "PATCH"
+        assert captured["body"]["schedule"] == "0 * * * *"
+
+    def test_monitor_run_verb(self):
+        client = _make_matched_client(
+            {
+                ("POST", "/v2/monitor/m-1/run"): _json_handler(
+                    {"id": "m-1", "last_result": "changed"}
+                )
+            }
+        )
+
+        async def run():
+            return await client.monitor_run("m-1")
+
+        result = asyncio.run(run())
+        assert result["last_result"] == "changed"
+
+    def test_monitor_create_search_config(self):
+        captured: dict[str, Any] = {}
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            captured["body"] = json.loads(request.content or b"{}")
+            return httpx.Response(200, json={"success": True}, request=request)
+
+        transport = httpx.MockTransport(_handler)
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        client._client = httpx.AsyncClient(
+            base_url=client._base_url, headers=client._headers(), transport=transport
+        )
+
+        async def run():
+            return await client.monitor_create(
+                monitor_type="search",
+                search_config={"query": "rust", "numResults": 5},
+            )
+
+        asyncio.run(run())
+        body = captured["body"]
+        assert body["monitor_type"] == "search"
+        assert body["search_config"]["query"] == "rust"
+        assert body["search_config"]["numResults"] == 5
+        assert "url" not in body
+
+
+# ── 429 retry behaviour (ADR-0053 rate-limit contract) ──
+
+
+class TestRateLimitRetry:
+    """Bounded retry for HTTP 429 responses honoring Retry-After."""
+
+    def test_429_retries_then_succeeds(self):
+        call_count = 0
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return httpx.Response(
+                    429,
+                    json={"error": "Rate limit exceeded", "retry_after_seconds": 1},
+                    headers={"Retry-After": "1"},
+                    request=request,
+                )
+            return httpx.Response(
+                200, json={"success": True, "data": {}}, request=request
+            )
+
+        transport = httpx.MockTransport(_handler)
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        client._client = httpx.AsyncClient(
+            base_url=client._base_url, headers=client._headers(), transport=transport
+        )
+
+        async def run():
+            return await client.scrape("https://example.com")
+
+        result = asyncio.run(run())
+        assert result.get("success") is True
+        assert call_count == 2
+
+    def test_429_exhausts_retries(self):
+        call_count = 0
+
+        def _handler(request: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            return httpx.Response(
+                429,
+                json={"error": "Rate limit exceeded"},
+                headers={"Retry-After": "1"},
+                request=request,
+            )
+
+        transport = httpx.MockTransport(_handler)
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        client._client = httpx.AsyncClient(
+            base_url=client._base_url, headers=client._headers(), transport=transport
+        )
+
+        async def run():
+            return await client.search("test")
+
+        result = asyncio.run(run())
+        assert result["status_code"] == 429
+        # initial + _MAX_429_RETRIES retries
+        assert call_count == 3
+
+    def test_429_retry_after_clamped(self):
+        """Retry-After is clamped to the bounded max wait."""
+        import groktocrawl_client
+
+        assert groktocrawl_client._MIN_RETRY_WAIT_SECONDS >= 1.0
+        assert groktocrawl_client._MAX_RETRY_WAIT_SECONDS <= 10.0
+
+
+# ── SSRF guard for server-side downloads (parse tool) ─────────────
+
+
+class TestParseSSRFGuard:
+    """_validate_download_url blocks internal fetches (security review P1)."""
+
+    def test_rejects_non_http_scheme(self):
+        from groktocrawl_client import _validate_download_url
+
+        with pytest.raises(ValueError):
+            _validate_download_url("file:///etc/passwd")
+        with pytest.raises(ValueError):
+            _validate_download_url("ftp://example.com/file")
+
+    def test_rejects_localhost_and_loopback(self):
+        from groktocrawl_client import _validate_download_url
+
+        for url in (
+            "http://localhost:8000/x",
+            "http://127.0.0.1:8000/x",
+            "http://[::1]:8000/x",
+        ):
+            with pytest.raises(ValueError, match="not allowed"):
+                _validate_download_url(url)
+
+    def test_rejects_private_ip_literals(self):
+        from groktocrawl_client import _validate_download_url
+
+        for ip in ("10.0.0.1", "192.168.1.1", "172.16.0.1", "169.254.169.254"):
+            with pytest.raises(ValueError, match="private"):
+                _validate_download_url(f"http://{ip}/x")
+
+    def test_rejects_hostname_resolving_to_private_ip(self, monkeypatch):
+        from groktocrawl_client import _validate_download_url
+
+        def _fake_getaddrinfo(host, *args, **kwargs):
+            return [(2, 1, 6, "", ("10.0.0.5", 0))]
+
+        monkeypatch.setattr("groktocrawl_client.socket.getaddrinfo", _fake_getaddrinfo)
+        with pytest.raises(ValueError, match="private"):
+            _validate_download_url("http://internal.example.com/x")
+
+    def test_accepts_public_ip_literal(self):
+        from groktocrawl_client import _validate_download_url
+
+        assert _validate_download_url("http://93.184.216.34/x") == (
+            "http://93.184.216.34/x"
+        )
+
+    def test_accepts_public_hostname(self, monkeypatch):
+        from groktocrawl_client import _validate_download_url
+
+        def _fake_getaddrinfo(host, *args, **kwargs):
+            return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+        monkeypatch.setattr("groktocrawl_client.socket.getaddrinfo", _fake_getaddrinfo)
+        assert _validate_download_url("https://example.com/doc.pdf") == (
+            "https://example.com/doc.pdf"
+        )
+
+
+class TestParseDownload:
+    """parse() download path: redirect re-validation and happy path."""
+
+    class _FakeResponse:
+        def __init__(
+            self, status_code: int, headers: dict | None = None, content: bytes = b""
+        ):
+            self.status_code = status_code
+            self.headers = headers or {}
+            self._content = content
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                req = httpx.Request("GET", "http://placeholder")
+                raise httpx.HTTPStatusError(
+                    f"HTTP {self.status_code}",
+                    request=req,
+                    response=httpx.Response(self.status_code, request=req),
+                )
+
+        async def aiter_bytes(self):
+            for i in range(0, len(self._content), 1024):
+                yield self._content[i : i + 1024]
+
+    class _FakeClient:
+        def __init__(self, handler):
+            self._handler = handler
+            self.headers: dict[str, str] = {}
+            self.closed = False
+
+        async def get(self, url):
+            return self._handler(url)
+
+        async def aclose(self):
+            self.closed = True
+
+    def _patch_download_client(self, monkeypatch, handler):
+        import groktocrawl_client
+
+        monkeypatch.setattr(
+            groktocrawl_client.httpx,
+            "AsyncClient",
+            lambda *args, **kwargs: self._FakeClient(handler),
+        )
+
+    def _set_shared_client(self, client):
+        """Wire the shared client (upload path) BEFORE patching AsyncClient.
+
+        parse() uses ``httpx.AsyncClient`` for both the shared client and
+        the download client, so the shared client must exist before the
+        download client is faked.
+        """
+        client._client = httpx.AsyncClient(
+            base_url=client._base_url,
+            headers=client._headers(),
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    json={"success": True, "data": {"markdown": "# parsed"}},
+                    request=request,
+                )
+            ),
+        )
+
+    def test_parse_rejects_private_url_without_network(self, monkeypatch):
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        self._set_shared_client(client)
+
+        def _handler(url):
+            raise AssertionError(f"must not download: {url}")
+
+        self._patch_download_client(monkeypatch, _handler)
+
+        async def run():
+            return await client.parse("http://10.0.0.1/secret")
+
+        result = asyncio.run(run())
+        assert "private" in result["error"]
+
+    def test_parse_blocks_redirect_to_private_host(self, monkeypatch):
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        self._set_shared_client(client)
+
+        def _fake_getaddrinfo(host, *args, **kwargs):
+            return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+        monkeypatch.setattr("groktocrawl_client.socket.getaddrinfo", _fake_getaddrinfo)
+
+        def _handler(url):
+            # First hop (public) redirects to an internal host.
+            return self._FakeResponse(302, {"location": "http://10.0.0.1/secret"})
+
+        self._patch_download_client(monkeypatch, _handler)
+
+        async def run():
+            return await client.parse("https://example.com/doc.pdf")
+
+        result = asyncio.run(run())
+        assert "private" in result["error"]
+
+    def test_parse_happy_path(self, monkeypatch):
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        self._set_shared_client(client)
+
+        def _fake_getaddrinfo(host, *args, **kwargs):
+            return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+        monkeypatch.setattr("groktocrawl_client.socket.getaddrinfo", _fake_getaddrinfo)
+
+        def _handler(url):
+            return self._FakeResponse(
+                200,
+                {"content-type": "application/pdf"},
+                b"%PDF-1.4 fake content",
+            )
+
+        self._patch_download_client(monkeypatch, _handler)
+
+        async def run():
+            return await client.parse("https://example.com/doc.pdf")
+
+        result = asyncio.run(run())
+        assert result["success"] is True
+        assert result["data"]["markdown"] == "# parsed"
+
+    def test_parse_rejects_oversized_download(self, monkeypatch):
+        import groktocrawl_client
+
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        self._set_shared_client(client)
+
+        def _fake_getaddrinfo(host, *args, **kwargs):
+            return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+        monkeypatch.setattr("groktocrawl_client.socket.getaddrinfo", _fake_getaddrinfo)
+
+        def _handler(url):
+            return self._FakeResponse(
+                200,
+                {"content-type": "application/pdf"},
+                b"x" * (groktocrawl_client._MAX_DOWNLOAD_BYTES + 1024),
+            )
+
+        self._patch_download_client(monkeypatch, _handler)
+
+        async def run():
+            return await client.parse("https://example.com/huge.pdf")
+
+        result = asyncio.run(run())
+        assert "exceeds" in result["error"]
 
 
 # ── VAL-MCP-K04: Recovery after transient outage ──

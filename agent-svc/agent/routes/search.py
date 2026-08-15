@@ -179,52 +179,40 @@ async def search(request: Request, body: SearchRequest) -> SearchResponse:
             finally:
                 await semantic.close()
 
-        # Hybrid vector mode: SearXNG + Qdrant in parallel, merge, dedup
+        # Hybrid vector mode: concurrent SearXNG + Qdrant discovery, blended
+        # deterministically by the shared hybrid planner.
         elif body.retrieval_mode == "hybrid_vector":
+            from ..research.hybrid import plan_hybrid_retrieval
             from ..semantic_client import SemanticClient
 
             semantic = SemanticClient(request.app.state.semantic_url)
             try:
-                # Fetch SearXNG results first
-                searxng_results, _health = await searxng.search(
-                    body.query,
+                plan = await plan_hybrid_retrieval(
+                    query=body.query,
                     limit=body.limit,
+                    searxng=searxng,
+                    semantic=semantic,
                     categories=body.categories,
                     sources=effective_sources,
+                    admission=request.app.state.admission,
                 )
-                if not searxng_results and _health.engines_responding == 0:
+                if (
+                    plan.web_count == 0
+                    and plan.web_health is not None
+                    and plan.web_health.engines_responding == 0
+                ):
                     warning_msg = (
                         "All search engines returned no results. "
                         "Check your BRAVE_API_KEY configuration."
                     )
-                # Query vector index in parallel (async would be better, but sequential for now)
-                vector_results = await semantic.search_vector(
-                    body.query, limit=body.limit
-                )
-
-                # Convert both to SearchResult lists
-                kw_results = [
+                search_results = [
                     SearchResult(
                         url=r["url"],
                         title=r["title"],
                         description=r.get("description", ""),
                     )
-                    for r in searxng_results
+                    for r in plan.results
                 ]
-                vec_results = [
-                    SearchResult(url=r["url"], title=r["title"], description="")
-                    for r in vector_results
-                ]
-
-                # Merge and dedup by URL (keep first occurrence — SearXNG has richer metadata)
-                seen: set[str] = set()
-                merged: list[SearchResult] = []
-                for r in kw_results + vec_results:
-                    if r.url not in seen:
-                        seen.add(r.url)
-                        merged.append(r)
-
-                search_results = merged[: body.limit]
             finally:
                 await semantic.close()
 

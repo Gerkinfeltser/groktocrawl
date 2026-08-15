@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from common.logging import setup_logging
 from common.metrics import METRICS
 from common.middleware import add_request_id_middleware
+from common.stage_metrics import inc_counter, set_gauge
 from common.url import extract_domain, is_private_host
 
 from .settings import load_settings
@@ -136,9 +137,24 @@ add_request_id_middleware(app)
 METRICS.counter("browser_sessions_created_total", "Total browser sessions created")
 METRICS.counter("browser_sessions_expired_total", "Total browser sessions expired")
 
+_ACTIVE_SESSIONS = "groktocrawl_browser_active_sessions"
+_ACTIVE_SESSIONS_HELP = "Currently active browser sessions"
+_DESTROYED_TOTAL = "groktocrawl_browser_sessions_destroyed_total"
+_DESTROYED_TOTAL_HELP = "Browser sessions destroyed by reason"
+
+
+def _update_active_sessions_gauge() -> None:
+    set_gauge(_ACTIVE_SESSIONS, _ACTIVE_SESSIONS_HELP, {}, float(len(_sessions)))
+
+
+def _record_session_destroyed(reason: str) -> None:
+    inc_counter(_DESTROYED_TOTAL, _DESTROYED_TOTAL_HELP, {"reason": reason})
+
+
 # In-memory session store
 _sessions: dict[str, "SessionData"] = {}
 _CLEANUP_INTERVAL = 30  # seconds
+_update_active_sessions_gauge()
 
 
 class SessionData:
@@ -225,14 +241,20 @@ async def _cleanup_loop():
         expired = [sid for sid, s in _sessions.items() if s.expired]
         for sid in expired:
             logger.info("Cleaning up expired session %s", sid)
-            await _destroy_session(sid)
+            await _destroy_session(sid, reason="expired")
 
 
-async def _destroy_session(session_id: str) -> None:
+async def _destroy_session(session_id: str, reason: str = "deleted") -> None:
     """Close and remove a browser session."""
     session = _sessions.pop(session_id, None)
     if session is None:
         return
+    _record_session_destroyed(reason)
+    if reason == "expired":
+        METRICS.counter(
+            "browser_sessions_expired_total", "Total browser sessions expired"
+        ).inc()
+    _update_active_sessions_gauge()
     await _cleanup_resources(
         session_id,
         session.page,
@@ -344,9 +366,16 @@ async def create_browser(req: BrowserCreateRequest):
         }""")
         session = SessionData(browser, context, page, req.ttl, p)
         _sessions[session_id] = session
+        METRICS.counter(
+            "browser_sessions_created_total", "Total browser sessions created"
+        ).inc()
+        _update_active_sessions_gauge()
         logger.info("Created browser session %s (TTL: %ds)", session_id, req.ttl)
         return BrowserCreateResponse(id=session_id)
     except Exception as e:
+        # The session was never added to ``_sessions``, so it must not be
+        # counted as destroyed. The failure is already observable via the
+        # flat ``browser_sessions_created_total`` counter + the 500 response.
         await _cleanup_resources(session_id, page, context, browser, p)
         logger.error("Failed to create browser session: %s", e)
         raise HTTPException(
@@ -361,7 +390,7 @@ async def execute_action(session_id: str, req: BrowserExecuteRequest):
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found or expired")
     if session.expired:
-        await _destroy_session(session_id)
+        await _destroy_session(session_id, reason="expired")
         raise HTTPException(status_code=404, detail="Session expired")
 
     session.last_used = time.time()
@@ -469,7 +498,7 @@ async def list_browsers():
     sessions = []
     for sid, s in list(_sessions.items()):
         if s.expired:
-            await _destroy_session(sid)
+            await _destroy_session(sid, reason="expired")
         else:
             sessions.append(
                 {

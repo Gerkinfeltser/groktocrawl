@@ -316,17 +316,16 @@ async def execute_plan(
 
                     # Scrape discovered URLs
                     if new_urls:
-                        scraped_docs, scraped_details = await _scrape_urls(
+                        artifacts = await _scrape_urls(
                             new_urls[:5],
                             scraper,
                             min_sources=1,
                             max_attempts=min(5, len(new_urls)),
                         )
-                        for doc, _detail in zip(
-                            scraped_docs, scraped_details, strict=False
-                        ):
+                        for artifact in artifacts:
+                            doc = artifact.to_document()
                             accumulated_context_parts.append(doc)
-                            yield f"data: {json.dumps({'type': 'scrape', 'url': _detail.get('url', ''), 'chars': len(doc)})}\n\n"
+                            yield f"data: {json.dumps({'type': 'scrape', 'url': artifact.url, 'chars': len(doc)})}\n\n"
 
                 elif action == "scrape":
                     # Phase description may contain URLs or URL hints

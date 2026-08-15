@@ -39,11 +39,25 @@ async def create_crawl(
     rate_limiter = request.app.state.rate_limiter
     allowed, rate_remaining = await rate_limiter.check(f"{client_ip}:crawl")
     if not allowed:
+        retry_after = rate_limiter.retry_after_seconds()
         METRICS.counter("search_calls_total", "Total search calls", ["status"]).inc(
             {"status": "rate_limited"}
         )
+        METRICS.counter(
+            "rate_limited_admissions_total",
+            "Admission requests rejected by per-client rate limit",
+            ["operation", "bucket"],
+        ).inc({"operation": "crawl", "bucket": "crawl"})
         raise RateLimitedError(
-            detail=f"Per-client rate limit exceeded ({rate_limiter.limit}/{rate_limiter.window}s)"
+            detail=(
+                f"Per-client rate limit exceeded "
+                f"({rate_limiter.limit}/{rate_limiter.window}s) — retry in {retry_after}s"
+            ),
+            retry_after_seconds=retry_after,
+            bucket="crawl",
+            limit=rate_limiter.limit,
+            remaining=0,
+            reset_at=rate_limiter.reset_at_iso(),
         )
 
     response.headers["X-Crawl-Rate-Remaining"] = (
@@ -183,7 +197,8 @@ async def create_crawl(
             scrape_options=body.scrape_options.model_dump(mode="json", by_alias=True)
             if body.scrape_options
             else None,
-        )
+        ),
+        job_id=job_id,
     )
     return CrawlCreateResponse(id=job_id)
 
@@ -318,6 +333,11 @@ async def get_crawl_status(
         completed_at=completed_at,
         expires_at=job.get("expires_at"),
         duration=duration,
+        retry_at=job.get("retry_at"),
+        retry_attempt=job.get("retry_attempt"),
+        retry_limit=job.get("retry_limit"),
+        retryable=True if job.get("status") == "retry_scheduled" else None,
+        retry_reason=job.get("retry_reason"),
     )
 
 
@@ -328,6 +348,7 @@ async def cancel_crawl(request: Request, job_id: str) -> AgentCancelResponse:
         raise NotFoundError(
             detail="Job not found or already completed", details={"job_id": job_id}
         )
+    request.app.state.task_tracker.cancel_job(job_id)
     return AgentCancelResponse(success=True)
 
 

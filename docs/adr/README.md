@@ -19,7 +19,7 @@ An Architecture Decision Record captures an important architectural decision mad
 
 **Status legend:** accepted ADRs describe decisions used by the current implementation. Proposed ADRs are design work, not promises of current behavior. Superseded ADRs are historical context only; use their successor when documenting current behavior.
 
-**Current accepted decisions:** ADR-0001–0012, 0014–0022, 0026, 0029–0035, 0038, 0039, 0043, 0044, 0045, 0046, and 0047.
+**Current accepted decisions:** ADR-0001–0012, 0014–0022, 0026, 0029–0035, 0038, 0039, 0043, 0044, 0045, 0046, 0047, 0048, 0049, 0050, 0051, 0052, and 0053.
 
 **Proposed work:** ADR-0023–0025, 0027, 0028, 0036, 0037, and 0040–0042.
 
@@ -72,5 +72,10 @@ An Architecture Decision Record captures an important architectural decision mad
 | 0045 | [Outbound Webhook Destination Validation](0045-outbound-webhook-destination-validation.md) | accepted |
 | 0046 | [Enforce QA Checks and Review Policy on main](0046-enforce-qa-checks-and-review-policy-on-main.md) | accepted |
 | 0047 | [Defer Restart-Safe Execution with an Explicit Job-Durability Contract](0047-defer-restart-safe-execution.md) | accepted |
-
+| 0048 | [Stage-Level Latency and Capacity Telemetry](0048-stage-level-telemetry.md) | accepted |
+| 0049 | [Research Memory Compatibility Fingerprint, Freshness, and Stale-While-Revalidate](0049-research-memory-compatibility-freshness-swr.md) | accepted |
+| 0050 | [Request-Scoped Source Artifact and Lightweight-Only Scrape Contract](0050-source-artifact-and-lightweight-only-scrape.md) | accepted |
+| 0051 | [Global Admission Control and End-to-End Cancellation](0051-global-admission-control-and-cancellation.md) | accepted |
+| 0052 | [Concurrent Cache-Assisted Hybrid Retrieval Planner](0052-hybrid-retrieval-planner.md) | accepted |
+| 0053 | [Retryable Rate-Limit Contract](0053-retryable-rate-limit-contract.md) | accepted |
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full ADR workflow: when to write an ADR, how to number it, and how to get it reviewed in a PR.

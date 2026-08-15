@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir \
 
 # Copy application code
 COPY groktocrawl_client.py .
+COPY browser_handler.py .
 COPY mcp_server.py .
 COPY session_store.py .
 

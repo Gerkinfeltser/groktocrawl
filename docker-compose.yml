@@ -217,11 +217,13 @@ services:
     build:
       context: .
       dockerfile: parse-svc/Dockerfile
+    image: ghcr.io/groktopus/groktocrawl-parse
     restart: unless-stopped
 
   mcp-svc:
     build:
       context: ./mcp-svc
+    image: ghcr.io/groktopus/groktocrawl-mcp
     ports:
       - '${MCP_PORT:-8002}:8002'
     environment:

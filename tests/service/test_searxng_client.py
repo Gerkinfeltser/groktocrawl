@@ -260,3 +260,114 @@ class TestSearch:
 
             await client.close()
             assert closed
+
+
+class TestRateLimitClassification:
+    """Downstream 429 classification (ADR-0053)."""
+
+    def test_parse_retry_after_valid_seconds(self):
+        from agent.searxng_client import _parse_retry_after
+
+        assert _parse_retry_after("37") == 37.0
+        assert _parse_retry_after("2.5") == 2.5
+
+    def test_parse_retry_after_invalid_values(self):
+        from agent.searxng_client import _parse_retry_after
+
+        assert _parse_retry_after(None) is None
+        assert _parse_retry_after("") is None
+        assert _parse_retry_after("soon") is None
+        assert _parse_retry_after("-3") is None
+        assert _parse_retry_after("Tue, 15 Nov 1994 08:12:31 GMT") is None
+        # Non-finite values must be treated as absent, never relayed.
+        assert _parse_retry_after("inf") is None
+        assert _parse_retry_after("nan") is None
+        assert _parse_retry_after("1e309") is None
+
+    @pytest.mark.asyncio
+    async def test_429_raises_retryable_error_with_retry_after(self, client):
+        from agent.exceptions import RetryableRateLimitError
+
+        with pytest.MonkeyPatch.context() as mp:
+
+            async def mock_get(url, params=None):
+                import types
+
+                r = types.SimpleNamespace()
+                r.status_code = 429
+                r.headers = {"Retry-After": "37"}
+                r.text = "rate limited"
+                return r
+
+            mp.setattr(client._client, "get", mock_get)
+
+            with pytest.raises(RetryableRateLimitError) as exc:
+                await client.search("test", raise_on_rate_limit=True)
+            assert exc.value.retry_after_seconds == 37.0
+            assert exc.value.error_code == "RATE_LIMITED"
+
+    @pytest.mark.asyncio
+    async def test_429_without_retry_metadata_uses_none_delay(self, client):
+        from agent.exceptions import RetryableRateLimitError
+
+        with pytest.MonkeyPatch.context() as mp:
+
+            async def mock_get(url, params=None):
+                import types
+
+                r = types.SimpleNamespace()
+                r.status_code = 429
+                r.headers = {}
+                r.text = "rate limited"
+                return r
+
+            mp.setattr(client._client, "get", mock_get)
+
+            with pytest.raises(RetryableRateLimitError) as exc:
+                await client.search("test", raise_on_rate_limit=True)
+            assert exc.value.retry_after_seconds is None
+
+    @pytest.mark.asyncio
+    async def test_429_is_not_swallowed_as_empty_results_when_opted_in(self, client):
+        """An opted-in call site must never see a capacity condition as an empty set."""
+        from agent.exceptions import RetryableRateLimitError
+
+        with pytest.MonkeyPatch.context() as mp:
+
+            async def mock_get(url, params=None):
+                import types
+
+                r = types.SimpleNamespace()
+                r.status_code = 429
+                r.headers = {}
+                r.text = "rate limited"
+                return r
+
+            mp.setattr(client._client, "get", mock_get)
+
+            with pytest.raises(RetryableRateLimitError):
+                await client.search("test", raise_on_rate_limit=True)
+
+    @pytest.mark.asyncio
+    async def test_default_call_site_degrades_to_empty_results_on_429(self, client):
+        """Degrading call sites (session steps, /v2/search) keep legacy behavior.
+
+        An upstream 429 must not hard-fail a search step that tolerates
+        empty results (ADR-0053 opt-in classification).
+        """
+        with pytest.MonkeyPatch.context() as mp:
+
+            async def mock_get(url, params=None):
+                import types
+
+                r = types.SimpleNamespace()
+                r.status_code = 429
+                r.headers = {"Retry-After": "37"}
+                r.text = "rate limited"
+                return r
+
+            mp.setattr(client._client, "get", mock_get)
+
+            results, health = await client.search("test")
+            assert results == []
+            assert "429" in health.detail

@@ -7,21 +7,26 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from common.stage_metrics import StreamTiming, observe_elapsed
+
 from ..llm import LLMClient
 from ..models import CitationStyle
 from ..scraper_client import ScraperClient
 from ..searxng_client import SearXNGClient
 from .citations import _apply_citation_style, _build_answer_user_prompt
 from .discovery import (
+    _build_answer_context,
     _run_answer_discover_and_scrape,
     _run_multi_query_discover_and_scrape,
     _run_research_discover_and_scrape,
+    _scrape_answer_sources,
     _scrape_urls,
 )
 from .events import ResearchEvent
 from .gaps import _detect_gaps
 from .plan import _generate_research_plan
 from .prompts import ANSWER_SYSTEM_PROMPT, EXTRACT_SYSTEM_PROMPT, SYSTEM_PROMPT
+from .sources import SourceArtifact, artifacts_to_documents_and_details
 from .utils import _validate_json_if_schema
 
 logger = logging.getLogger(__name__)
@@ -188,6 +193,7 @@ async def _run_research_events(
                     user_prompt=prompt,
                     context=combined_context,
                     schema=schema,
+                    stage="synthesis",
                 )
                 _validate_json_if_schema(answer, schema)
                 if not schema and not stream_tokens:
@@ -205,6 +211,7 @@ async def _run_research_events(
                     system_prompt=SYSTEM_PROMPT,
                     user_prompt=prompt,
                     context=combined_context,
+                    stage="synthesis",
                 ):
                     if event["type"] == "token":
                         answer += event["content"]
@@ -235,6 +242,12 @@ async def _run_research_events(
             "latency_ms": int((time.monotonic() - start) * 1000),
         }
     finally:
+        observe_elapsed(
+            "groktocrawl_research_total_seconds",
+            "Total research pipeline latency by search type",
+            {"search_type": search_type},
+            start,
+        )
         await searxng.close()
         await scraper.close()
         await llm.close()
@@ -339,7 +352,8 @@ async def run_extract(
     llm = LLMClient(llm_base_url, llm_api_key, llm_model)
 
     try:
-        documents, source_details = await _scrape_urls(urls, scraper)
+        artifacts = await _scrape_urls(urls, scraper)
+        documents, source_details = artifacts_to_documents_and_details(artifacts)
         context = "\n\n---\n\n".join(documents) if documents else ""
 
         if not context:
@@ -357,6 +371,7 @@ async def run_extract(
             user_prompt=user_prompt,
             context=context,
             schema=schema,
+            stage="extract",
         )
         _validate_json_if_schema(answer, schema)
         return {
@@ -448,6 +463,7 @@ async def run_answer(
                 user_prompt=user_prompt,
                 context=context,
                 schema=output_schema,
+                stage="answer",
             )
         else:
             user_prompt = _build_answer_user_prompt(query, cs)
@@ -455,6 +471,7 @@ async def run_answer(
                 system_prompt=ANSWER_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 context=context,
+                stage="answer",
             )
 
         # Apply citation style post-processing
@@ -510,6 +527,7 @@ async def run_answer_stream(
       {"type": "error", "content": "..."} — error
     """
     start = time.monotonic()
+    timing = StreamTiming("answer")
 
     cs = (
         citation_style
@@ -531,18 +549,26 @@ async def run_answer_stream(
     try:
         # Step 1: Search (fetch extra results to allow for scrape failures)
         logger.info("Answer (stream): searching for: %s", query)
-        search_results, _health = await searxng.search(query, limit=num_sources * 2)
+        if retrieval_mode == "hybrid_vector":
+            # Defer web search to the hybrid planner (concurrent web+vector).
+            search_results: list[dict] = []
+        else:
+            search_results, _health = await searxng.search(
+                query, limit=num_sources * 2, raise_on_rate_limit=True
+            )
 
+        rerank_artifacts: list[SourceArtifact] = []
         if retrieval_mode != "keyword":
             from .rerank import _rerank_answer_sources
 
-            search_results = await _rerank_answer_sources(
+            search_results, rerank_artifacts = await _rerank_answer_sources(
                 search_results,
                 query,
                 retrieval_mode,
                 semantic_url,
                 scraper_url,
                 num_sources,
+                searxng=searxng,
             )
         target_urls = [r["url"] for r in search_results if r.get("url")]
 
@@ -556,71 +582,18 @@ async def run_answer_stream(
             for r in search_results
             if r.get("url")
         ]
+        timing.on_first_event()
         yield {"type": "sources_pending", "sources": pending_sources}
 
-        # Step 2: Scrape (prefer text sources, use video platforms as fallback)
-        from .scoring import _is_video_platform_url
-
-        preferred = [u for u in target_urls if not _is_video_platform_url(u)]
-        deprioritized = [u for u in target_urls if _is_video_platform_url(u)]
-
-        if deprioritized:
-            logger.info(
-                "Answer (stream): %d preferred + %d video-platform URLs (deprioritized)",
-                len(preferred),
-                len(deprioritized),
-            )
-
-        documents, source_details = await _scrape_urls(
-            preferred,
-            scraper,
-            min_sources=num_sources,
-            max_attempts=num_sources * 2,
+        # Step 2: Scrape only missing content, reusing rerank artifacts
+        artifacts = await _scrape_answer_sources(
+            target_urls, rerank_artifacts, scraper, num_sources
         )
 
-        if len(documents) < num_sources and deprioritized:
-            logger.info(
-                "Answer (stream): %d/%d from preferred sources, falling back to video-platform URLs",
-                len(documents),
-                num_sources,
-            )
-            remaining = num_sources - len(documents)
-            more_docs, more_details = await _scrape_urls(
-                deprioritized,
-                scraper,
-                min_sources=remaining,
-                max_attempts=remaining * 2,
-            )
-            documents.extend(more_docs)
-            source_details.extend(more_details)
-
-        # Step 3: Build context
-        context_parts = []
-        source_map: list[dict[str, str]] = []
-        for i, (doc, detail) in enumerate(
-            zip(documents, source_details, strict=False), start=1
-        ):
-            url = detail["url"]
-            title = next(
-                (r.get("title", "") for r in search_results if r.get("url") == url), ""
-            )
-            context_parts.append(f"[{i}] Source: {url}\nTitle: {title}\n\n{doc}")
-            source_map.append(
-                {
-                    "url": url,
-                    "title": title,
-                    "relevance": next(
-                        (
-                            r.get("description", "")
-                            for r in search_results
-                            if r.get("url") == url
-                        ),
-                        "",
-                    ),
-                }
-            )
-
-        context = "\n\n---\n\n".join(context_parts) if context_parts else ""
+        # Step 3: Build context + citation source map from artifacts
+        built = _build_answer_context(search_results, artifacts)
+        context = built["context"]
+        source_map = built["source_map"]
 
         if not context:
             yield {"type": "sources", "sources": []}
@@ -647,6 +620,7 @@ async def run_answer_stream(
                 user_prompt=user_prompt,
                 context=context,
                 schema=output_schema,
+                stage="answer",
             )
         else:
             user_prompt = _build_answer_user_prompt(query, cs)
@@ -655,8 +629,10 @@ async def run_answer_stream(
                 system_prompt=ANSWER_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 context=context,
+                stage="answer",
             ):
                 if event["type"] == "token":
+                    timing.on_first_token()
                     full_answer += event["content"]
                     yield {"type": "token", "content": event["content"]}
                 elif event["type"] == "error":

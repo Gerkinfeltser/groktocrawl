@@ -6,7 +6,19 @@ import sys
 
 import pytest
 
+from common.metrics import METRICS
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scraper-svc"))
+
+
+def _histogram_count(name: str) -> float:
+    """Return the observed ``_count`` for an unlabeled histogram by name."""
+    out = METRICS.generate_openmetrics()
+    marker = f"{name}_count"
+    if marker not in out:
+        return 0.0
+    tail = out[out.index(marker) + len(marker) :].lstrip()
+    return float(tail.split()[0])
 
 
 @pytest.mark.asyncio
@@ -155,6 +167,25 @@ async def test_cancellation_completes_cleanup_before_releasing_browser_slot(
     assert semaphore.locked() is False
 
 
+@pytest.mark.asyncio
+async def test_browser_semaphore_capacity_metrics_recorded(monkeypatch):
+    import scraper.fetch_tiers as tiers
+
+    monkeypatch.setattr(tiers, "_browser_semaphore", asyncio.Semaphore(1))
+
+    async def lifecycle(_url: str, _proxy: dict | None) -> str:
+        return "ok"
+
+    monkeypatch.setattr(tiers, "_playwright_fetch_unbounded", lifecycle, raising=False)
+
+    await tiers._playwright_fetch_with_proxy("https://example.test", None)
+
+    out = METRICS.generate_openmetrics()
+    assert "# TYPE groktocrawl_browser_semaphore_wait_seconds histogram" in out
+    assert "groktocrawl_browser_semaphore_wait_seconds_count" in out
+    assert "groktocrawl_browser_semaphore_active 0.0" in out
+
+
 def test_browser_concurrency_setting_defaults_to_four():
     from scraper.settings import ScraperSettings
 
@@ -169,3 +200,54 @@ def test_browser_concurrency_setting_rejects_zero():
 
     with pytest.raises(ValidationError):
         ScraperSettings.model_validate({"SCRAPER_MAX_BROWSER_CONCURRENCY": "0"})
+
+
+@pytest.mark.asyncio
+async def test_goto_raise_still_records_navigation_histogram(monkeypatch):
+    """A page.goto failure must still sample the navigation latency histogram."""
+    import playwright.async_api
+    import scraper.cookie_store as cookie_store
+    import scraper.fetch_tiers as tiers
+    import scraper.stealth as stealth
+
+    class Browser:
+        async def close(self) -> None:
+            return None
+
+    class Page:
+        async def goto(self, *_args, **_kwargs):
+            raise RuntimeError("navigation timeout")
+
+    class Context:
+        async def new_page(self):
+            return Page()
+
+    class PlaywrightManager:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    async def create_browser(_playwright, _url):
+        return Browser(), False
+
+    async def create_context(browser, cloakbrowser=False, **kwargs):
+        return Context()
+
+    async def noop_inject(_url, _context):
+        return None
+
+    monkeypatch.setattr(
+        playwright.async_api, "async_playwright", lambda: PlaywrightManager()
+    )
+    monkeypatch.setattr(stealth, "create_stealth_browser", create_browser)
+    monkeypatch.setattr(stealth, "create_stealth_context", create_context)
+    monkeypatch.setattr(cookie_store, "inject_cookies", noop_inject)
+
+    before = _histogram_count("groktocrawl_browser_navigation_seconds")
+
+    with pytest.raises(RuntimeError, match="navigation timeout"):
+        await tiers._playwright_fetch_unbounded("https://example.test", None)
+
+    assert _histogram_count("groktocrawl_browser_navigation_seconds") == before + 1

@@ -4,15 +4,26 @@ Works with any OpenAI-compatible API: OpenAI, Anthropic, OpenRouter,
 Ollama, llama.cpp, vLLM, etc.
 """
 
+import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncGenerator
 
 import httpx
 
+from common.stage_metrics import inc_counter, observe_elapsed
+
+from .admission import AdmissionRejectedError, get_admission
+from .cancel import JobCancelledError, raise_if_cancelled
 from .settings import load_settings
 
 logger = logging.getLogger(__name__)
+
+_LLM_CALL_SECONDS = "groktocrawl_llm_call_seconds"
+_LLM_CALL_SECONDS_HELP = "LLM call latency by research stage"
+_LLM_CALLS_TOTAL = "groktocrawl_llm_calls_total"
+_LLM_CALLS_TOTAL_HELP = "Total LLM calls by research stage and outcome"
 
 
 class LLMClient:
@@ -23,6 +34,7 @@ class LLMClient:
         base_url: str = "https://api.openai.com/v1",
         api_key: str = "",
         model: str = "",
+        admission=None,
     ):
         if not model:
             raise ValueError(
@@ -31,6 +43,7 @@ class LLMClient:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
+        self._admission = admission if admission is not None else get_admission()
         self._client = httpx.AsyncClient(timeout=120)
 
     async def generate_stream(
@@ -39,6 +52,7 @@ class LLMClient:
         user_prompt: str,
         context: str | None = None,
         schema: dict | None = None,
+        stage: str = "other",
     ) -> AsyncGenerator[dict[str, str], None]:
         """Generate a streaming response from the LLM (SSE).
 
@@ -61,6 +75,7 @@ class LLMClient:
             schema: Optional JSON Schema for structured output.  When
                 provided, the entire generation is performed non-streaming
                 and returned as a single ``"done"`` event.
+            stage: Bounded stage identifier for latency telemetry.
         """
         # Schema mode: delegate to generate() non-streaming
         if schema:
@@ -69,11 +84,20 @@ class LLMClient:
                 user_prompt=user_prompt,
                 context=context,
                 schema=schema,
+                stage=stage,
             )
             if content.startswith("Error:"):
                 yield {"type": "error", "content": content}
             else:
                 yield {"type": "done", "full_content": content}
+            return
+
+        raise_if_cancelled()
+        llm_weight = self._admission.weight_for("llm")
+        try:
+            await self._admission.acquire("llm", weight=llm_weight)
+        except AdmissionRejectedError as exc:
+            yield {"type": "error", "content": f"Error: LLM admission rejected: {exc}"}
             return
 
         messages = [{"role": "system", "content": system_prompt}]
@@ -115,6 +139,8 @@ class LLMClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         full_content = ""
+        outcome = "success"
+        started = time.monotonic()
         try:
             async with httpx.AsyncClient(timeout=120) as client:
                 async with client.stream(
@@ -124,6 +150,7 @@ class LLMClient:
                     json=body,
                 ) as resp:
                     if resp.status_code != 200:
+                        outcome = "error"
                         error_text = await resp.aread()
                         logger.error(
                             "LLM API error %d: %s", resp.status_code, error_text[:500]
@@ -155,9 +182,28 @@ class LLMClient:
 
             yield {"type": "done", "full_content": full_content}
 
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException, so the generic handler above
+            # never sees it. Record the outcome before unwinding so a
+            # client-cancelled SSE generation is not counted as "success".
+            outcome = "cancelled"
+            raise
+        except JobCancelledError:
+            raise
         except Exception as e:
+            outcome = "error"
             logger.error("LLM stream call failed: %s", e)
             yield {"type": "error", "content": f"LLM call failed: {e}"}
+        finally:
+            observe_elapsed(
+                _LLM_CALL_SECONDS, _LLM_CALL_SECONDS_HELP, {"stage": stage}, started
+            )
+            inc_counter(
+                _LLM_CALLS_TOTAL,
+                _LLM_CALLS_TOTAL_HELP,
+                {"stage": stage, "outcome": outcome},
+            )
+            self._admission.release("llm", weight=llm_weight)
 
     async def generate(
         self,
@@ -165,6 +211,7 @@ class LLMClient:
         user_prompt: str,
         context: str | None = None,
         schema: dict | None = None,
+        stage: str = "other",
     ) -> str:
         """Generate a response from the LLM.
 
@@ -173,10 +220,20 @@ class LLMClient:
             user_prompt: The user's task/question.
             context: Optional scraped context to include.
             schema: Optional JSON Schema for structured output.
+            stage: Bounded stage identifier for latency telemetry.
 
         Returns:
             The LLM's response text.
         """
+        raise_if_cancelled()
+        llm_weight = self._admission.weight_for("llm")
+        try:
+            await self._admission.acquire("llm", weight=llm_weight)
+        except AdmissionRejectedError as exc:
+            return f"Error: LLM admission rejected: {exc}"
+
+        started = time.monotonic()
+        outcome = "success"
         messages = [{"role": "system", "content": system_prompt}]
 
         if context:
@@ -233,6 +290,7 @@ class LLMClient:
                 json=body,
             )
             if resp.status_code != 200:
+                outcome = "error"
                 logger.error("LLM API error %d: %s", resp.status_code, resp.text[:500])
                 return f"Error: LLM API returned {resp.status_code}"
 
@@ -240,9 +298,22 @@ class LLMClient:
             content = result["choices"][0]["message"]["content"]
             return content  # type: ignore[no-any-return]
 
+        except JobCancelledError:
+            raise
         except Exception as e:
+            outcome = "error"
             logger.error("LLM call failed: %s", e)
             return f"Error: LLM call failed: {e}"
+        finally:
+            observe_elapsed(
+                _LLM_CALL_SECONDS, _LLM_CALL_SECONDS_HELP, {"stage": stage}, started
+            )
+            inc_counter(
+                _LLM_CALLS_TOTAL,
+                _LLM_CALLS_TOTAL_HELP,
+                {"stage": stage, "outcome": outcome},
+            )
+            self._admission.release("llm", weight=llm_weight)
 
     async def check_health(self) -> bool:
         """Check if the LLM backend is reachable and responding.
