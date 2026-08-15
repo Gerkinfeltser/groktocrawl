@@ -199,9 +199,9 @@ def test_continues_after_failed_url():
         }
         scraper = MockScraper(responses=responses)
         urls = ["https://example.com/fail", "https://example.com/ok"]
-        docs, sources = await _scrape_urls(urls, scraper, min_sources=2)
-        assert len(docs) == 1
-        assert sources[0]["url"] == "https://example.com/ok"
+        artifacts = await _scrape_urls(urls, scraper, min_sources=2)
+        assert len(artifacts) == 1
+        assert artifacts[0].url == "https://example.com/ok"
 
     asyncio.run(run())
 
@@ -215,11 +215,8 @@ def test_returns_empty_on_all_failures():
             "https://example.com/b": FAILED_PAGE,
         }
         scraper = MockScraper(responses=responses)
-        docs, sources = await _scrape_urls(
-            list(responses.keys()), scraper, min_sources=2
-        )
-        assert docs == []
-        assert sources == []
+        artifacts = await _scrape_urls(list(responses.keys()), scraper, min_sources=2)
+        assert artifacts == []
 
     asyncio.run(run())
 
