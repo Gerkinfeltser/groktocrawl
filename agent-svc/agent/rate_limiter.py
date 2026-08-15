@@ -72,19 +72,19 @@ class SlidingWindowRateLimiter:
         now = int(now if now is not None else time.time())
         return max(1, self.window - (now % self.window))
 
-    @staticmethod
-    def reset_at_iso(now: float | None = None) -> str | None:
+    def reset_at_iso(self, now: float | None = None) -> str | None:
         """ISO 8601 UTC timestamp of the next window boundary.
 
-        Returns ``None`` when the deployment cannot derive a reset time
-        (never the case for this limiter, but kept nullable for contract
-        compatibility).
+        This is the actual reset instant — ``now + retry_after_seconds`` —
+        not the current time. Returns ``None`` when the deployment cannot
+        derive a reset time (never the case for this limiter, but kept
+        nullable for contract compatibility).
         """
         from datetime import UTC, datetime
 
         now_ts = now if now is not None else time.time()
-        retry_after = datetime.fromtimestamp(now_ts, tz=UTC)
-        return retry_after.isoformat()
+        boundary = now_ts + self.retry_after_seconds(now=now_ts)
+        return datetime.fromtimestamp(boundary, tz=UTC).isoformat()
 
     @staticmethod
     def parse_limit(limit_str: str) -> tuple[int, int]:

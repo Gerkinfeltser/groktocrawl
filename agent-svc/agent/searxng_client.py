@@ -1,6 +1,7 @@
 """SearXNG JSON API client."""
 
 import logging
+import math
 import time
 from dataclasses import dataclass
 
@@ -72,7 +73,7 @@ def _parse_retry_after(value: str | None) -> float | None:
         seconds = float(value.strip())
     except (TypeError, ValueError):
         return None
-    if seconds < 0:
+    if not math.isfinite(seconds) or seconds < 0:
         return None
     return seconds
 

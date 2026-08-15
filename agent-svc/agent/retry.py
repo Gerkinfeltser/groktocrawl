@@ -76,10 +76,12 @@ def clamp_retry_delay(
         jitter_fn: Zero-argument jitter source (tests inject a
             deterministic value); defaults to uniform(0, 0.5).
     """
+    if policy.max_wait_seconds <= 0:
+        # A zero/negative ceiling must never defeat the >=1s hot-loop floor,
+        # even when the server supplied a positive delay.
+        return _MIN_RETRY_DELAY_SECONDS
     if server_delay is not None and server_delay > 0:
         return min(max(server_delay, _MIN_RETRY_DELAY_SECONDS), policy.max_wait_seconds)
-    if policy.max_wait_seconds <= 0:
-        return _MIN_RETRY_DELAY_SECONDS
     fallback = min(
         policy.fallback_seconds * (2 ** (attempt - 1)), policy.max_wait_seconds
     )

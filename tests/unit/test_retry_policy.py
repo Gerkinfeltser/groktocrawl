@@ -91,6 +91,31 @@ class TestClampRetryDelay:
         delay = clamp_retry_delay(None, attempt=1, policy=policy, jitter_fn=lambda: 0.0)
         assert delay == 1.0
 
+    def test_zero_max_wait_never_defeats_floor_with_server_delay(self):
+        """A zero ceiling must not yield a 0s delay even for a positive server delay."""
+        policy = RetryPolicy(max_attempts=3, fallback_seconds=1.0, max_wait_seconds=0.0)
+        delay = clamp_retry_delay(37.0, attempt=1, policy=policy, jitter_fn=lambda: 0.0)
+        assert delay == 1.0
+
+    def test_non_finite_server_delay_falls_back(self):
+        policy = RetryPolicy(
+            max_attempts=3, fallback_seconds=1.0, max_wait_seconds=60.0
+        )
+        # inf is clamped to the ceiling (bounded, never crashes); nan fails
+        # the > 0 comparison and falls back to the minimum delay.
+        assert (
+            clamp_retry_delay(
+                float("inf"), attempt=1, policy=policy, jitter_fn=lambda: 0.0
+            )
+            == 60.0
+        )
+        assert (
+            clamp_retry_delay(
+                float("nan"), attempt=1, policy=policy, jitter_fn=lambda: 0.0
+            )
+            == 1.0
+        )
+
 
 class TestRetrySleepCancellation:
     @pytest.mark.asyncio
@@ -119,10 +144,16 @@ class TestLimiterResetMath:
         assert limiter.retry_after_seconds(now=119.9) == 1
 
     def test_reset_at_iso_derivable(self):
+        import datetime as _dt
+
         limiter = SlidingWindowRateLimiter(redis=object(), limit=10, window_seconds=60)
         reset = limiter.reset_at_iso(now=30.0)
         assert reset is not None
         assert reset.endswith("+00:00")
+        # reset_at is the next window boundary (now + retry_after = 60s past
+        # the epoch), not the current time.
+        parsed = _dt.datetime.fromisoformat(reset)
+        assert parsed.timestamp() == 60.0
 
 
 class TestRetryMetadata:

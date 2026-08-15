@@ -62,8 +62,15 @@ async def groktocrawl_error_handler(
     headers: dict[str, str] = {}
     if isinstance(exc, RateLimitedError):
         retry_after = getattr(exc, "retry_after_seconds", None)
-        if retry_after is not None:
-            retry_after_int = max(1, int(retry_after))
+        if retry_after is not None and _finite_delay(retry_after):
+            # Relay bounded: non-finite values would crash int() (500) and
+            # excessive values are clamped to the documented retry ceiling
+            # (ADR-0053 policy max wait) so downstream clients never see an
+            # absurd delay.
+            from .retry import default_retry_policy
+
+            max_wait = max(1.0, default_retry_policy().max_wait_seconds)
+            retry_after_int = max(1, min(int(retry_after), int(max_wait)))
             content["retryable"] = True
             content["retry_after_seconds"] = retry_after_int
             headers["Retry-After"] = str(retry_after_int)
@@ -77,6 +84,11 @@ async def groktocrawl_error_handler(
         content=content,
         headers=headers,
     )
+
+
+def _finite_delay(value: float) -> bool:
+    """True for finite non-negative delay values (rejects inf/nan/negatives)."""
+    return value >= 0 and value == value and value != float("inf")
 
 
 def create_app() -> FastAPI:

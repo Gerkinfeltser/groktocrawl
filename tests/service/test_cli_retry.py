@@ -86,11 +86,19 @@ class TestRetryDelay:
             _cli_ns["_retry_delay_from_response"]({}, {"Retry-After": "soon"}) is None
         )
         assert _cli_ns["_retry_delay_from_response"]({}, {"Retry-After": "-3"}) is None
+        assert _cli_ns["_retry_delay_from_response"]({}, {"Retry-After": "inf"}) is None
+        assert _cli_ns["_retry_delay_from_response"]({}, {"Retry-After": "nan"}) is None
         assert _cli_ns["_retry_delay_from_response"]({}, {}) is None
 
     def test_negative_body_delay_is_absent(self):
         assert (
             _cli_ns["_retry_delay_from_response"]({"retry_after_seconds": -1}, {})
+            is None
+        )
+        assert (
+            _cli_ns["_retry_delay_from_response"](
+                {"retry_after_seconds": float("inf")}, {}
+            )
             is None
         )
 

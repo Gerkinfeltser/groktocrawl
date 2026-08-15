@@ -279,6 +279,10 @@ class TestRateLimitClassification:
         assert _parse_retry_after("soon") is None
         assert _parse_retry_after("-3") is None
         assert _parse_retry_after("Tue, 15 Nov 1994 08:12:31 GMT") is None
+        # Non-finite values must be treated as absent, never relayed.
+        assert _parse_retry_after("inf") is None
+        assert _parse_retry_after("nan") is None
+        assert _parse_retry_after("1e309") is None
 
     @pytest.mark.asyncio
     async def test_429_raises_retryable_error_with_retry_after(self, client):

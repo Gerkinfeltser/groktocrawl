@@ -237,3 +237,42 @@ class TestOpenAPIModels:
         assert "retryable" not in body
         assert "retry_after_seconds" not in body
         assert "Retry-After" not in resp.headers
+
+    def test_non_finite_retry_delay_is_not_relayed(self):
+        """inf/nan delays must not crash the handler into a 500 (review P2)."""
+        from agent.exceptions import RetryableRateLimitError
+
+        app = FastAPI()
+        app.add_exception_handler(GroktoCrawlError, groktocrawl_error_handler)
+
+        @app.get("/boom")
+        async def boom():
+            raise RetryableRateLimitError(
+                "downstream capacity", retry_after_seconds=float("inf")
+            )
+
+        with TestClient(app) as test_client:
+            resp = test_client.get("/boom")
+        assert resp.status_code == 429
+        body = resp.json()
+        assert "retryable" not in body
+        assert "Retry-After" not in resp.headers
+
+    def test_excessive_retry_delay_is_clamped_on_relay(self):
+        """The relayed delay is clamped to the documented retry ceiling."""
+        from agent.exceptions import RetryableRateLimitError
+
+        app = FastAPI()
+        app.add_exception_handler(GroktoCrawlError, groktocrawl_error_handler)
+
+        @app.get("/boom")
+        async def boom():
+            raise RetryableRateLimitError(
+                "downstream capacity", retry_after_seconds=99999
+            )
+
+        with TestClient(app) as test_client:
+            resp = test_client.get("/boom")
+        assert resp.status_code == 429
+        assert resp.json()["retry_after_seconds"] == 60
+        assert resp.headers["Retry-After"] == "60"

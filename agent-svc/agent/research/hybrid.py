@@ -421,6 +421,7 @@ async def plan_hybrid_retrieval(
     cache_max_age_ms: int | None = DEFAULT_CACHE_MAX_AGE_MS,
     web_timeout: float = WEB_TIMEOUT_SECONDS,
     vector_timeout: float = VECTOR_TIMEOUT_SECONDS,
+    raise_on_rate_limit: bool = False,
 ) -> HybridRetrievalResult:
     """Plan a ``hybrid_vector`` retrieval: discover, blend, and acquire.
 
@@ -443,6 +444,12 @@ async def plan_hybrid_retrieval(
             the cache lookup).
         web_timeout: Per-branch timeout for web discovery (seconds).
         vector_timeout: Per-branch timeout for vector discovery (seconds).
+        raise_on_rate_limit: Opt into the retryable downstream 429
+            classification (ADR-0053): when the web branch answers HTTP 429
+            the classified ``RetryableRateLimitError`` propagates to the
+            caller (answer pipeline) instead of degrading to vector-only
+            results. Degrading call sites (``/v2/search`` hybrid_vector)
+            leave it ``False``.
 
     Returns:
         A :class:`HybridRetrievalResult` with blended ``results``, acquired
@@ -465,7 +472,11 @@ async def plan_hybrid_retrieval(
         assert searxng is not None  # nosec — guarded by web_needed
         async with admission.resource("lightweight_fetch", weight=1):
             results, health = await searxng.search(
-                query, limit=limit, categories=categories, sources=sources
+                query,
+                limit=limit,
+                categories=categories,
+                sources=sources,
+                raise_on_rate_limit=raise_on_rate_limit,
             )
         web_list.extend(results)
         web_health = health
@@ -489,6 +500,19 @@ async def plan_hybrid_retrieval(
         outcomes = await asyncio.gather(*coros, return_exceptions=True)
         for label, outcome in zip(labels, outcomes, strict=True):
             if isinstance(outcome, BaseException):
+                from ..exceptions import RetryableRateLimitError
+
+                if (
+                    label == "web"
+                    and raise_on_rate_limit
+                    and isinstance(outcome, RetryableRateLimitError)
+                ):
+                    # Whole-operation retry semantics (ADR-0053): a
+                    # downstream capacity condition must reach the caller so
+                    # sync answer renders a retryable 429 and the worker
+                    # schedules a bounded retry — never degrade to
+                    # vector-only results.
+                    raise outcome
                 logger.warning("Hybrid %s discovery failed: %s", label, outcome)
 
     web_order, vector_order, by_norm = _collect_candidates(web_list, vector_list)

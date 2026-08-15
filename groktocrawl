@@ -616,9 +616,9 @@ def _retry_delay_from_response(
     """Server-provided retry delay, or ``None`` when absent/invalid.
 
     Prefers the structured ``retry_after_seconds`` body field, then the
-    ``Retry-After`` header (numeric seconds only; HTTP-date values and
-    negative values are treated as absent so the caller falls back to its
-    bounded policy).
+    ``Retry-After`` header (finite numeric seconds only; HTTP-date values,
+    ``inf``/``nan``, and negative values are treated as absent so the
+    caller falls back to its bounded policy).
     """
     if isinstance(body, dict):
         raw = body.get("retry_after_seconds")
@@ -627,7 +627,7 @@ def _retry_delay_from_response(
                 value = float(raw)
             except (TypeError, ValueError):
                 value = None
-            if value is not None and value >= 0:
+            if value is not None and _finite_non_negative(value):
                 return value
     if headers:
         raw = headers.get("Retry-After")
@@ -636,9 +636,14 @@ def _retry_delay_from_response(
                 value = float(str(raw).strip())
             except (TypeError, ValueError):
                 return None
-            if value >= 0:
+            if _finite_non_negative(value):
                 return value
     return None
+
+
+def _finite_non_negative(value: float) -> bool:
+    """True for finite, non-negative values (rejects inf/nan and negatives)."""
+    return value >= 0 and value == value and value != float("inf")
 
 
 def _jitter() -> float:
