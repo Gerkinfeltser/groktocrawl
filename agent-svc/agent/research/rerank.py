@@ -1,11 +1,17 @@
 """Answer source reranking for the answer pipeline."""
 
 import logging
+import time
+
+from common.stage_metrics import observe_elapsed
 
 from ..scraper_client import ScraperClient
 from ..semantic_client import SemanticClient
 
 logger = logging.getLogger(__name__)
+
+_RANK_SECONDS = "groktocrawl_research_rank_seconds"
+_RANK_SECONDS_HELP = "URL ranking/reranking latency by mode"
 
 
 async def _rerank_answer_sources(
@@ -20,6 +26,7 @@ async def _rerank_answer_sources(
     if retrieval_mode == "keyword" or not search_results:
         return search_results
 
+    started = time.monotonic()
     semantic = SemanticClient(semantic_url)
     scraper = ScraperClient(scraper_url)
     try:
@@ -84,5 +91,6 @@ async def _rerank_answer_sources(
 
         return search_results
     finally:
+        observe_elapsed(_RANK_SECONDS, _RANK_SECONDS_HELP, {"mode": "rerank"}, started)
         await semantic.close()
         await scraper.close()

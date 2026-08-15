@@ -25,6 +25,8 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from common.stage_metrics import StreamTiming
+
 from .crawler import CrawlEngine, CrawlOptions, CrawlResult
 from .scraper_client import ScraperClient
 from .store import JobStore
@@ -95,6 +97,7 @@ async def crawl_event_stream(
     """
     event_id = 0
     start_time = time.monotonic()
+    timing = StreamTiming("crawl")
 
     # Queue bridging crawl engine page_callback → SSE generator
     page_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
@@ -173,6 +176,7 @@ async def crawl_event_stream(
 
         # Main event loop: read from page_queue with heartbeat timeout
         while not crawl_task.done() or not page_queue.empty():
+            timing.on_first_event()
             try:
                 page_data = await asyncio.wait_for(
                     page_queue.get(), timeout=_HEARTBEAT_INTERVAL
@@ -282,6 +286,7 @@ async def crawl_event_stream(
             "completed": result.completed,
             "latency_ms": elapsed_ms,
         }
+        timing.on_first_event()
         event_id += 1
         yield f"id: {event_id}\ndata: {json.dumps(done_payload)}\n\n"
 
@@ -344,6 +349,7 @@ async def crawl_event_stream(
             "url": url,
             "error": str(exc),
         }
+        timing.on_first_event()
         event_id += 1
         yield f"id: {event_id}\ndata: {json.dumps(error_payload)}\n\n"
     finally:

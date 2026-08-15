@@ -14,6 +14,7 @@ from .scraper_client import ScraperClient
 from .settings import load_settings
 from .store import JobStore
 from .webhook import deliver_webhook
+from .workload_metrics import record_job_cancelled, record_job_end, record_job_start
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ async def _run_job_with_observability(
     METRICS.counter("jobs_submitted_total", "Total jobs submitted", ["type"]).inc(
         {"type": job_type}
     )
+    record_job_start(job_type)
     try:
         result = await work_fn()
         store.complete_job(job_id, result)
@@ -64,6 +66,7 @@ async def _run_job_with_observability(
             {"type": job_type}
         )
     finally:
+        record_job_end(job_type)
         if cleanup_fn:
             await cleanup_fn()
 
@@ -300,6 +303,7 @@ async def _process_crawl_async(
     METRICS.counter("jobs_submitted_total", "Total jobs submitted", ["type"]).inc(
         {"type": job_type}
     )
+    record_job_start(job_type)
 
     try:
         # ── Fire crawl.started webhook ────────────────────────
@@ -407,6 +411,7 @@ async def _process_crawl_async(
         if was_cancelled:
             # Store is already marked cancelled by cancel_job();
             # do NOT overwrite with complete_job().
+            record_job_cancelled(job_type)
             logger.info("Crawl %s was cancelled — preserving cancelled status", job_id)
             if task_tracker is not None:
                 task_tracker.create_background_task(
@@ -516,6 +521,7 @@ async def _process_crawl_async(
             ["status"],
         ).observe({"status": "failed"}, elapsed)
     finally:
+        record_job_end(job_type)
         await scraper.close()
 
 
@@ -541,6 +547,7 @@ async def _process_batch_scrape_async(
             # Check for cancellation between URLs
             job_meta = store.get_job(job_id)
             if job_meta and job_meta.get("status") == "cancelled":
+                record_job_cancelled("batch_scrape")
                 logger.info(
                     "Batch scrape %s cancelled after %d/%d URLs",
                     job_id,
@@ -778,6 +785,7 @@ async def _process_plan_execution_async(
                 # Check for cancellation between phases
                 job_meta = store.get_job(job_id)
                 if job_meta and job_meta.get("status") == "cancelled":
+                    record_job_cancelled("plan_execute")
                     logger.info(
                         "Plan execution %s cancelled at phase %d/%d",
                         job_id,
@@ -882,6 +890,7 @@ async def _process_plan_execution_async(
                         ),
                         user_prompt=synthesis_prompt,
                         context=context or None,
+                        stage="plan_execute",
                     )
                     if full_synthesis:
                         accumulated_context_parts.append(full_synthesis)

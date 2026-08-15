@@ -9,6 +9,8 @@ import logging
 import time as _time
 from typing import Any
 
+from common.stage_metrics import StreamTiming
+
 from ..models import CitationStyle
 from .citations import _apply_citation_style
 from .loop import run_research_stream
@@ -90,6 +92,7 @@ async def stream_research_live(
     Forwards all 8 SSE event types: token, done, sources_pending,
     source_scraped, sources, error, status, research_plan, research_pass.
     """
+    timing = StreamTiming("agent")
     async for event in run_research_stream(
         prompt=prompt,
         urls=urls,
@@ -105,6 +108,7 @@ async def stream_research_live(
         citation_style=citation_style,
         search_type=search_type,
     ):
+        timing.on_first_event()
         if event["type"] == "sources_pending":
             yield f"data: {json.dumps({'type': 'sources_pending', 'sources': event['sources']})}\n\n"
         elif event["type"] == "source_scraped":
@@ -112,6 +116,7 @@ async def stream_research_live(
         elif event["type"] == "sources":
             yield f"data: {json.dumps({'type': 'sources', 'sources': event['sources']})}\n\n"
         elif event["type"] == "token":
+            timing.on_first_token()
             yield f"data: {json.dumps({'type': 'token', 'content': event['content']})}\n\n"
         elif event["type"] == "done":
             # Apply citation_style to transform result text markers

@@ -127,6 +127,7 @@ async def run_enrich_pipeline(
                     result_text = await llm.generate(
                         system_prompt=ENRICH_SYSTEM_PROMPT,
                         user_prompt=extract_prompt,
+                        stage="enrich",
                     )
                     extracted = _parse_enrich_json(result_text)
                 except Exception:

@@ -20,13 +20,21 @@ Config via env:
 import json
 import logging
 import os
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 from redis import Redis
 
+from common.stage_metrics import inc_counter, observe_elapsed
+
 logger = logging.getLogger(__name__)
+
+_MEMORY_LOOKUP_SECONDS = "groktocrawl_research_memory_lookup_seconds"
+_MEMORY_LOOKUP_SECONDS_HELP = "Research memory lookup latency"
+_MEMORY_LOOKUP_TOTAL = "groktocrawl_research_memory_lookup_total"
+_MEMORY_LOOKUP_TOTAL_HELP = "Research memory lookups by outcome"
 
 # ── Constants ──────────────────────────────────────────────────
 QDRANT_COLLECTION: str = "research_memory"
@@ -217,98 +225,119 @@ class ResearchMemory:
             - ``freshness`` (str | None) — ``fresh``, ``aging``, ``stale``
             - ``memory_id`` (str | None)
         """
+        started = time.monotonic()
+        outcome = "miss"
         try:
-            embedding = await self._embed(prompt)
-        except Exception:
-            logger.warning("Failed to embed query for research memory", exc_info=True)
-            return {"hit": False}
-
-        try:
-            await self._ensure_collection()
-
-            qdrant = await self._get_qdrant()
-            search_payload: dict[str, Any] = {
-                "vector": embedding,
-                "limit": 5,
-                "with_payload": True,
-            }
-            if user_id:
-                search_payload["filter"] = {
-                    "must": [{"key": "user_id", "match": {"value": user_id}}]
-                }
-
-            resp = await qdrant.post(
-                f"{self._qdrant_url}/collections/{QDRANT_COLLECTION}/points/search",
-                json=search_payload,
-            )
-            resp.raise_for_status()
-            results = resp.json().get("result", [])
-        except Exception:
-            logger.warning("Qdrant search failed for research memory", exc_info=True)
-            return {"hit": False}
-
-        if not results:
-            return {"hit": False}
-
-        # Walk results in descending score order; first Valkey hit wins
-        for result in results:
-            score = float(result.get("score", 0))
-            if score < self.threshold:
-                logger.debug(
-                    "Best Qdrant match below threshold: %.3f < %.2f",
-                    score,
-                    self.threshold,
+            try:
+                embedding = await self._embed(prompt)
+            except Exception:
+                outcome = "error"
+                logger.warning(
+                    "Failed to embed query for research memory", exc_info=True
                 )
                 return {"hit": False}
 
-            payload = result.get("payload", {})
-            memory_id = payload.get("memory_id", "")
-            if not memory_id:
-                continue
-
-            artifact_raw = self.redis.get(f"memory:{memory_id}:data")
-            if artifact_raw is None:
-                # Valkey key expired — skip; sweep will clean it up later
-                logger.debug("Valkey key missing for memory_id=%s, skipping", memory_id)
-                continue
-
             try:
-                artifact = json.loads(artifact_raw)
-            except (json.JSONDecodeError, TypeError):
-                logger.debug("Unparseable artifact for memory_id=%s", memory_id)
-                continue
+                await self._ensure_collection()
 
-            # ── Freshness classification ────────────────────────
-            created_at_str = artifact.get("created_at", "")
-            try:
-                created_at = datetime.fromisoformat(created_at_str)
-            except (ValueError, TypeError):
-                created_at = datetime.now(UTC)
+                qdrant = await self._get_qdrant()
+                search_payload: dict[str, Any] = {
+                    "vector": embedding,
+                    "limit": 5,
+                    "with_payload": True,
+                }
+                if user_id:
+                    search_payload["filter"] = {
+                        "must": [{"key": "user_id", "match": {"value": user_id}}]
+                    }
 
-            age_seconds = (datetime.now(UTC) - created_at).total_seconds()
+                resp = await qdrant.post(
+                    f"{self._qdrant_url}/collections/{QDRANT_COLLECTION}/points/search",
+                    json=search_payload,
+                )
+                resp.raise_for_status()
+                results = resp.json().get("result", [])
+            except Exception:
+                outcome = "error"
+                logger.warning(
+                    "Qdrant search failed for research memory", exc_info=True
+                )
+                return {"hit": False}
 
-            if age_seconds < self.ttl / 4:
-                freshness = "fresh"
-            elif age_seconds < self.ttl / 2:
-                freshness = "aging"
-            else:
-                freshness = "stale"
+            if not results:
+                return {"hit": False}
 
-            logger.info(
-                "Research memory HIT (memory_id=%s, similarity=%.3f, freshness=%s)",
-                memory_id,
-                score,
-                freshness,
+            # Walk results in descending score order; first Valkey hit wins
+            for result in results:
+                score = float(result.get("score", 0))
+                if score < self.threshold:
+                    logger.debug(
+                        "Best Qdrant match below threshold: %.3f < %.2f",
+                        score,
+                        self.threshold,
+                    )
+                    return {"hit": False}
+
+                payload = result.get("payload", {})
+                memory_id = payload.get("memory_id", "")
+                if not memory_id:
+                    continue
+
+                artifact_raw = self.redis.get(f"memory:{memory_id}:data")
+                if artifact_raw is None:
+                    # Valkey key expired — skip; sweep will clean it up later
+                    logger.debug(
+                        "Valkey key missing for memory_id=%s, skipping", memory_id
+                    )
+                    continue
+
+                try:
+                    artifact = json.loads(artifact_raw)
+                except (json.JSONDecodeError, TypeError):
+                    logger.debug("Unparseable artifact for memory_id=%s", memory_id)
+                    continue
+
+                # ── Freshness classification ────────────────────────
+                created_at_str = artifact.get("created_at", "")
+                try:
+                    created_at = datetime.fromisoformat(created_at_str)
+                except (ValueError, TypeError):
+                    created_at = datetime.now(UTC)
+
+                age_seconds = (datetime.now(UTC) - created_at).total_seconds()
+
+                if age_seconds < self.ttl / 4:
+                    freshness = "fresh"
+                elif age_seconds < self.ttl / 2:
+                    freshness = "aging"
+                else:
+                    freshness = "stale"
+
+                outcome = freshness
+                logger.info(
+                    "Research memory HIT (memory_id=%s, similarity=%.3f, freshness=%s)",
+                    memory_id,
+                    score,
+                    freshness,
+                )
+                return {
+                    "hit": True,
+                    "artifact": artifact,
+                    "similarity": score,
+                    "freshness": freshness,
+                    "memory_id": memory_id,
+                }
+
+            return {"hit": False}
+        finally:
+            observe_elapsed(
+                _MEMORY_LOOKUP_SECONDS, _MEMORY_LOOKUP_SECONDS_HELP, {}, started
             )
-            return {
-                "hit": True,
-                "artifact": artifact,
-                "similarity": score,
-                "freshness": freshness,
-                "memory_id": memory_id,
-            }
-
-        return {"hit": False}
+            inc_counter(
+                _MEMORY_LOOKUP_TOTAL,
+                _MEMORY_LOOKUP_TOTAL_HELP,
+                {"outcome": outcome},
+            )
 
     async def store(
         self,

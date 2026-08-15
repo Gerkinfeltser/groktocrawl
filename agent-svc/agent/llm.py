@@ -6,13 +6,21 @@ Ollama, llama.cpp, vLLM, etc.
 
 import json
 import logging
+import time
 from collections.abc import AsyncGenerator
 
 import httpx
 
+from common.stage_metrics import inc_counter, observe_elapsed
+
 from .settings import load_settings
 
 logger = logging.getLogger(__name__)
+
+_LLM_CALL_SECONDS = "groktocrawl_llm_call_seconds"
+_LLM_CALL_SECONDS_HELP = "LLM call latency by research stage"
+_LLM_CALLS_TOTAL = "groktocrawl_llm_calls_total"
+_LLM_CALLS_TOTAL_HELP = "Total LLM calls by research stage and outcome"
 
 
 class LLMClient:
@@ -39,6 +47,7 @@ class LLMClient:
         user_prompt: str,
         context: str | None = None,
         schema: dict | None = None,
+        stage: str = "other",
     ) -> AsyncGenerator[dict[str, str], None]:
         """Generate a streaming response from the LLM (SSE).
 
@@ -61,6 +70,7 @@ class LLMClient:
             schema: Optional JSON Schema for structured output.  When
                 provided, the entire generation is performed non-streaming
                 and returned as a single ``"done"`` event.
+            stage: Bounded stage identifier for latency telemetry.
         """
         # Schema mode: delegate to generate() non-streaming
         if schema:
@@ -69,6 +79,7 @@ class LLMClient:
                 user_prompt=user_prompt,
                 context=context,
                 schema=schema,
+                stage=stage,
             )
             if content.startswith("Error:"):
                 yield {"type": "error", "content": content}
@@ -115,6 +126,8 @@ class LLMClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         full_content = ""
+        outcome = "success"
+        started = time.monotonic()
         try:
             async with httpx.AsyncClient(timeout=120) as client:
                 async with client.stream(
@@ -124,6 +137,7 @@ class LLMClient:
                     json=body,
                 ) as resp:
                     if resp.status_code != 200:
+                        outcome = "error"
                         error_text = await resp.aread()
                         logger.error(
                             "LLM API error %d: %s", resp.status_code, error_text[:500]
@@ -156,8 +170,18 @@ class LLMClient:
             yield {"type": "done", "full_content": full_content}
 
         except Exception as e:
+            outcome = "error"
             logger.error("LLM stream call failed: %s", e)
             yield {"type": "error", "content": f"LLM call failed: {e}"}
+        finally:
+            observe_elapsed(
+                _LLM_CALL_SECONDS, _LLM_CALL_SECONDS_HELP, {"stage": stage}, started
+            )
+            inc_counter(
+                _LLM_CALLS_TOTAL,
+                _LLM_CALLS_TOTAL_HELP,
+                {"stage": stage, "outcome": outcome},
+            )
 
     async def generate(
         self,
@@ -165,6 +189,7 @@ class LLMClient:
         user_prompt: str,
         context: str | None = None,
         schema: dict | None = None,
+        stage: str = "other",
     ) -> str:
         """Generate a response from the LLM.
 
@@ -173,10 +198,13 @@ class LLMClient:
             user_prompt: The user's task/question.
             context: Optional scraped context to include.
             schema: Optional JSON Schema for structured output.
+            stage: Bounded stage identifier for latency telemetry.
 
         Returns:
             The LLM's response text.
         """
+        started = time.monotonic()
+        outcome = "success"
         messages = [{"role": "system", "content": system_prompt}]
 
         if context:
@@ -233,6 +261,7 @@ class LLMClient:
                 json=body,
             )
             if resp.status_code != 200:
+                outcome = "error"
                 logger.error("LLM API error %d: %s", resp.status_code, resp.text[:500])
                 return f"Error: LLM API returned {resp.status_code}"
 
@@ -241,8 +270,18 @@ class LLMClient:
             return content  # type: ignore[no-any-return]
 
         except Exception as e:
+            outcome = "error"
             logger.error("LLM call failed: %s", e)
             return f"Error: LLM call failed: {e}"
+        finally:
+            observe_elapsed(
+                _LLM_CALL_SECONDS, _LLM_CALL_SECONDS_HELP, {"stage": stage}, started
+            )
+            inc_counter(
+                _LLM_CALLS_TOTAL,
+                _LLM_CALLS_TOTAL_HELP,
+                {"stage": stage, "outcome": outcome},
+            )
 
     async def check_health(self) -> bool:
         """Check if the LLM backend is reachable and responding.
