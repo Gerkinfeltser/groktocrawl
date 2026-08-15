@@ -38,6 +38,7 @@ class ScraperClient:
         ignore_robots_txt: bool = False,
         robots_user_agent: str | None = None,
         scrape_options: dict | None = None,
+        lightweight_only: bool = False,
     ) -> dict:
         """Scrape a URL via the scraper service.
 
@@ -46,6 +47,9 @@ class ScraperClient:
 
         When ``force_browser`` is True, the scraper-svc skips lightweight
         tiers and goes straight to Playwright render (Tier 3).
+
+        When ``lightweight_only`` is True, the scraper-svc runs only the
+        lightweight tiers and short-circuits before the browser tier.
 
         When ``ignore_robots_txt`` is True, the scraper-svc bypasses
         robots.txt enforcement but still applies per-domain rate limiting.
@@ -62,6 +66,8 @@ class ScraperClient:
             body: dict = {"url": url}
             if force_browser:
                 body["force_browser"] = True
+            if lightweight_only:
+                body["lightweight_only"] = True
             if ignore_robots_txt:
                 body["ignore_robots_txt"] = True
             if robots_user_agent is not None:
@@ -156,9 +162,12 @@ class ScraperClient:
                 with contextlib.suppress(Exception):
                     t.result()
 
-        # Cancel remaining tasks
+        # Cancel remaining speculative tasks and await them so no pending
+        # task is destroyed or races a later scrape lifecycle.
         for t in pending:
             t.cancel()
+        if pending:
+            await _asyncio.gather(*pending, return_exceptions=True)
 
         logger.info(
             "Batch scraped %d/%d URLs (min_sources=%d)",
@@ -177,6 +186,15 @@ class ScraperClient:
     ) -> dict:
         """Try generic scrape first, fall back to browser-tier on failure/empty.
 
+        The generic stage runs with ``lightweight_only=True`` so it can never
+        silently enter the browser tier; a timed-out generic task is cancelled
+        and awaited before the forced-browser retry starts.
+
+        A generic result that carries a ``warning`` key is degraded content
+        (below the scraper's quality threshold, e.g. JS-only shells, cookie
+        walls, or nav-only pages) and is treated as insufficient so the
+        forced-browser retry still runs.
+
         Returns the first successful result dict (with ``success``, ``data`` keys)
         or a failure dict.
         """
@@ -184,15 +202,22 @@ class ScraperClient:
 
         last_failure: dict | None = None
 
-        # ── Try generic (fast path) ───────────────────────────
-        try:
-            result = await _asyncio.wait_for(
-                self.scrape(url, force_browser=False, scrape_options=scrape_options),
-                timeout=generic_timeout,
+        # ── Try generic (lightweight fast path) ────────────────
+        generic_task = _asyncio.create_task(
+            self.scrape(
+                url,
+                force_browser=False,
+                lightweight_only=True,
+                scrape_options=scrape_options,
             )
+        )
+        try:
+            result = await _asyncio.wait_for(generic_task, timeout=generic_timeout)
             data = result.get("data") or {}
-            if result.get("success") and (
-                data.get("markdown", "").strip() or data.get("download")
+            if (
+                result.get("success")
+                and not result.get("warning")
+                and (data.get("markdown", "").strip() or data.get("download"))
             ):
                 return result
             if result.get("error_code") == "CAPTCHA_UNRESOLVED":
@@ -200,15 +225,30 @@ class ScraperClient:
             last_failure = result
         except TimeoutError:
             logger.info("Generic scrape timed out for %s, trying browser fallback", url)
+            # Ensure the timed-out generic request is fully cancelled and
+            # awaited before a second (forced-browser) request starts.
+            generic_task.cancel()
+            await _asyncio.gather(generic_task, return_exceptions=True)
         except Exception as e:
             logger.warning(
                 "Generic scrape failed for %s: %s, trying browser fallback", url, e
             )
 
+        METRICS.counter(
+            "scrape_retries_total",
+            "Total explicit scrape retries by stage transition",
+            ["stage"],
+        ).inc({"stage": "generic_to_browser"})
+
         # ── Try browser (slow path, longer timeout) ────────────
         try:
             result = await _asyncio.wait_for(
-                self.scrape(url, force_browser=True, scrape_options=scrape_options),
+                self.scrape(
+                    url,
+                    force_browser=True,
+                    lightweight_only=False,
+                    scrape_options=scrape_options,
+                ),
                 timeout=browser_timeout,
             )
             data = result.get("data") or {}

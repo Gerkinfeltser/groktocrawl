@@ -943,16 +943,14 @@ async def _process_plan_execution_async(
                             )
 
                     if new_urls:
-                        scraped_docs, scraped_details = await _scrape_urls(
+                        artifacts = await _scrape_urls(
                             new_urls[:5],
                             scraper,
                             min_sources=1,
                             max_attempts=min(5, len(new_urls)),
                         )
-                        for doc, _detail in zip(
-                            scraped_docs, scraped_details, strict=False
-                        ):
-                            accumulated_context_parts.append(doc)
+                        for artifact in artifacts:
+                            accumulated_context_parts.append(artifact.to_document())
 
                 elif action == "synthesize":
                     context = (

@@ -2,12 +2,13 @@
 
 import asyncio
 import logging
+import time
 
-from common.url import extract_domain
-
+from ..metrics import METRICS
 from ..scraper_client import ScraperClient
 from ..searxng_client import SearXNGClient
 from .scoring import _filter_and_rank_urls, _is_video_platform_url
+from .sources import SourceArtifact, artifacts_to_documents_and_details
 
 logger = logging.getLogger(__name__)
 
@@ -18,10 +19,11 @@ async def _scrape_single(
     semaphore: asyncio.Semaphore,
     url_timeout: int = 70,
     scrape_options: dict | None = None,
-) -> tuple[str | None, dict | None]:
+) -> SourceArtifact | None:
     """Scrape a single URL with a semaphore for concurrency control.
 
-    Returns (document_text, source_detail_dict) or (None, None) on failure.
+    Returns a ``SourceArtifact`` carrying the fetched Markdown, or None on
+    failure.
     """
     async with semaphore:
         try:
@@ -32,23 +34,22 @@ async def _scrape_single(
             )
             if result.get("success") and result.get("data", {}).get("markdown"):
                 md = result["data"]["markdown"]
-                domain = extract_domain(url)
-                doc = f"Source: {url} (domain: {domain})\n\n{md[:8000]}"
-                src = {
-                    "url": url,
-                    "source": result["data"].get("source", "unknown"),
-                    "char_count": len(md),
-                }
-                return doc, src
+                return SourceArtifact(
+                    url=url,
+                    markdown=md,
+                    source=result["data"].get("source", "unknown"),
+                    char_count=len(md),
+                    fetched_at=time.time(),
+                )
             else:
                 logger.warning("Failed to scrape %s: %s", url, result.get("error"))
-                return None, None
+                return None
         except TimeoutError:
             logger.warning("Timeout scraping %s after %ss", url, url_timeout)
-            return None, None
+            return None
         except Exception as e:
             logger.warning("Error scraping %s: %s", url, e)
-            return None, None
+            return None
 
 
 async def _scrape_urls(
@@ -58,16 +59,17 @@ async def _scrape_urls(
     max_attempts: int | None = None,
     max_concurrent: int = 5,
     scrape_options: dict | None = None,
-) -> tuple[list[str], list[dict]]:
-    """Scrape URLs with bounded concurrency and return (documents, source_details).
+) -> list[SourceArtifact]:
+    """Scrape URLs with bounded concurrency and return ``SourceArtifact``s.
 
     Tries URLs in batches until ``min_sources`` are successfully scraped
     or the list is exhausted (whichever comes first).
-    Uses a semaphore (default ``max_concurrent`` = 5) with per-URL timeout (20s).
+    Uses a semaphore (default ``max_concurrent`` = 5) with per-URL timeout (70s).
     ``max_attempts`` sets an upper bound on how many URLs are tried.
+    Cancelled speculative tasks are awaited before returning so no pending
+    coroutine is left behind.
     """
-    documents: list[str] = []
-    source_details: list[dict] = []
+    artifacts: list[SourceArtifact] = []
     max_attempts = max_attempts or len(urls)
     semaphore = asyncio.Semaphore(max_concurrent)
     url_timeout = 70  # Accommodates scrape_with_fallback (20s generic + 45s browser)
@@ -75,7 +77,6 @@ async def _scrape_urls(
     # Process URLs in batches — launch concurrent tasks, collect results,
     # stop when min_sources is reached or max_attempts exhausted
     pending = list(urls)
-    task_to_url: dict[asyncio.Task, str] = {}
     tasks: set[asyncio.Task] = set()
     attempts = 0
 
@@ -87,7 +88,6 @@ async def _scrape_urls(
             task = asyncio.create_task(
                 _scrape_single(url, scraper, semaphore, url_timeout, scrape_options)
             )
-            task_to_url[task] = url
             tasks.add(task)
 
         if not tasks:
@@ -97,18 +97,19 @@ async def _scrape_urls(
         done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
         for task in done:
-            doc, src = task.result()
-            if doc and src:
-                documents.append(doc)
-                source_details.append(src)
-                if len(documents) >= min_sources:
-                    # Cancel remaining tasks and stop
+            artifact = task.result()
+            if artifact is not None:
+                artifacts.append(artifact)
+                if len(artifacts) >= min_sources:
+                    # Cancel remaining speculative tasks and await them so no
+                    # pending task is destroyed (or races browser cleanup).
                     for t in tasks:
                         t.cancel()
-                    tasks.clear()
-                    return documents, source_details
+                    if tasks:
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                    return artifacts
 
-    return documents, source_details
+    return artifacts
 
 
 async def _scrape_with_fallback(
@@ -116,19 +117,19 @@ async def _scrape_with_fallback(
     scraper: ScraperClient,
     min_sources: int = 3,
     scrape_options: dict | None = None,
-) -> tuple[list[str], list[dict]]:
+) -> list[SourceArtifact]:
     """Scrape URLs with video-platform fallback strategy.
 
     Splits URLs into preferred (text-based) and deprioritized (video-platform).
-    Scrapes preferred URLs first. If fewer than ``min_sources`` documents are
+    Scrapes preferred URLs first. If fewer than ``min_sources`` artifacts are
     obtained, falls back to deprioritized URLs.
 
-    Returns (documents, source_details).
+    Returns a list of ``SourceArtifact``s.
     """
     preferred = [u for u in urls if not _is_video_platform_url(u)]
     deprioritized = [u for u in urls if _is_video_platform_url(u)]
 
-    documents, source_details = await _scrape_urls(
+    artifacts = await _scrape_urls(
         preferred,
         scraper,
         min_sources=min_sources,
@@ -137,24 +138,23 @@ async def _scrape_with_fallback(
     )
     logger.info(
         "Scrape with fallback: %d docs from %d preferred URLs (min_sources=%d)",
-        len(documents),
+        len(artifacts),
         len(preferred),
         min_sources,
     )
 
-    if len(documents) < min_sources and deprioritized:
-        remaining = min_sources - len(documents)
-        extra_docs, extra_details = await _scrape_urls(
+    if len(artifacts) < min_sources and deprioritized:
+        remaining = min_sources - len(artifacts)
+        extra = await _scrape_urls(
             deprioritized,
             scraper,
             min_sources=remaining,
             max_attempts=remaining * 2,
             scrape_options=scrape_options,
         )
-        documents.extend(extra_docs)
-        source_details.extend(extra_details)
+        artifacts.extend(extra)
 
-    return documents, source_details
+    return artifacts
 
 
 async def _run_multi_query_discover_and_scrape(
@@ -221,9 +221,10 @@ async def _run_multi_query_discover_and_scrape(
 
     # Score and rank URLs before scraping (F1: source pre-filtering)
     target_urls = _filter_and_rank_urls(target_urls, max_urls=20)
-    documents, source_details = await _scrape_with_fallback(
+    artifacts = await _scrape_with_fallback(
         target_urls, scraper, min_sources=3, scrape_options=scrape_options
     )
+    documents, source_details = artifacts_to_documents_and_details(artifacts)
     context = "\n\n---\n\n".join(documents) if documents else ""
 
     return {
@@ -258,9 +259,10 @@ async def _run_research_discover_and_scrape(
 
     # Score and rank URLs before scraping (F1: source pre-filtering)
     target_urls = _filter_and_rank_urls(target_urls, max_urls=20)
-    documents, source_details = await _scrape_with_fallback(
+    artifacts = await _scrape_with_fallback(
         target_urls, scraper, min_sources=3, scrape_options=scrape_options
     )
+    documents, source_details = artifacts_to_documents_and_details(artifacts)
     context = "\n\n---\n\n".join(documents) if documents else ""
 
     return {
@@ -269,6 +271,145 @@ async def _run_research_discover_and_scrape(
         "documents": documents,
         "source_details": source_details,
         "context": context,
+    }
+
+
+async def _scrape_answer_sources(
+    target_urls: list[str],
+    rerank_artifacts: list[SourceArtifact],
+    scraper: ScraperClient,
+    num_sources: int,
+) -> list[SourceArtifact]:
+    """Scrape only answer sources whose content was not already fetched.
+
+    Reuses Markdown carried by ``rerank_artifacts``, scrapes the remaining
+    preferred (non-video) URLs, and falls back to video-platform URLs only
+    when the ``num_sources`` quota is still unmet. Returns ordered artifacts
+    (preferred in rank order, then any video fallback), deduplicated by URL
+    and bounded to ``num_sources``.
+    """
+    # Search results can repeat the same URL (keyword mode returns up to
+    # 2x num_sources entries, many of them duplicates). Deduplicate first so
+    # one artifact per URL is produced and the quota cannot be exceeded.
+    seen_urls: set[str] = set()
+    deduped_urls: list[str] = []
+    for u in target_urls:
+        if u not in seen_urls:
+            seen_urls.add(u)
+            deduped_urls.append(u)
+    target_urls = deduped_urls
+
+    reused = {a.url: a for a in rerank_artifacts if a.markdown}
+    dedup_counter = METRICS.counter(
+        "fetches_deduped_total",
+        "Total scrapes avoided by reusing already-fetched content",
+        ["reason"],
+    )
+    for _ in reused:
+        dedup_counter.inc({"reason": "rerank_reuse"})
+
+    preferred = [u for u in target_urls if not _is_video_platform_url(u)]
+    deprioritized = [u for u in target_urls if _is_video_platform_url(u)]
+
+    if deprioritized:
+        logger.info(
+            "Answer: %d preferred + %d video-platform URLs (deprioritized)",
+            len(preferred),
+            len(deprioritized),
+        )
+
+    missing_preferred = [u for u in preferred if u not in reused]
+    fresh_preferred = await _scrape_urls(
+        missing_preferred,
+        scraper,
+        min_sources=max(0, num_sources - len(reused)),
+        max_attempts=len(missing_preferred) or 1,
+    )
+    fresh_by_url = {a.url: a for a in fresh_preferred}
+
+    preferred_artifacts = [
+        artifact
+        for u in preferred
+        if (artifact := reused.get(u) or fresh_by_url.get(u)) is not None
+    ][:num_sources]
+    artifacts = list(preferred_artifacts)
+
+    if len(artifacts) < num_sources and deprioritized:
+        logger.info(
+            "Answer: %d/%d from preferred sources, falling back to video-platform URLs",
+            len(artifacts),
+            num_sources,
+        )
+        missing_video = [u for u in deprioritized if u not in reused]
+        remaining = num_sources - len(artifacts)
+        fresh_video = await _scrape_urls(
+            missing_video,
+            scraper,
+            min_sources=remaining,
+            max_attempts=remaining * 2,
+        )
+        video_by_url = {a.url: a for a in fresh_video}
+        for u in deprioritized:
+            if len(artifacts) >= num_sources:
+                break
+            artifact = reused.get(u) or video_by_url.get(u)
+            if artifact is not None:
+                artifacts.append(artifact)
+
+    return artifacts
+
+
+def _build_answer_context(
+    search_results: list[dict],
+    artifacts: list[SourceArtifact],
+) -> dict:
+    """Build answer context blocks and the citation source map from artifacts."""
+    documents, source_details = artifacts_to_documents_and_details(artifacts)
+
+    context_parts = []
+    for i, artifact in enumerate(artifacts, start=1):
+        title = next(
+            (
+                r.get("title", "")
+                for r in search_results
+                if r.get("url") == artifact.url
+            ),
+            "",
+        )
+        context_parts.append(
+            f"[{i}] Source: {artifact.url}\nTitle: {title}\n\n{artifact.to_document()}"
+        )
+
+    context = "\n\n---\n\n".join(context_parts) if context_parts else ""
+
+    # source_map is ordered to match context_parts so that the ``[N]`` markers
+    # the LLM sees map 1:1 onto source_map[N-1].
+    source_map: list[dict[str, str]] = []
+    for artifact in artifacts:
+        title = next(
+            (
+                r.get("title", "")
+                for r in search_results
+                if r.get("url") == artifact.url
+            ),
+            "",
+        )
+        relevance = next(
+            (
+                r.get("description", "")
+                for r in search_results
+                if r.get("url") == artifact.url
+            ),
+            "",
+        )
+        source_map.append({"url": artifact.url, "title": title, "relevance": relevance})
+
+    return {
+        "context_parts": context_parts,
+        "documents": documents,
+        "source_details": source_details,
+        "context": context,
+        "source_map": source_map,
     }
 
 
@@ -287,9 +428,10 @@ async def _run_answer_discover_and_scrape(
 ) -> dict:
     """Search → rerank → filter → scrape → context-building for answer.
 
-    Shared by ``run_answer`` and ``run_answer_stream``. Returns all
-    intermediate data needed by both callers to proceed to LLM synthesis
-    and citation parsing.
+    Shared by ``run_answer`` and ``run_answer_stream``. Reranking may fetch
+    candidate content concurrently; that content is reused here so a URL is
+    not scraped twice. Returns all intermediate data needed by both callers
+    to proceed to LLM synthesis and citation parsing.
     """
     from .rerank import _rerank_answer_sources
 
@@ -297,8 +439,9 @@ async def _run_answer_discover_and_scrape(
     logger.info("Answer: searching for: %s", query)
     search_results, _health = await searxng.search(query, limit=num_sources * 2)
 
+    rerank_artifacts: list[SourceArtifact] = []
     if retrieval_mode != "keyword":
-        search_results = await _rerank_answer_sources(
+        search_results, rerank_artifacts = await _rerank_answer_sources(
             search_results,
             query,
             retrieval_mode,
@@ -308,71 +451,11 @@ async def _run_answer_discover_and_scrape(
         )
 
     target_urls = [r["url"] for r in search_results if r.get("url")]
-
-    # Step 2: Scrape (prefer text sources, use video platforms as fallback)
-    preferred = [u for u in target_urls if not _is_video_platform_url(u)]
-    deprioritized = [u for u in target_urls if _is_video_platform_url(u)]
-
-    if deprioritized:
-        logger.info(
-            "Answer: %d preferred + %d video-platform URLs (deprioritized)",
-            len(preferred),
-            len(deprioritized),
-        )
-
-    documents, source_details = await _scrape_urls(
-        preferred,
-        scraper,
-        min_sources=num_sources,
-        max_attempts=num_sources * 2,
+    artifacts = await _scrape_answer_sources(
+        target_urls, rerank_artifacts, scraper, num_sources
     )
-
-    if len(documents) < num_sources and deprioritized:
-        logger.info(
-            "Answer: %d/%d from preferred sources, falling back to video-platform URLs",
-            len(documents),
-            num_sources,
-        )
-        remaining = num_sources - len(documents)
-        more_docs, more_details = await _scrape_urls(
-            deprioritized,
-            scraper,
-            min_sources=remaining,
-            max_attempts=remaining * 2,
-        )
-        documents.extend(more_docs)
-        source_details.extend(more_details)
-
-    # Step 3: Build context with source markers
-    context_parts = []
-    for i, (doc, detail) in enumerate(
-        zip(documents, source_details, strict=False), start=1
-    ):
-        url = detail["url"]
-        title = next(
-            (r.get("title", "") for r in search_results if r.get("url") == url), ""
-        )
-        context_parts.append(f"[{i}] Source: {url}\nTitle: {title}\n\n{doc}")
-
-    context = "\n\n---\n\n".join(context_parts) if context_parts else ""
-
-    # Step 4: Build source_map for citation resolution
-    source_map: list[dict[str, str]] = []
-    for r in search_results:
-        if r.get("url") in [s["url"] for s in source_details]:
-            source_map.append(
-                {
-                    "url": r["url"],
-                    "title": r.get("title", ""),
-                    "relevance": r.get("description", ""),
-                }
-            )
 
     return {
         "search_results": search_results,
-        "context_parts": context_parts,
-        "documents": documents,
-        "source_details": source_details,
-        "context": context,
-        "source_map": source_map,
+        **_build_answer_context(search_results, artifacts),
     }
