@@ -60,6 +60,16 @@ class _Playwright:
         return None
 
 
+def _extraction_hist_count() -> float:
+    """Return the observed _count for the unlabeled extraction histogram."""
+    text = METRICS.generate_openmetrics()
+    marker = "groktocrawl_browser_extraction_seconds_count"
+    if marker not in text:
+        return 0.0
+    tail = text[text.index(marker) + len(marker) :].lstrip()
+    return float(tail.split()[0])
+
+
 def _install_fakes(monkeypatch):
     import scraper.cookie_store as cookie_store
     import scraper.stealth as stealth
@@ -114,6 +124,28 @@ async def test_captcha_unresolved_records_extraction(monkeypatch):
     assert (
         "groktocrawl_browser_extraction_seconds_count" in METRICS.generate_openmetrics()
     )
+
+
+@pytest.mark.asyncio
+async def test_empty_content_records_extraction(monkeypatch):
+    """An empty/falsy-HTML extraction still samples the extraction histogram."""
+    import scraper.captcha as captcha
+    import scraper.fetch_tiers as tiers
+
+    _install_fakes(monkeypatch)
+    # Force every extraction to produce no markdown so the lifecycle falls
+    # through to `return None` after the SPA retry loop.
+    monkeypatch.setattr(tiers, "html_to_markdown", lambda _html: "")
+
+    async def no_captcha(_page, _url):
+        return None, []
+
+    monkeypatch.setattr(captcha, "resolve_captcha", no_captcha)
+
+    before = _extraction_hist_count()
+    result = await tiers._playwright_fetch_unbounded("https://example.test", None)
+    assert result is None
+    assert _extraction_hist_count() == before + 1
 
 
 @pytest.mark.asyncio

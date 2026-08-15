@@ -243,143 +243,150 @@ async def _playwright_fetch_unbounded(
             )
 
             # Resolve provider widgets before extraction while this page and
-            # its cookie-bearing context are still alive.
+            # its cookie-bearing context are still alive. Every terminal path
+            # (success, CAPTCHA-unresolved, barrier, or empty/falsy HTML) and
+            # any raised exception must sample the extraction histogram exactly
+            # once, so the whole phase is guarded by a single finally.
             extraction_started = time.monotonic()
-            from .captcha import resolve_captcha
+            try:
+                from .captcha import resolve_captcha
 
-            unresolved_captcha, attempts = await resolve_captcha(page, url)
-            if unresolved_captcha:
-                _observe_extraction(extraction_started)
-                return {
-                    "error": "CAPTCHA challenge could not be resolved",
-                    "error_code": "CAPTCHA_UNRESOLVED",
-                    "markdown": "",
-                    "source": "captcha",
-                    "url": url,
-                    "barrier": {
-                        "detected": True,
-                        "type": "captcha",
-                        "provider": unresolved_captcha.provider,
-                        "confidence": unresolved_captcha.confidence,
-                        "detail": unresolved_captcha.detail,
-                        "attempted_strategies": attempts,
-                    },
-                }
-            captcha_resolved = bool(attempts)
-            if captcha_resolved:
-                # Remove solved widget DOM before extraction so challenge markup
-                # cannot be returned or cached as successful page content.
-                try:
-                    await page.evaluate(
-                        """document.querySelectorAll([
-                            '.g-recaptcha', '.h-captcha', '.cf-turnstile',
-                            'iframe[src*="recaptcha"]', 'iframe[src*="hcaptcha"]',
-                            'iframe[src*="turnstile"]',
-                            '[name="g-recaptcha-response"]',
-                            '[name="h-captcha-response"]',
-                            '[name="cf-turnstile-response"]'
-                        ].join(',')).forEach((element) => element.remove())"""
-                    )
-                except Exception as exc:
-                    logger.debug("Could not remove solved CAPTCHA widget DOM: %s", exc)
-                title = await page.title()
-                current_url = page.url
+                unresolved_captcha, attempts = await resolve_captcha(page, url)
+                if unresolved_captcha:
+                    return {
+                        "error": "CAPTCHA challenge could not be resolved",
+                        "error_code": "CAPTCHA_UNRESOLVED",
+                        "markdown": "",
+                        "source": "captcha",
+                        "url": url,
+                        "barrier": {
+                            "detected": True,
+                            "type": "captcha",
+                            "provider": unresolved_captcha.provider,
+                            "confidence": unresolved_captcha.confidence,
+                            "detail": unresolved_captcha.detail,
+                            "attempted_strategies": attempts,
+                        },
+                    }
+                captcha_resolved = bool(attempts)
+                if captcha_resolved:
+                    # Remove solved widget DOM before extraction so challenge markup
+                    # cannot be returned or cached as successful page content.
+                    try:
+                        await page.evaluate(
+                            """document.querySelectorAll([
+                                '.g-recaptcha', '.h-captcha', '.cf-turnstile',
+                                'iframe[src*="recaptcha"]', 'iframe[src*="hcaptcha"]',
+                                'iframe[src*="turnstile"]',
+                                '[name="g-recaptcha-response"]',
+                                '[name="h-captcha-response"]',
+                                '[name="cf-turnstile-response"]'
+                            ].join(',')).forEach((element) => element.remove())"""
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            "Could not remove solved CAPTCHA widget DOM: %s", exc
+                        )
+                    title = await page.title()
+                    current_url = page.url
 
-            # If the challenge caused a redirect to the real site, ensure the
-            # real page's content is fully loaded before extracting.
-            if current_url != url:
-                logger.info(
-                    "Challenge redirected to %s, waiting for full page load...",
-                    current_url,
-                )
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=30000)
-                except Exception:
-                    logger.debug(
-                        "networkidle timeout on redirected page %s, continuing with current content",
+                # If the challenge caused a redirect to the real site, ensure the
+                # real page's content is fully loaded before extracting.
+                if current_url != url:
+                    logger.info(
+                        "Challenge redirected to %s, waiting for full page load...",
                         current_url,
                     )
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=30000)
+                    except Exception:
+                        logger.debug(
+                            "networkidle timeout on redirected page %s, continuing with current content",
+                            current_url,
+                        )
 
-            # Check for Substack session/channel frame redirect
-            if _is_substack_redirect(current_url):
-                logger.info(
-                    "Substack redirect detected on %s (-> %s), waiting for content...",
-                    url,
-                    current_url,
-                )
-                await page.wait_for_timeout(5000)
-                current_url = page.url
+                # Check for Substack session/channel frame redirect
                 if _is_substack_redirect(current_url):
-                    logger.warning("Substack redirect persisted for %s", url)
-
-            # SPA content retry
-            html = await retry_transient(page.content)
-            markdown = html_to_markdown(html) if html else ""
-
-            barrier = _classify_barrier(title, url, markdown, html)
-            barrier_blocks = barrier.detected and not (
-                captcha_resolved and barrier.barrier_type == "captcha"
-            )
-            if not markdown or len(markdown) < 500 or barrier_blocks:
-                for attempt in range(2):
                     logger.info(
-                        "SPA retry %d for %s (markdown: %d chars)",
-                        attempt + 1,
+                        "Substack redirect detected on %s (-> %s), waiting for content...",
                         url,
-                        len(markdown),
+                        current_url,
                     )
-                    await retry_transient(
-                        page.evaluate,
-                        "window.scrollTo(0, document.body.scrollHeight)",
-                    )
-                    await page.wait_for_timeout(3000)
+                    await page.wait_for_timeout(5000)
+                    current_url = page.url
+                    if _is_substack_redirect(current_url):
+                        logger.warning("Substack redirect persisted for %s", url)
 
-                    html = await retry_transient(page.content)
-                    markdown = html_to_markdown(html) if html else ""
-                    barrier = _classify_barrier(title, url, markdown, html)
-                    barrier_blocks = barrier.detected and not (
-                        captcha_resolved and barrier.barrier_type == "captcha"
-                    )
-                    if markdown and len(markdown) >= 500 and not barrier_blocks:
+                # SPA content retry
+                html = await retry_transient(page.content)
+                markdown = html_to_markdown(html) if html else ""
+
+                barrier = _classify_barrier(title, url, markdown, html)
+                barrier_blocks = barrier.detected and not (
+                    captcha_resolved and barrier.barrier_type == "captcha"
+                )
+                if not markdown or len(markdown) < 500 or barrier_blocks:
+                    for attempt in range(2):
                         logger.info(
-                            "SPA retry %d succeeded for %s (%d chars)",
+                            "SPA retry %d for %s (markdown: %d chars)",
                             attempt + 1,
                             url,
                             len(markdown),
                         )
-                        break
+                        await retry_transient(
+                            page.evaluate,
+                            "window.scrollTo(0, document.body.scrollHeight)",
+                        )
+                        await page.wait_for_timeout(3000)
 
-            if html:
-                markdown = html_to_markdown(html)
-                if markdown and len(markdown) > 50:
-                    barrier = _classify_barrier(title, url, markdown, html)
-                    if (
-                        barrier.detected
-                        and not (captcha_resolved and barrier.barrier_type == "captcha")
-                        and barrier.confidence > 0.7
-                    ):
-                        _observe_extraction(extraction_started)
+                        html = await retry_transient(page.content)
+                        markdown = html_to_markdown(html) if html else ""
+                        barrier = _classify_barrier(title, url, markdown, html)
+                        barrier_blocks = barrier.detected and not (
+                            captcha_resolved and barrier.barrier_type == "captcha"
+                        )
+                        if markdown and len(markdown) >= 500 and not barrier_blocks:
+                            logger.info(
+                                "SPA retry %d succeeded for %s (%d chars)",
+                                attempt + 1,
+                                url,
+                                len(markdown),
+                            )
+                            break
+
+                if html:
+                    markdown = html_to_markdown(html)
+                    if markdown and len(markdown) > 50:
+                        barrier = _classify_barrier(title, url, markdown, html)
+                        if (
+                            barrier.detected
+                            and not (
+                                captcha_resolved and barrier.barrier_type == "captcha"
+                            )
+                            and barrier.confidence > 0.7
+                        ):
+                            return {
+                                "error": f"Barrier detected: {barrier.barrier_type} (confidence: {barrier.confidence:.2f})",
+                                "barrier": {
+                                    "detected": True,
+                                    "type": barrier.barrier_type,
+                                    "provider": barrier.provider,
+                                    "confidence": barrier.confidence,
+                                    "detail": barrier.detail,
+                                },
+                                "markdown": "",
+                                "source": "barrier-detection",
+                                "url": url,
+                            }
+                        await store_cookies(url, context)
                         return {
-                            "error": f"Barrier detected: {barrier.barrier_type} (confidence: {barrier.confidence:.2f})",
-                            "barrier": {
-                                "detected": True,
-                                "type": barrier.barrier_type,
-                                "provider": barrier.provider,
-                                "confidence": barrier.confidence,
-                                "detail": barrier.detail,
-                            },
-                            "markdown": "",
-                            "source": "barrier-detection",
+                            "markdown": markdown,
+                            "source": "playwright",
                             "url": url,
+                            "raw_html_start": html,
                         }
-                    await store_cookies(url, context)
-                    _observe_extraction(extraction_started)
-                    return {
-                        "markdown": markdown,
-                        "source": "playwright",
-                        "url": url,
-                        "raw_html_start": html,
-                    }
+            finally:
+                _observe_extraction(extraction_started)
 
         finally:
             if browser is not None:
