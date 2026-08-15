@@ -274,14 +274,145 @@ async def test_qdrant_only_candidate_survives_full_web_budget():
     assert "https://qdrant-only.com" in urls
     by_url = {r["url"]: r for r in plan.results}
     assert by_url["https://qdrant-only.com"]["retrieval"] == "vector"
-    # Exact deterministic order: web floor of 3, then w3 + the vector-only URL.
+    # Exact deterministic order: web floor of 3, then the reserved vector slot
+    # (the diversity floor emits the vector-only URL before the round-robin
+    # interleave pulls in w3).
+    assert urls == [
+        "https://w0.com",
+        "https://w1.com",
+        "https://w2.com",
+        "https://qdrant-only.com",
+        "https://w3.com",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_overlap_full_web_budget_keeps_vector_only_candidate():
+    """A vector-only candidate survives a full, non-overlapping web budget."""
+    web = _web(5)
+    vector = [{"url": "https://v0.com", "title": "V0", "score": 0.9}]
+    plan = await plan_hybrid_retrieval(
+        "q",
+        5,
+        searxng=_searxng(web),
+        semantic=_semantic(vector),
+        admission=_admission(),
+    )
+
+    urls = [r["url"] for r in plan.results]
+    assert "https://v0.com" in urls
+    by_url = {r["url"]: r for r in plan.results}
+    assert by_url["https://v0.com"]["retrieval"] == "vector"
+    # Deterministic order: web floor of 4 (w0..w3), then the reserved vector slot.
     assert urls == [
         "https://w0.com",
         "https://w1.com",
         "https://w2.com",
         "https://w3.com",
-        "https://qdrant-only.com",
+        "https://v0.com",
     ]
+
+
+@pytest.mark.asyncio
+async def test_no_overlap_full_vector_budget_keeps_web_only_candidate():
+    """A web-only candidate survives a full, non-overlapping vector budget."""
+    web = [{"url": "https://w0.com", "title": "W0", "description": "d"}]
+    vector = _vec(5)
+    plan = await plan_hybrid_retrieval(
+        "q",
+        5,
+        searxng=_searxng(web),
+        semantic=_semantic(vector),
+        admission=_admission(),
+    )
+
+    urls = [r["url"] for r in plan.results]
+    assert "https://w0.com" in urls
+    by_url = {r["url"]: r for r in plan.results}
+    assert by_url["https://w0.com"]["retrieval"] == "web"
+    assert urls == [
+        "https://w0.com",
+        "https://v0.com",
+        "https://v1.com",
+        "https://v2.com",
+        "https://v3.com",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("web", "vector", "limit", "expected"),
+    [
+        # Identical rank orders: the round-robin interleave must not emit the
+        # overlapping URL at the shared pointer twice.
+        (
+            [
+                {"url": "https://a.com", "title": "a"},
+                {"url": "https://b.com", "title": "b"},
+                {"url": "https://c.com", "title": "c"},
+            ],
+            [
+                {"url": "https://a.com", "score": 0.9},
+                {"url": "https://b.com", "score": 0.8},
+                {"url": "https://c.com", "score": 0.7},
+            ],
+            4,
+            ["https://a.com", "https://b.com", "https://c.com"],
+        ),
+        # Two overlapping top results under a tight budget.
+        (
+            [
+                {"url": "https://a.com", "title": "a"},
+                {"url": "https://x.com", "title": "x"},
+            ],
+            [
+                {"url": "https://a.com", "score": 0.9},
+                {"url": "https://y.com", "score": 0.8},
+            ],
+            2,
+            ["https://a.com", "https://y.com"],
+        ),
+    ],
+)
+async def test_interleave_never_emits_duplicate_urls(web, vector, limit, expected):
+    """Overlapping top results interleave without ever duplicating a URL."""
+    plan = await plan_hybrid_retrieval(
+        "q",
+        limit,
+        searxng=_searxng(web),
+        semantic=_semantic(vector),
+        admission=_admission(),
+    )
+
+    urls = [r["url"] for r in plan.results]
+    assert urls == expected
+    assert len(urls) == len(set(urls))
+
+
+@pytest.mark.asyncio
+async def test_malformed_urls_fall_back_and_do_not_crash():
+    """Malformed result URLs degrade to raw text instead of aborting retrieval."""
+    web = [
+        {"url": "http://host:abc", "title": "bad port"},
+        {"url": "http://[::1/path", "title": "bad ipv6"},
+        {"url": "https://good.com", "title": "good"},
+    ]
+    plan = await plan_hybrid_retrieval(
+        "q",
+        5,
+        searxng=_searxng(web),
+        semantic=_semantic([]),
+        admission=_admission(),
+    )
+
+    # The two malformed URLs fall back to their raw text; the healthy candidate
+    # is still returned alongside them.
+    assert [r["url"] for r in plan.results] == [
+        "http://host:abc",
+        "http://[::1/path",
+        "https://good.com",
+    ]
+    assert all(r["retrieval"] == "web" for r in plan.results)
 
 
 # ── Cache-assisted acquisition + provenance ──────────────────────
