@@ -84,6 +84,14 @@ jobs:
             context: .
             dockerfile: portal-svc/Dockerfile
             image: ghcr.io/groktopus/groktocrawl-portal
+          - service: parse-svc
+            context: .
+            dockerfile: parse-svc/Dockerfile
+            image: ghcr.io/groktopus/groktocrawl-parse
+          - service: mcp-svc
+            context: mcp-svc
+            dockerfile: Dockerfile
+            image: ghcr.io/groktopus/groktocrawl-mcp
       max-parallel: 2
 
     permissions:
