@@ -385,6 +385,13 @@ class PolitenessManager:
 
             if elapsed < state.crawl_delay and effective_last > 0:
                 wait = state.crawl_delay - elapsed
+                # Atomically reserve the next-available slot under the
+                # per-domain lock so N concurrent same-domain tasks stagger
+                # their wake-ups (effective_last + k*crawl_delay) instead of
+                # all sleeping the same interval and waking as a burst.
+                reserved = now + wait
+                state.last_request = reserved
+                await self._set_valkey_last_request(domain, reserved)
                 logger.debug(
                     "Rate limiting %s: %.2fs elapsed, need %.2fs, waiting %.2fs",
                     domain,
