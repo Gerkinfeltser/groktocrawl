@@ -180,7 +180,6 @@ services:
       scraper-svc:
         condition: service_started
     environment:
-      - API_KEY=${API_KEY}
       - VALKEY_URL=${VALKEY_URL:-redis://valkey:6379/0}
       - SEARXNG_URL=${SEARXNG_URL:-http://slopsearx:8080}
       - SCRAPER_URL=${SCRAPER_URL:-http://scraper-svc:8001}
