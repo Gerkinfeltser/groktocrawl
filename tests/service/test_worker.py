@@ -1271,3 +1271,55 @@ class TestCancellationMetrics:
         fake_llm.close.assert_called_once()
         fake_searxng.close.assert_called_once()
         fake_scraper.close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_agent_does_not_complete(self):
+        from agent.worker import _process_agent_async
+
+        mock_store = MagicMock()
+        mock_store.get_job.return_value = {"status": "cancelled"}
+        mock_run_research = AsyncMock(return_value={"result": "x", "sources": []})
+        mock_research_memory = MagicMock()
+        mock_research_memory.query = AsyncMock(return_value={"hit": False})
+        mock_deliver_webhook = AsyncMock()
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store),
+            patch("agent.worker.run_research", mock_run_research),
+            patch("agent.worker.deliver_webhook", mock_deliver_webhook),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch("agent.worker.record_job_cancelled") as mock_cancel,
+            patch("agent.worker.record_job_start"),
+            patch("agent.worker.record_job_end"),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey",
+                    valkey_port=6379,
+                    valkey_db=0,
+                    crawl_max_duration_seconds=1800,
+                    crawl_idle_timeout_seconds=300,
+                ),
+            ),
+        ):
+            await _process_agent_async(
+                job_id="agent-cancel",
+                prompt="test",
+                urls=None,
+                schema_=None,
+                llm_base_url="http://llm",
+                llm_api_key="k",
+                llm_model="m",
+                searxng_url="http://searxng",
+                scraper_url="http://scraper",
+                research_memory=mock_research_memory,
+            )
+
+        mock_cancel.assert_called_once_with("agent")
+        mock_run_research.assert_not_called()
+        mock_store.complete_job.assert_not_called()
+        mock_store.fail_job.assert_not_called()
+        mock_deliver_webhook.assert_not_called()

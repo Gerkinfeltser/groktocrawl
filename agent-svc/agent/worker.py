@@ -199,6 +199,15 @@ async def _process_agent_async(
         )
 
     async def work_fn() -> dict[str, Any]:
+        # Cooperative cancellation: DELETE /v2/agent/{job_id} marks the job
+        # cancelled in the store. Honour it before (and after) the research
+        # pipeline so a cancelled agent job raises JobCancelledError and is
+        # never recorded as completed — mirroring batch_scrape/plan_execute.
+        job_meta = store.get_job(job_id)
+        if job_meta and job_meta.get("status") == "cancelled":
+            logger.info("Agent job %s cancelled before research", job_id)
+            raise JobCancelledError("agent job cancelled via DELETE")
+
         result = await run_research(
             prompt=prompt,
             urls=urls,
@@ -214,6 +223,12 @@ async def _process_agent_async(
             search_type=search_type,
             max_searches_per_request=max_searches_per_request,
         )
+
+        job_meta = store.get_job(job_id)
+        if job_meta and job_meta.get("status") == "cancelled":
+            logger.info("Agent job %s cancelled during research", job_id)
+            raise JobCancelledError("agent job cancelled via DELETE")
+
         # Apply citation style to transform bare [N] markers to [N](url)
         # for compact style, or leave them unchanged for inline style.
         source_details = result.get("source_details", [])

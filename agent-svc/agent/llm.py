@@ -4,6 +4,7 @@ Works with any OpenAI-compatible API: OpenAI, Anthropic, OpenRouter,
 Ollama, llama.cpp, vLLM, etc.
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -169,6 +170,12 @@ class LLMClient:
 
             yield {"type": "done", "full_content": full_content}
 
+        except asyncio.CancelledError:
+            # CancelledError is a BaseException, so the generic handler above
+            # never sees it. Record the outcome before unwinding so a
+            # client-cancelled SSE generation is not counted as "success".
+            outcome = "cancelled"
+            raise
         except Exception as e:
             outcome = "error"
             logger.error("LLM stream call failed: %s", e)

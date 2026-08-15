@@ -78,6 +78,60 @@ async def test_llm_call_metrics_are_bounded_by_stage(monkeypatch):
     assert 'groktocrawl_llm_call_seconds_count{stage="synthesis"}' in text
 
 
+@pytest.mark.asyncio
+async def test_llm_stream_cancellation_records_cancelled_outcome(monkeypatch):
+    """A client-cancelled SSE generation records outcome="cancelled", not success."""
+    import agent.llm as llm_mod
+
+    class FakeResp:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def aread(self):
+            return b""
+
+        async def aiter_lines(self):
+            await asyncio.Future()  # block until the test cancels the stream
+            yield "data: [DONE]"
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def stream(self, *_args, **_kwargs):
+            return FakeResp()
+
+    monkeypatch.setattr(llm_mod.httpx, "AsyncClient", lambda *_a, **_k: FakeClient())
+
+    client = llm_mod.LLMClient("http://llm.test", "", "model")
+    stage = "cancel-test"
+    before = _counter_count(
+        "groktocrawl_llm_calls_total", f'outcome="cancelled",stage="{stage}"'
+    )
+
+    gen = client.generate_stream("system", "user", stage=stage)
+    task = asyncio.create_task(gen.__anext__())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert (
+        _counter_count(
+            "groktocrawl_llm_calls_total", f'outcome="cancelled",stage="{stage}"'
+        )
+        == before + 1
+    )
+
+
 # ── Search query telemetry ────────────────────────────────────────
 
 
@@ -403,6 +457,9 @@ async def test_crawl_event_stream_records_workload_telemetry(monkeypatch):
     monkeypatch.setattr(cs, "deliver_webhook", AsyncMock())
 
     store = MagicMock()
+    # Mid-crawl disconnect: the store is still "processing" when the client
+    # goes away, so the handler must record the cancellation.
+    store.get_job.return_value = {"status": "processing"}
 
     gen = cs.crawl_event_stream(
         job_id="j",
@@ -426,6 +483,158 @@ async def test_crawl_event_stream_records_workload_telemetry(monkeypatch):
 
     cancelled.assert_called_once_with("crawl")
     ended.assert_called_once_with("crawl")
+
+
+async def _collect_crawl_stream(
+    cs,
+    store,
+    status: str,
+    monkeypatch,
+) -> tuple[list[str], MagicMock, MagicMock, AsyncMock]:
+    """Run crawl_event_stream to completion with a given store status.
+
+    Returns (events, cancelled, complete_job, deliver_webhook) so callers can
+    assert the store-status-derived cancelled vs completed signalling.
+    """
+    from agent.crawler import CrawlResult
+
+    cancelled = MagicMock()
+    monkeypatch.setattr(cs, "record_job_cancelled", cancelled)
+    monkeypatch.setattr(cs, "record_job_start", MagicMock())
+    monkeypatch.setattr(cs, "record_job_end", MagicMock())
+    deliver = AsyncMock()
+    monkeypatch.setattr(cs, "deliver_webhook", deliver)
+
+    class FakeEngine:
+        def __init__(self, scraper, store=None, options=None):
+            self._scraped_count = 0
+            self._queue: list = []
+
+        async def run(self, url, job_id=None, page_callback=None, error_callback=None):
+            if page_callback:
+                await page_callback(
+                    job_id, {"url": url, "markdown": "# hi", "metadata": {}}
+                )
+            return CrawlResult(pages=[], total=0, completed=0)
+
+        async def close(self):
+            return None
+
+    class FakeScraper:
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(cs, "CrawlEngine", FakeEngine)
+    monkeypatch.setattr(cs, "ScraperClient", lambda url: FakeScraper())
+
+    store.get_job.return_value = {"status": status}
+
+    gen = cs.crawl_event_stream(
+        job_id="j",
+        url="https://example.test",
+        max_pages=1,
+        max_depth=1,
+        scraper_url="http://scraper.test",
+        store=store,
+    )
+    events = [chunk async for chunk in gen]
+    return events, cancelled, store.complete_job, deliver
+
+
+@pytest.mark.asyncio
+async def test_crawl_stream_cancelled_signal_from_store_status(monkeypatch):
+    """A DELETE-cancelled crawl emits status:"cancelled" and never completes."""
+    import agent.crawl_stream as cs
+
+    store = MagicMock()
+    events, cancelled, complete_job, deliver = await _collect_crawl_stream(
+        cs, store, "cancelled", monkeypatch
+    )
+
+    cancelled.assert_called_once_with("crawl")
+    complete_job.assert_not_called()
+    done = next(e for e in events if '"type": "done"' in e)
+    assert '"status": "cancelled"' in done
+    # crawl.completed is still delivered for a cancelled crawl (matching the
+    # sync path), but never as a completed signal.
+    delivered_events = [c.args[1] for c in deliver.call_args_list if c.args]
+    assert "crawl.completed" in delivered_events
+
+
+@pytest.mark.asyncio
+async def test_crawl_stream_completed_signal_from_store_status(monkeypatch):
+    """A normal crawl emits status:"completed" and never records cancellation."""
+    import agent.crawl_stream as cs
+
+    store = MagicMock()
+    events, cancelled, complete_job, deliver = await _collect_crawl_stream(
+        cs, store, "processing", monkeypatch
+    )
+
+    cancelled.assert_not_called()
+    complete_job.assert_called_once()
+    done = next(e for e in events if '"type": "done"' in e)
+    assert '"status": "completed"' in done
+    delivered_events = [c.args[1] for c in deliver.call_args_list if c.args]
+    assert "crawl.completed" in delivered_events
+
+
+@pytest.mark.asyncio
+async def test_crawl_stream_terminal_disconnect_not_recancelled(monkeypatch):
+    """A disconnect after the job became terminal must not re-record cancellation."""
+    import agent.crawl_stream as cs
+
+    cancelled = MagicMock()
+    monkeypatch.setattr(cs, "record_job_cancelled", cancelled)
+    monkeypatch.setattr(cs, "record_job_start", MagicMock())
+    monkeypatch.setattr(cs, "record_job_end", MagicMock())
+    deliver = AsyncMock()
+    monkeypatch.setattr(cs, "deliver_webhook", deliver)
+
+    class FakeEngine:
+        def __init__(self, scraper, store=None, options=None):
+            self._scraped_count = 0
+            self._queue: list = []
+
+        async def run(self, url, job_id=None, page_callback=None, error_callback=None):
+            await asyncio.Future()  # never completes — keeps the stream alive
+
+        async def close(self):
+            return None
+
+    class FakeScraper:
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(cs, "CrawlEngine", FakeEngine)
+    monkeypatch.setattr(cs, "ScraperClient", lambda url: FakeScraper())
+
+    store = MagicMock()
+    # The job already reached a terminal status (e.g. complete_job() ran just
+    # before the done yield was interrupted by the disconnect).
+    store.get_job.return_value = {"status": "completed"}
+
+    gen = cs.crawl_event_stream(
+        job_id="j",
+        url="https://example.test",
+        max_pages=1,
+        max_depth=1,
+        scraper_url="http://scraper.test",
+        store=store,
+    )
+
+    task = asyncio.create_task(gen.__anext__())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    cancelled.assert_not_called()
+    store.cancel_job.assert_not_called()
+    completed_webhooks = [
+        c for c in deliver.call_args_list if c.args and c.args[1] == "crawl.completed"
+    ]
+    assert completed_webhooks == []
 
 
 @pytest.mark.asyncio

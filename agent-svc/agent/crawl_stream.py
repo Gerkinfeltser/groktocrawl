@@ -28,6 +28,7 @@ from typing import Any
 from common.stage_metrics import StreamTiming
 
 from .crawler import CrawlEngine, CrawlOptions, CrawlResult
+from .metrics import METRICS
 from .scraper_client import ScraperClient
 from .store import JobStore
 from .webhook import deliver_webhook
@@ -255,10 +256,9 @@ async def crawl_event_stream(
 
         # ── Crawl completed — get result ──────────────────────
         result = await crawl_task
-        elapsed_ms = int((time.monotonic() - start_time) * 1000)
+        elapsed = time.monotonic() - start_time
+        elapsed_ms = int(elapsed * 1000)
 
-        # Mark job as completed in store and fire crawl.completed webhook
-        # (matching sync path behavior in _process_crawl_async)
         payload: dict[str, object] = {
             "completed": result.completed,
             "total": result.total,
@@ -266,29 +266,86 @@ async def crawl_event_stream(
             "errors": result.errors,
             "robots_blocked": result.robots_blocked,
         }
-        store.complete_job(job_id, payload)
-        if task_tracker is not None:
-            task_tracker.create_background_task(
-                deliver_webhook(
+
+        # Mirror the sync path (_process_crawl_async): a crawl cancelled via
+        # DELETE has status="cancelled" in the store, while a normal run is
+        # still "processing" here. Branch on store status rather than the
+        # exception type so both cancellation triggers are handled the same.
+        job_meta = store.get_job(job_id)
+        was_cancelled = job_meta is not None and job_meta.get("status") == "cancelled"
+
+        if was_cancelled:
+            # Store is already marked cancelled by cancel_job(); do NOT
+            # overwrite it with complete_job(). Fire crawl.completed and
+            # record the workload-class cancellation signal.
+            record_job_cancelled("crawl")
+            logger.info("Crawl %s was cancelled — preserving cancelled status", job_id)
+            if task_tracker is not None:
+                task_tracker.create_background_task(
+                    deliver_webhook(
+                        webhook_config,
+                        "crawl.completed",
+                        job_id,
+                        data=[],
+                        task_tracker=task_tracker,
+                    )
+                )
+            else:
+                await deliver_webhook(
                     webhook_config,
                     "crawl.completed",
                     job_id,
                     data=[],
-                    task_tracker=task_tracker,
                 )
-            )
         else:
-            await deliver_webhook(
-                webhook_config,
-                "crawl.completed",
-                job_id,
-                data=[],
-            )
+            store.complete_job(job_id, payload)
+            if task_tracker is not None:
+                task_tracker.create_background_task(
+                    deliver_webhook(
+                        webhook_config,
+                        "crawl.completed",
+                        job_id,
+                        data=[],
+                        task_tracker=task_tracker,
+                    )
+                )
+            else:
+                await deliver_webhook(
+                    webhook_config,
+                    "crawl.completed",
+                    job_id,
+                    data=[],
+                )
+
+        # ── Job-type-agnostic metrics (backward compat) ─────────
+        # A cancelled crawl must not be double-counted as completed.
+        if not was_cancelled:
+            METRICS.histogram(
+                "job_duration_seconds", "Job processing duration", ["type", "status"]
+            ).observe({"type": "crawl", "status": "completed"}, elapsed)
+            METRICS.counter(
+                "jobs_completed_total", "Total completed jobs", ["type"]
+            ).inc({"type": "crawl"})
+
+        # ── Crawl-specific metrics ──────────────────────────────
+        crawl_status = "cancelled" if was_cancelled else "completed"
+        METRICS.counter(
+            "groktocrawl_crawl_jobs_total", "Total crawl jobs by status", ["status"]
+        ).inc({"status": crawl_status})
+        METRICS.histogram(
+            "groktocrawl_crawl_duration_seconds",
+            "Crawl job duration in seconds",
+            ["status"],
+        ).observe({"status": crawl_status}, elapsed)
+        METRICS.counter(
+            "groktocrawl_crawl_pages_scraped_total",
+            "Total pages scraped by crawl jobs",
+        ).inc(value=float(result.completed))
 
         done_payload = {
             "type": "done",
             "id": job_id,
-            "status": "completed",
+            "status": crawl_status,
             "pages": result.pages,
             "total": result.total,
             "completed": result.completed,
@@ -300,28 +357,38 @@ async def crawl_event_stream(
 
     except asyncio.CancelledError:
         logger.info("Crawl SSE stream cancelled for job %s", job_id)
-        # Mark job as cancelled in store and fire webhook (matching sync path).
-        # Also record the cancellation on the workload-class counter so a
-        # client-disconnected streamed crawl is distinguishable from a success.
-        record_job_cancelled("crawl")
-        store.cancel_job(job_id)
-        if task_tracker is not None:
-            task_tracker.create_background_task(
-                deliver_webhook(
+        # A client disconnect can arrive either mid-crawl (store still
+        # "processing") or between store.complete_job() and the done yield
+        # (store already terminal). Only the former is a real cancellation:
+        # re-read the store and skip the cancelled counter/webhook when the
+        # job has already reached a terminal status so a completed crawl is
+        # never double-counted as cancelled.
+        job_meta = store.get_job(job_id)
+        already_terminal = job_meta is not None and job_meta.get("status") in (
+            "completed",
+            "cancelled",
+            "failed",
+        )
+        if not already_terminal:
+            record_job_cancelled("crawl")
+            store.cancel_job(job_id)
+            if task_tracker is not None:
+                task_tracker.create_background_task(
+                    deliver_webhook(
+                        webhook_config,
+                        "crawl.completed",
+                        job_id,
+                        data=[],
+                        task_tracker=task_tracker,
+                    )
+                )
+            else:
+                await deliver_webhook(
                     webhook_config,
                     "crawl.completed",
                     job_id,
                     data=[],
-                    task_tracker=task_tracker,
                 )
-            )
-        else:
-            await deliver_webhook(
-                webhook_config,
-                "crawl.completed",
-                job_id,
-                data=[],
-            )
         if crawl_task and not crawl_task.done():
             crawl_task.cancel()
             import contextlib as _ctxlib
