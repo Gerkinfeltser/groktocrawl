@@ -77,13 +77,19 @@ attempt. The two SSE entry points (`create_agent_stream`, streaming
 ### 3. Job-time retry state for accepted jobs
 
 Downstream HTTP 429 `RATE_LIMITED` responses are classified at a single point:
-`SearXNGClient.search()` raises `RetryableRateLimitError` (a `RateLimitedError`
-subclass carrying the upstream `Retry-After`) when SlopSearX answers 429. The
-per-request search-budget guard (`Search budget exceeded`) is **not**
-retryable — it is a local safety bound, not a server capacity signal. The
-research discovery and plan-execution call sites re-raise the classified error
-instead of swallowing it into empty results, so a whole-job capacity condition
-is visible to the worker.
+`SearXNGClient.search(..., raise_on_rate_limit=True)` raises
+`RetryableRateLimitError` (a `RateLimitedError` subclass carrying the upstream
+`Retry-After`) when SlopSearX answers 429. Classification is **opt-in**: only
+call sites with whole-operation retry semantics pass the flag — the research
+discovery and answer paths (agent jobs and sync/streaming answer) and
+plan-execution. Degrading call sites (session search steps, `/v2/search`,
+monitor, find-similar, rich-search helpers) keep the legacy behavior — an
+upstream 429 yields an empty result set with a health detail, never a hard
+request failure. The per-request search-budget guard (`Search budget exceeded`)
+is **not** retryable — it is a local safety bound, not a server capacity
+signal. The opted-in research discovery and plan-execution call sites re-raise
+the classified error instead of swallowing it into empty results, so a
+whole-job capacity condition is visible to the worker.
 
 `JobStore` gains two non-terminal transitions:
 

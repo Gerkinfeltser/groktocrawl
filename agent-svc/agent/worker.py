@@ -1142,7 +1142,9 @@ async def _process_plan_execution_async(
                                 break
 
                     try:
-                        results, _health = await searxng.search(query, limit=10)
+                        results, _health = await searxng.search(
+                            query, limit=10, raise_on_rate_limit=True
+                        )
                     except Exception as e:
                         from .exceptions import RetryableRateLimitError
 

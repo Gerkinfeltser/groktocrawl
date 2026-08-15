@@ -298,7 +298,7 @@ class TestRateLimitClassification:
             mp.setattr(client._client, "get", mock_get)
 
             with pytest.raises(RetryableRateLimitError) as exc:
-                await client.search("test")
+                await client.search("test", raise_on_rate_limit=True)
             assert exc.value.retry_after_seconds == 37.0
             assert exc.value.error_code == "RATE_LIMITED"
 
@@ -320,12 +320,12 @@ class TestRateLimitClassification:
             mp.setattr(client._client, "get", mock_get)
 
             with pytest.raises(RetryableRateLimitError) as exc:
-                await client.search("test")
+                await client.search("test", raise_on_rate_limit=True)
             assert exc.value.retry_after_seconds is None
 
     @pytest.mark.asyncio
-    async def test_429_is_not_swallowed_as_empty_results(self, client):
-        """A downstream capacity condition must never look like an empty result set."""
+    async def test_429_is_not_swallowed_as_empty_results_when_opted_in(self, client):
+        """An opted-in call site must never see a capacity condition as an empty set."""
         from agent.exceptions import RetryableRateLimitError
 
         with pytest.MonkeyPatch.context() as mp:
@@ -342,4 +342,28 @@ class TestRateLimitClassification:
             mp.setattr(client._client, "get", mock_get)
 
             with pytest.raises(RetryableRateLimitError):
-                await client.search("test")
+                await client.search("test", raise_on_rate_limit=True)
+
+    @pytest.mark.asyncio
+    async def test_default_call_site_degrades_to_empty_results_on_429(self, client):
+        """Degrading call sites (session steps, /v2/search) keep legacy behavior.
+
+        An upstream 429 must not hard-fail a search step that tolerates
+        empty results (ADR-0053 opt-in classification).
+        """
+        with pytest.MonkeyPatch.context() as mp:
+
+            async def mock_get(url, params=None):
+                import types
+
+                r = types.SimpleNamespace()
+                r.status_code = 429
+                r.headers = {"Retry-After": "37"}
+                r.text = "rate limited"
+                return r
+
+            mp.setattr(client._client, "get", mock_get)
+
+            results, health = await client.search("test")
+            assert results == []
+            assert "429" in health.detail

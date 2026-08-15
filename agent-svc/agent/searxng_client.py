@@ -164,6 +164,8 @@ class SearXNGClient:
         limit: int = 10,
         categories: list[str] | None = None,
         sources: list[str] | None = None,
+        *,
+        raise_on_rate_limit: bool = False,
     ) -> tuple[list[dict], SearchHealth]:
         """Search the web and return structured results with health info.
 
@@ -173,6 +175,15 @@ class SearXNGClient:
 
         Enforces a per-request search budget. Raises ``RateLimitedError``
         when the budget is exhausted.
+
+        ``raise_on_rate_limit`` opts into the retryable downstream
+        classification (ADR-0053): when the upstream answers HTTP 429, the
+        caller receives ``RetryableRateLimitError`` so sync routes render a
+        retryable 429 and the worker schedules a bounded job retry. Call
+        sites that degrade gracefully (session steps, ``/v2/search``,
+        monitor, find-similar) leave it ``False`` and keep the legacy
+        behavior: HTTP 429 returns an empty result set with a health
+        detail, never a hard failure.
 
         Returns a tuple of (results, health) where:
         - results: list of dicts with keys: url, title, description, engine.
@@ -212,24 +223,36 @@ class SearXNGClient:
                 params=params,  # type: ignore[arg-type]
             )
             if resp.status_code == 429:
-                # Downstream capacity condition (ADR-0053): classify as a
-                # retryable rate-limit error so sync routes render a
-                # retryable 429 and the worker schedules a bounded retry
-                # instead of failing the job terminally.
-                from .exceptions import RetryableRateLimitError
+                # Downstream capacity condition (ADR-0053): opt-in call
+                # sites raise a retryable error so sync routes render a
+                # retryable 429 and the worker schedules a bounded retry.
+                # Degrading call sites keep the legacy empty-result
+                # behavior — a session search step or /v2/search must not
+                # hard-fail because the upstream search capacity is
+                # temporarily exhausted.
+                if raise_on_rate_limit:
+                    from .exceptions import RetryableRateLimitError
 
-                outcome = "rate_limited"
-                retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
+                    outcome = "rate_limited"
+                    retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
+                    logger.warning(
+                        "SearXNG rate limited (429) — retry_after=%s",
+                        retry_after if retry_after is not None else "unknown",
+                    )
+                    raise RetryableRateLimitError(
+                        detail=(
+                            "Downstream search capacity is temporarily exhausted "
+                            "(SearXNG returned HTTP 429)"
+                        ),
+                        retry_after_seconds=retry_after,
+                    )
+                outcome = "degraded"
                 logger.warning(
-                    "SearXNG rate limited (429) — retry_after=%s",
-                    retry_after if retry_after is not None else "unknown",
+                    "SearXNG rate limited (429) — returning empty results "
+                    "(caller did not opt into retryable classification)"
                 )
-                raise RetryableRateLimitError(
-                    detail=(
-                        "Downstream search capacity is temporarily exhausted "
-                        "(SearXNG returned HTTP 429)"
-                    ),
-                    retry_after_seconds=retry_after,
+                return [], SearchHealth(
+                    detail="SearXNG returned HTTP 429 (rate limited)"
                 )
             if resp.status_code != 200:
                 outcome = "error"
