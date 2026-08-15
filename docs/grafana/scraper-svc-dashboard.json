@@ -115,6 +115,64 @@
         }
       ],
       "gridPos": {"h": 8, "w": 6, "x": 6, "y": 8}
+    },
+    {
+      "title": "Browser Semaphore Saturation",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "showPoints": "never"
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "groktocrawl_browser_semaphore_active{job=\"scraper-svc\"}",
+          "legendFormat": "active"
+        },
+        {
+          "expr": "groktocrawl_browser_semaphore_waiters{job=\"scraper-svc\"}",
+          "legendFormat": "waiters"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 16}
+    },
+    {
+      "title": "Browser Lifecycle Latency (p95)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "showPoints": "never"
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(groktocrawl_browser_navigation_seconds_bucket{job=\"scraper-svc\"}[$__rate_interval])) by (le))",
+          "legendFormat": "navigation"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(groktocrawl_browser_extraction_seconds_bucket{job=\"scraper-svc\"}[$__rate_interval])) by (le))",
+          "legendFormat": "extraction"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(groktocrawl_browser_semaphore_wait_seconds_bucket{job=\"scraper-svc\"}[$__rate_interval])) by (le))",
+          "legendFormat": "semaphore wait"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 6, "x": 6, "y": 16}
     }
   ]
 }

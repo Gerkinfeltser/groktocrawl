@@ -27,6 +27,24 @@ Environment-specific target addresses and contact-point secrets are deployment o
 labels are bounded provider and strategy constants; URLs, challenge content,
 tokens, and screenshots are never metric labels.
 
+## Stage-level telemetry
+
+Performance-stage latency and capacity signals (ADR-0048) are exported with a
+`groktocrawl_` prefix and bounded, enum-like label values. Raw URLs, tokens, and
+content are never metric labels.
+
+| Service | Metric families |
+|---|---|
+| agent-svc | `groktocrawl_research_plan_seconds`, `groktocrawl_research_total_seconds{search_type}`, `groktocrawl_research_rank_seconds{mode}`, `groktocrawl_research_gap_detection_seconds`, `groktocrawl_search_query_seconds{engine}`, `groktocrawl_search_queries_total{engine,outcome}`, `groktocrawl_llm_call_seconds{stage}`, `groktocrawl_llm_calls_total{stage,outcome}`, `groktocrawl_research_memory_lookup_seconds`, `groktocrawl_research_memory_lookup_total{outcome}`, `groktocrawl_scrape_cache_lookup_seconds`, `groktocrawl_scrape_cache_lookup_total{outcome}`, `groktocrawl_active_jobs{type}`, `groktocrawl_jobs_cancelled_total{type}`, `groktocrawl_time_to_first_event_seconds{stream_type}`, `groktocrawl_time_to_first_token_seconds{stream_type}` |
+| scraper-svc | `groktocrawl_scrape_tier_total{tier,outcome}`, `groktocrawl_scrape_tier_duration_seconds{tier,outcome}`, `groktocrawl_scrape_cache_lookup_seconds`, `groktocrawl_scrape_cache_lookup_total{outcome}`, `groktocrawl_adapter_dispatch_total{adapter_group,outcome}`, `groktocrawl_browser_semaphore_active`, `groktocrawl_browser_semaphore_waiters`, `groktocrawl_browser_semaphore_wait_seconds`, `groktocrawl_browser_setup_seconds`, `groktocrawl_browser_navigation_seconds`, `groktocrawl_browser_extraction_seconds`, `groktocrawl_browser_cleanup_total{outcome}` |
+| browser-svc | `groktocrawl_browser_active_sessions`, `groktocrawl_browser_sessions_destroyed_total{reason}` |
+
+Latency metrics use `_duration_seconds`/`_seconds` (histograms) and outcome
+counters use `_total` (counters). The `outcome` label values for
+research-memory lookups (`fresh`/`aging`/`stale`/`miss`/`error`) and for
+scrape-cache lookups (`hit`/`miss`/`stale`/`error`) are shared with the
+cache-freshness model so they compose across services.
+
 ## Verification
 
 1. Validate the deployment's Prometheus configuration and rules with its native check commands.
