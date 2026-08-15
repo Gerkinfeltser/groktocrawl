@@ -209,7 +209,6 @@ async def scrape(
     url: str,
     formats: list[str] | None = None,
     only_main_content: bool = True,
-    timeout: int | None = None,
 ) -> str:
     """Scrape a single URL and return its content as markdown or other formats.
 
@@ -224,13 +223,11 @@ async def scrape(
             screenshot@fullPage, images.
         only_main_content: When True (default), extract only the main
             article content.  Set False to get the full page.
-        timeout: Optional per-request timeout in milliseconds.
     """
     result = await _client.scrape(
         url=url,
         formats=formats,
         only_main_content=only_main_content,
-        timeout=timeout,
     )
     _ensure_success(result)
     return _resp(result)
@@ -988,9 +985,18 @@ async def create_monitor(
             github, pdf, news, science, it).
         num_results: Max results per check for search monitors.
     """
+    if monitor_type not in ("scrape", "search"):
+        raise ToolError(
+            f"create_monitor: monitor_type must be 'scrape' or 'search', "
+            f"got {monitor_type!r}"
+        )
+    if monitor_type == "search" and not query:
+        raise ToolError("create_monitor: query is required for monitor_type='search'")
+    if monitor_type == "scrape" and not url:
+        raise ToolError("create_monitor: url is required for monitor_type='scrape'")
     search_config: dict[str, Any] | None = None
-    if monitor_type == "search" or query:
-        search_config = {"query": query or ""}
+    if monitor_type == "search":
+        search_config = {"query": query}
         if sources:
             search_config["sources"] = sources
         if categories:
@@ -1064,7 +1070,21 @@ async def update_monitor(
     """
     search_config: dict[str, Any] | None = None
     if query is not None or sources or categories or num_results is not None:
-        search_config = {"query": query or ""}
+        if query is None:
+            # agent-svc replaces the whole search_config on PATCH, so a
+            # partial search-field update must preserve the existing
+            # query instead of silently resetting it to "".
+            current = await _client.monitor_get(monitor_id)
+            if current.get("error"):
+                return current  # _ensure_success below surfaces the error
+            existing_query = (current.get("search_config") or {}).get("query")
+            if not existing_query:
+                raise ToolError(
+                    "update_monitor: cannot update search fields — monitor "
+                    f"{monitor_id!r} has no search query; pass query explicitly"
+                )
+            query = existing_query
+        search_config = {"query": query}
         if sources:
             search_config["sources"] = sources
         if categories:

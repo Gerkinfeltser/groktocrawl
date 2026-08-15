@@ -52,6 +52,7 @@ class BrowserHandler:
                 await self._store.create(
                     {"type": "browser", "ttl": ttl},
                     session_id=session_id,
+                    ttl=ttl,
                 )
             else:
                 result.setdefault("error", "Browser create: missing id in response")

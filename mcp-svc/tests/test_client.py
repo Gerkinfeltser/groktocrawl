@@ -10,6 +10,7 @@ import asyncio
 from typing import Any
 
 import httpx
+import pytest
 from groktocrawl_client import GroktocrawlClient, _extract_response_detail
 
 # ── helpers ──
@@ -1084,6 +1085,219 @@ class TestRateLimitRetry:
 
         assert groktocrawl_client._MIN_RETRY_WAIT_SECONDS >= 1.0
         assert groktocrawl_client._MAX_RETRY_WAIT_SECONDS <= 10.0
+
+
+# ── SSRF guard for server-side downloads (parse tool) ─────────────
+
+
+class TestParseSSRFGuard:
+    """_validate_download_url blocks internal fetches (security review P1)."""
+
+    def test_rejects_non_http_scheme(self):
+        from groktocrawl_client import _validate_download_url
+
+        with pytest.raises(ValueError):
+            _validate_download_url("file:///etc/passwd")
+        with pytest.raises(ValueError):
+            _validate_download_url("ftp://example.com/file")
+
+    def test_rejects_localhost_and_loopback(self):
+        from groktocrawl_client import _validate_download_url
+
+        for url in (
+            "http://localhost:8000/x",
+            "http://127.0.0.1:8000/x",
+            "http://[::1]:8000/x",
+        ):
+            with pytest.raises(ValueError, match="not allowed"):
+                _validate_download_url(url)
+
+    def test_rejects_private_ip_literals(self):
+        from groktocrawl_client import _validate_download_url
+
+        for ip in ("10.0.0.1", "192.168.1.1", "172.16.0.1", "169.254.169.254"):
+            with pytest.raises(ValueError, match="private"):
+                _validate_download_url(f"http://{ip}/x")
+
+    def test_rejects_hostname_resolving_to_private_ip(self, monkeypatch):
+        from groktocrawl_client import _validate_download_url
+
+        def _fake_getaddrinfo(host, *args, **kwargs):
+            return [(2, 1, 6, "", ("10.0.0.5", 0))]
+
+        monkeypatch.setattr("groktocrawl_client.socket.getaddrinfo", _fake_getaddrinfo)
+        with pytest.raises(ValueError, match="private"):
+            _validate_download_url("http://internal.example.com/x")
+
+    def test_accepts_public_ip_literal(self):
+        from groktocrawl_client import _validate_download_url
+
+        assert _validate_download_url("http://93.184.216.34/x") == (
+            "http://93.184.216.34/x"
+        )
+
+    def test_accepts_public_hostname(self, monkeypatch):
+        from groktocrawl_client import _validate_download_url
+
+        def _fake_getaddrinfo(host, *args, **kwargs):
+            return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+        monkeypatch.setattr("groktocrawl_client.socket.getaddrinfo", _fake_getaddrinfo)
+        assert _validate_download_url("https://example.com/doc.pdf") == (
+            "https://example.com/doc.pdf"
+        )
+
+
+class TestParseDownload:
+    """parse() download path: redirect re-validation and happy path."""
+
+    class _FakeResponse:
+        def __init__(
+            self, status_code: int, headers: dict | None = None, content: bytes = b""
+        ):
+            self.status_code = status_code
+            self.headers = headers or {}
+            self._content = content
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                req = httpx.Request("GET", "http://placeholder")
+                raise httpx.HTTPStatusError(
+                    f"HTTP {self.status_code}",
+                    request=req,
+                    response=httpx.Response(self.status_code, request=req),
+                )
+
+        async def aiter_bytes(self):
+            for i in range(0, len(self._content), 1024):
+                yield self._content[i : i + 1024]
+
+    class _FakeClient:
+        def __init__(self, handler):
+            self._handler = handler
+            self.headers: dict[str, str] = {}
+            self.closed = False
+
+        async def get(self, url):
+            return self._handler(url)
+
+        async def aclose(self):
+            self.closed = True
+
+    def _patch_download_client(self, monkeypatch, handler):
+        import groktocrawl_client
+
+        monkeypatch.setattr(
+            groktocrawl_client.httpx,
+            "AsyncClient",
+            lambda *args, **kwargs: self._FakeClient(handler),
+        )
+
+    def _set_shared_client(self, client):
+        """Wire the shared client (upload path) BEFORE patching AsyncClient.
+
+        parse() uses ``httpx.AsyncClient`` for both the shared client and
+        the download client, so the shared client must exist before the
+        download client is faked.
+        """
+        client._client = httpx.AsyncClient(
+            base_url=client._base_url,
+            headers=client._headers(),
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    json={"success": True, "data": {"markdown": "# parsed"}},
+                    request=request,
+                )
+            ),
+        )
+
+    def test_parse_rejects_private_url_without_network(self, monkeypatch):
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        self._set_shared_client(client)
+
+        def _handler(url):
+            raise AssertionError(f"must not download: {url}")
+
+        self._patch_download_client(monkeypatch, _handler)
+
+        async def run():
+            return await client.parse("http://10.0.0.1/secret")
+
+        result = asyncio.run(run())
+        assert "private" in result["error"]
+
+    def test_parse_blocks_redirect_to_private_host(self, monkeypatch):
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        self._set_shared_client(client)
+
+        def _fake_getaddrinfo(host, *args, **kwargs):
+            return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+        monkeypatch.setattr("groktocrawl_client.socket.getaddrinfo", _fake_getaddrinfo)
+
+        def _handler(url):
+            # First hop (public) redirects to an internal host.
+            return self._FakeResponse(302, {"location": "http://10.0.0.1/secret"})
+
+        self._patch_download_client(monkeypatch, _handler)
+
+        async def run():
+            return await client.parse("https://example.com/doc.pdf")
+
+        result = asyncio.run(run())
+        assert "private" in result["error"]
+
+    def test_parse_happy_path(self, monkeypatch):
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        self._set_shared_client(client)
+
+        def _fake_getaddrinfo(host, *args, **kwargs):
+            return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+        monkeypatch.setattr("groktocrawl_client.socket.getaddrinfo", _fake_getaddrinfo)
+
+        def _handler(url):
+            return self._FakeResponse(
+                200,
+                {"content-type": "application/pdf"},
+                b"%PDF-1.4 fake content",
+            )
+
+        self._patch_download_client(monkeypatch, _handler)
+
+        async def run():
+            return await client.parse("https://example.com/doc.pdf")
+
+        result = asyncio.run(run())
+        assert result["success"] is True
+        assert result["data"]["markdown"] == "# parsed"
+
+    def test_parse_rejects_oversized_download(self, monkeypatch):
+        import groktocrawl_client
+
+        client = GroktocrawlClient(base_url="http://test:8080", api_key=None)
+        self._set_shared_client(client)
+
+        def _fake_getaddrinfo(host, *args, **kwargs):
+            return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+        monkeypatch.setattr("groktocrawl_client.socket.getaddrinfo", _fake_getaddrinfo)
+
+        def _handler(url):
+            return self._FakeResponse(
+                200,
+                {"content-type": "application/pdf"},
+                b"x" * (groktocrawl_client._MAX_DOWNLOAD_BYTES + 1024),
+            )
+
+        self._patch_download_client(monkeypatch, _handler)
+
+        async def run():
+            return await client.parse("https://example.com/huge.pdf")
+
+        result = asyncio.run(run())
+        assert "exceeds" in result["error"]
 
 
 # ── VAL-MCP-K04: Recovery after transient outage ──

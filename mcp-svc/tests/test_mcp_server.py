@@ -973,6 +973,69 @@ class TestToolCallRouting:
         assert captured.get("monitor_id") == "m-1"
         assert captured.get("schedule") == "0 0 * * *"
 
+    async def test_update_monitor_preserves_existing_query(self, monkeypatch):
+        """update_monitor merges the existing query on partial search updates."""
+        import mcp_server
+
+        updated: dict[str, Any] = {}
+
+        async def _fake_monitor_get(monitor_id: str) -> dict:
+            return {
+                "id": monitor_id,
+                "monitor_type": "search",
+                "search_config": {"query": "rust", "numResults": 5},
+            }
+
+        async def _fake_monitor_update(**kwargs: Any) -> dict:
+            updated.update(kwargs)
+            return {"success": True}
+
+        monkeypatch.setattr(mcp_server._client, "monitor_get", _fake_monitor_get)
+        monkeypatch.setattr(mcp_server._client, "monitor_update", _fake_monitor_update)
+
+        await mcp.call_tool(
+            "update_monitor",
+            {"monitor_id": "m-1", "sources": ["github"]},
+        )
+        # Existing query preserved; sources merged in.
+        assert updated.get("search_config") == {
+            "query": "rust",
+            "sources": ["github"],
+        }
+
+    async def test_update_monitor_search_fields_require_query(self, monkeypatch):
+        """update_monitor refuses search-field updates when no query exists."""
+        import mcp_server
+
+        async def _fake_monitor_get(monitor_id: str) -> dict:
+            return {"id": monitor_id, "monitor_type": "scrape", "search_config": None}
+
+        monkeypatch.setattr(mcp_server._client, "monitor_get", _fake_monitor_get)
+
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        with pytest.raises(ToolError, match="no search query"):
+            await mcp.call_tool(
+                "update_monitor",
+                {"monitor_id": "m-1", "sources": ["github"]},
+            )
+
+    async def test_create_monitor_requires_query_for_search(self, monkeypatch):
+        """create_monitor with search type but no query raises a clear error."""
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        with pytest.raises(ToolError, match="query is required"):
+            await mcp.call_tool(
+                "create_monitor", {"monitor_type": "search", "query": ""}
+            )
+
+    async def test_create_monitor_requires_url_for_scrape(self, monkeypatch):
+        """create_monitor with scrape type but no url raises a clear error."""
+        from mcp.server.fastmcp.exceptions import ToolError
+
+        with pytest.raises(ToolError, match="url is required"):
+            await mcp.call_tool("create_monitor", {"monitor_type": "scrape", "url": ""})
+
     async def test_run_monitor_routing(self, monkeypatch):
         """run_monitor passes monitor_id through."""
         captured: dict[str, Any] = {}

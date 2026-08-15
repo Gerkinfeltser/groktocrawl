@@ -1,10 +1,13 @@
 """HTTP client for the GroktoCrawl agent-svc API."""
 
 import asyncio
+import ipaddress
 import logging
 import os
+import socket
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -18,6 +21,75 @@ _MAX_429_RETRIES = 2
 # Retry-After, so a retry can never become a hot loop.
 _MAX_RETRY_WAIT_SECONDS = 10.0
 _MIN_RETRY_WAIT_SECONDS = 1.0
+
+# SSRF guard limits for server-side document downloads (parse tool).
+_MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+_MAX_REDIRECTS = 5
+
+
+def _is_private_ip(ip: str) -> bool:
+    """Return True for private, loopback, link-local, or reserved IPs."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    )
+
+
+def _validate_download_url(url: str) -> str:
+    """Reject URLs that would let the server fetch internal hosts (SSRF).
+
+    Enforces http/https schemes, rejects private/loopback/link-local IP
+    literals and local hostnames, and rejects hostnames that resolve to
+    any non-public address.  Raises :class:`ValueError` with a
+    human-readable reason when the URL is not safe to download.
+
+    Note: this is a request-time guard, not a defense against active
+    DNS rebinding between validation and connect; deployments with a
+    hostile MCP client should additionally isolate mcp-svc with network
+    policies.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            f"parse: only http/https URLs are allowed, got scheme {parsed.scheme!r}"
+        )
+    host = parsed.hostname
+    if not host:
+        raise ValueError("parse: URL must include a host")
+    lowered = host.lower().rstrip(".")
+    if lowered == "localhost" or lowered.endswith(".localhost"):
+        raise ValueError(f"parse: local host {host!r} is not allowed")
+
+    # Fast path: IP literals are checked without DNS.
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        if _is_private_ip(host):
+            raise ValueError(f"parse: private IP address {host!r} is not allowed")
+        return url
+
+    # Hostname: reject if ANY resolved address is non-public.
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        raise ValueError(f"parse: could not resolve host {host!r}")
+    for info in infos:
+        addr = info[4][0]
+        if _is_private_ip(addr):
+            raise ValueError(
+                f"parse: host {host!r} resolves to private address {addr!r}"
+            )
+    return url
 
 
 def _retry_after_seconds(response: httpx.Response) -> float:
@@ -192,6 +264,21 @@ class GroktocrawlClient:
                     continue
                 duration = time.monotonic() - start
                 detail = _extract_response_detail(exc.response)
+                if status_code == 429:
+                    # Retry budget exhausted — report distinctly from a
+                    # one-off 429 so callers can distinguish.
+                    logger.warning(
+                        "Rate limited (429) for %s %s — retry budget "
+                        "exhausted after %d attempts",
+                        method,
+                        path,
+                        _MAX_429_RETRIES + 1,
+                    )
+                    return self._error_result(
+                        f"Rate limited after {_MAX_429_RETRIES + 1} attempts "
+                        f"for {method.upper()} {path}",
+                        status_code=429,
+                    )
                 logger.warning(
                     "HTTP %s for %s %s (%.1fs)",
                     status_code,
@@ -226,10 +313,6 @@ class GroktocrawlClient:
             except Exception as exc:
                 logger.error("Request failed for %s %s: %s", method, path, exc)
                 return self._error_result(str(exc))
-        return self._error_result(
-            f"Rate limited after {_MAX_429_RETRIES + 1} attempts for "
-            f"{method.upper()} {path}"
-        )
 
     async def _post(self, path: str, json_data: dict | None = None) -> dict:
         return await self._request("POST", path, json_data)
@@ -250,16 +333,18 @@ class GroktocrawlClient:
         url: str,
         formats: list[str] | None = None,
         only_main_content: bool = True,
-        timeout: int | None = None,
     ) -> dict:
-        """Scrape a URL to markdown."""
+        """Scrape a URL to markdown.
+
+        Note: ``ScrapeRequest.timeout`` exists in agent-svc but is not
+        yet honored by the scrape route, so no timeout parameter is
+        exposed here (see agent-svc/agent/routes/scrape.py).
+        """
         body: dict[str, Any] = {"url": url}
         if formats:
             body["formats"] = formats
         if not only_main_content:
             body["only_main_content"] = only_main_content
-        if timeout is not None:
-            body["timeout"] = timeout
         return await self._post("/v2/scrape", body)
 
     async def search(
@@ -562,12 +647,19 @@ class GroktocrawlClient:
         multipart form data.  Uses a separate unauthenticated client
         for the download to avoid leaking the GROKTOCRAWL_API_KEY to
         third-party hosts.
+
+        The download is SSRF-guarded: only public http/https URLs are
+        accepted (private/loopback/link-local IPs and hostnames
+        resolving to them are rejected, including after each redirect
+        hop), redirects are bounded, and the response size is capped.
         """
         import os
 
         client = await self._client_ctx()
 
         try:
+            _validate_download_url(file_url)
+
             # Download the file with a separate unauthenticated client
             # to avoid leaking the API key to third-party hosts.
             dl_headers: dict[str, str] = {}
@@ -577,19 +669,60 @@ class GroktocrawlClient:
             dl_client = httpx.AsyncClient(
                 timeout=httpx.Timeout(self._default_timeout),
                 headers=dl_headers,
-                follow_redirects=True,
+                follow_redirects=False,
             )
             try:
-                dl_resp = await dl_client.get(file_url)
-                dl_resp.raise_for_status()
-                file_content = dl_resp.content
+                current_url = file_url
+                for _ in range(_MAX_REDIRECTS + 1):
+                    dl_resp = await dl_client.get(current_url)
+                    if dl_resp.status_code in (301, 302, 303, 307, 308):
+                        location = dl_resp.headers.get("location")
+                        if not location:
+                            return {"error": "parse: redirect without Location header"}
+                        current_url = str(httpx.URL(current_url).join(location))
+                        # Re-validate every hop so an open redirect cannot
+                        # bypass the initial host check.
+                        _validate_download_url(current_url)
+                        continue
+                    dl_resp.raise_for_status()
+                    break
+                else:
+                    return {"error": f"parse: too many redirects ({_MAX_REDIRECTS})"}
+
+                content_length = dl_resp.headers.get("content-length")
+                if content_length:
+                    try:
+                        if int(content_length) > _MAX_DOWNLOAD_BYTES:
+                            return {
+                                "error": (
+                                    f"parse: file exceeds "
+                                    f"{_MAX_DOWNLOAD_BYTES} byte limit"
+                                )
+                            }
+                    except ValueError:
+                        pass  # Malformed header — the stream cap still applies.
+
+                # Stream with a hard size cap so oversized bodies are
+                # rejected without being fully buffered.
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in dl_resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > _MAX_DOWNLOAD_BYTES:
+                        return {
+                            "error": (
+                                f"parse: file exceeds {_MAX_DOWNLOAD_BYTES} byte limit"
+                            )
+                        }
+                    chunks.append(chunk)
+                file_content = b"".join(chunks)
                 dl_content_type = dl_resp.headers.get(
                     "content-type", "application/octet-stream"
                 )
             finally:
                 await dl_client.aclose()
 
-            filename = os.path.basename(file_url.rsplit("?", 1)[0]) or "file"
+            filename = os.path.basename(current_url.rsplit("?", 1)[0]) or "file"
 
             # Upload to parse endpoint using the authenticated client
             parse_resp = await client.post(
@@ -598,6 +731,9 @@ class GroktocrawlClient:
             )
             parse_resp.raise_for_status()
             return parse_resp.json()
+        except ValueError as exc:
+            logger.warning("Parse download rejected for %s: %s", file_url, exc)
+            return {"error": str(exc)}
         except httpx.HTTPStatusError as exc:
             logger.warning(
                 "HTTP %s for parse of %s", exc.response.status_code, file_url

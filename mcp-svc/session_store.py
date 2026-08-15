@@ -83,6 +83,7 @@ class SessionStore:
         metadata: dict | None = None,
         *,
         session_id: str | None = None,
+        ttl: int | None = None,
     ) -> str:
         """Create a new session and return its identifier.
 
@@ -90,16 +91,21 @@ class SessionStore:
             metadata: Arbitrary key-value data to store with the session.
             session_id: Explicit session identifier.  A UUID v4 is
                 generated when *session_id* is ``None``.
+            ttl: Per-session TTL in seconds.  When provided, the session
+                expires after this TTL even if it is shorter than the
+                store's global TTL.  Defaults to the store TTL.
 
         Returns:
             The session identifier (provided or generated).
         """
         sid = session_id or str(uuid.uuid4())
         now = time.time()
+        effective_ttl = ttl if ttl is not None else self._ttl
         await self._ensure_sweep_running()
         async with self._lock:
             self._sessions[sid] = {
                 "created_at": now,
+                "expires_at": now + effective_ttl,
                 "data": dict(metadata) if metadata else {},
             }
         return sid
@@ -115,7 +121,7 @@ class SessionStore:
             session = self._sessions.get(session_id)
             if session is None:
                 return None
-            if time.time() - session["created_at"] > self._ttl:
+            if time.time() > session["expires_at"]:
                 return None
             return dict(session["data"])
 
@@ -147,9 +153,7 @@ class SessionStore:
         await self._ensure_sweep_running()
         async with self._lock:
             expired = [
-                sid
-                for sid, s in self._sessions.items()
-                if now - s["created_at"] > self._ttl
+                sid for sid, s in self._sessions.items() if now > s["expires_at"]
             ]
             for sid in expired:
                 del self._sessions[sid]
