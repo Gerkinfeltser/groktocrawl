@@ -48,14 +48,22 @@ and deduplicated by that normalised form, recording per-URL provenance
     floor_web    = max(0, limit - len(vector_unique))
     floor_vector = max(0, limit - len(web_unique))
 
+A diversity floor then reserves one slot for each source that has at least one
+exclusive candidate while the other source also contributes candidates::
+
+    if has_web_only and vector_unique:    floor_web    = max(floor_web, 1)
+    if has_vector_only and web_unique:    floor_vector = max(floor_vector, 1)
+
 The web floor and vector floor are emitted first (each in its source's rank
 order), then the remaining slots are filled by round-robin interleaving of the
 two rank orders (web first). Rank order within a source is preserved, keeping
 each source's own relevance signal; the round-robin interleave is the
 deterministic cross-source tie-break, and overlapping URLs are emitted once,
 keeping web's richer metadata and the vector score when present. This guarantees
-a full budget from either source cannot starve the other — a Qdrant-only
-candidate always has a chance to enter the final candidate set.
+a full budget from either source cannot starve the other — an exclusive
+(`web`-only or `vector`-only) candidate always has a chance to enter the final
+candidate set. Malformed URLs (invalid IPv6 literals, non-numeric ports) fall
+back to their raw text during normalisation rather than aborting the blend.
 
 **Cache-assisted acquisition.** When a scraper is supplied, each surviving
 candidate consults `CrawlCache.check_cache(url, max_age_ms=...)` (default
