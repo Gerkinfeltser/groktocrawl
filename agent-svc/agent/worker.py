@@ -695,20 +695,38 @@ async def _process_batch_scrape_async(
             logger.info("Batch scrape %s cancelled before scraping", job_id)
             raise JobCancelledError("batch scrape cancelled via DELETE")
 
-        semaphore = asyncio.Semaphore(effective_concurrency)
         # Index-keyed results so pages/errors stay in input URL order even
         # though completion is out of order.
         pages_by_index: dict[int, dict] = {}
         errors_by_index: dict[int, dict] = {}
         index_batch_by_index: dict[int, dict] = {}
 
-        async def _scrape_one(index: int, url: str) -> None:
-            raise_if_cancelled()
-            job_meta = store.get_job(job_id)
-            if job_meta and job_meta.get("status") == "cancelled":
-                raise JobCancelledError("batch scrape cancelled via DELETE")
-            async with semaphore:
+        # Bounded worker pool: only ``effective_concurrency`` coroutines are
+        # ever created, and each pulls work from the queue as it becomes
+        # available. This keeps a huge (unrate-limited) ``urls`` list from
+        # instantiating one task per URL up front and from bursting
+        # synchronous Valkey GETs ahead of the concurrency limit.
+        queue: asyncio.Queue[tuple[int, str] | None] = asyncio.Queue()
+        for i, u in enumerate(urls):
+            queue.put_nowait((i, u))
+        for _ in range(effective_concurrency):
+            queue.put_nowait(None)  # sentinel: tell each worker to stop
+
+        async def _scrape_worker() -> None:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    return
+                index, url = item
+
+                # Cancellation + store-status checks live inside the bounded
+                # worker so they never run as a synchronous pre-concurrency
+                # burst for a large batch.
                 raise_if_cancelled()
+                job_meta = store.get_job(job_id)
+                if job_meta and job_meta.get("status") == "cancelled":
+                    raise JobCancelledError("batch scrape cancelled via DELETE")
+
                 try:
                     result = await scraper.scrape(url)
                 except JobCancelledError:
@@ -721,56 +739,43 @@ async def _process_batch_scrape_async(
                         "error_code": "SCRAPE_ERROR",
                         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     }
-                    return
-
-                if result.get("success"):
-                    data = result["data"]
-                    pages_by_index[index] = {
-                        "url": url,
-                        "markdown": data.get("markdown", ""),
-                    }
-                    metadata = data.get("metadata") or {}
-                    og = metadata.get("og") or {}
-                    meta = metadata.get("meta") or {}
-                    title = (
-                        og.get("title") or meta.get("title") or data.get("title", "")
-                    )
-                    index_batch_by_index[index] = {
-                        "url": url,
-                        "title": title,
-                        "content": data.get("markdown", "")[:2000],
-                    }
-                    store.increment_completed(job_id)
                 else:
-                    error_message = result.get("error", "Scrape failed")
-                    error_code = result.get("error_code") or "SCRAPE_ERROR"
-                    errors_by_index[index] = {
-                        "url": url,
-                        "error": error_message,
-                        "error_type": (
-                            "captcha_unresolved"
-                            if error_code == "CAPTCHA_UNRESOLVED"
-                            else "scrape_error"
-                        ),
-                        "error_code": error_code,
-                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    }
-
-        tasks = {asyncio.create_task(_scrape_one(i, u)) for i, u in enumerate(urls)}
-        try:
-            while tasks:
-                done, tasks = await asyncio.wait(
-                    tasks, return_when=asyncio.FIRST_COMPLETED
-                )
-                for task in done:
-                    try:
-                        task.result()
-                    except (JobCancelledError, asyncio.CancelledError):
-                        raise
-                    except Exception:
-                        logger.warning(
-                            "Batch scrape task failed unexpectedly", exc_info=True
+                    if result.get("success"):
+                        data = result["data"]
+                        pages_by_index[index] = {
+                            "url": url,
+                            "markdown": data.get("markdown", ""),
+                        }
+                        metadata = data.get("metadata") or {}
+                        og = metadata.get("og") or {}
+                        meta = metadata.get("meta") or {}
+                        title = (
+                            og.get("title")
+                            or meta.get("title")
+                            or data.get("title", "")
                         )
+                        index_batch_by_index[index] = {
+                            "url": url,
+                            "title": title,
+                            "content": data.get("markdown", "")[:2000],
+                        }
+                        store.increment_completed(job_id)
+                    else:
+                        error_message = result.get("error", "Scrape failed")
+                        error_code = result.get("error_code") or "SCRAPE_ERROR"
+                        errors_by_index[index] = {
+                            "url": url,
+                            "error": error_message,
+                            "error_type": (
+                                "captcha_unresolved"
+                                if error_code == "CAPTCHA_UNRESOLVED"
+                                else "scrape_error"
+                            ),
+                            "error_code": error_code,
+                            "timestamp": time.strftime(
+                                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                            ),
+                        }
 
                 # Order-preserving progress update after each completion.
                 store.update_job_progress(
@@ -779,13 +784,32 @@ async def _process_batch_scrape_async(
                     errors=[errors_by_index[i] for i in sorted(errors_by_index)],
                     total=total,
                 )
+
+        workers = [
+            asyncio.create_task(_scrape_worker()) for _ in range(effective_concurrency)
+        ]
+        pending = set(workers)
+        try:
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    try:
+                        task.result()
+                    except (JobCancelledError, asyncio.CancelledError):
+                        raise
+                    except Exception:
+                        logger.warning(
+                            "Batch scrape worker failed unexpectedly", exc_info=True
+                        )
         finally:
-            # Await all remaining (possibly cancelled) tasks so no
+            # Await all remaining (possibly cancelled) workers so no
             # speculative scrape/browser/HTTP task is destroyed pending.
-            if tasks:
-                for pending in tasks:
-                    pending.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+            if pending:
+                for p in pending:
+                    p.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
 
         pages = [pages_by_index[i] for i in sorted(pages_by_index)]
         errors = [errors_by_index[i] for i in sorted(errors_by_index)]
