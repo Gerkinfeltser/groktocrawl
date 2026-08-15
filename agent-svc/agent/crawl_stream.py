@@ -31,6 +31,7 @@ from .crawler import CrawlEngine, CrawlOptions, CrawlResult
 from .scraper_client import ScraperClient
 from .store import JobStore
 from .webhook import deliver_webhook
+from .workload_metrics import record_job_cancelled, record_job_end, record_job_start
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +164,11 @@ async def crawl_event_stream(
     pages_yielded = 0
     last_progress_count = 0
 
+    # Workload-class telemetry: stream mode is the primary crawl path (CLI
+    # default), so it must touch the same active-jobs gauge the sync polling
+    # path does in _process_crawl_async.
+    record_job_start("crawl")
+
     try:
         # Start the crawl as a background task
         crawl_task = asyncio.create_task(
@@ -294,7 +300,10 @@ async def crawl_event_stream(
 
     except asyncio.CancelledError:
         logger.info("Crawl SSE stream cancelled for job %s", job_id)
-        # Mark job as cancelled in store and fire webhook (matching sync path)
+        # Mark job as cancelled in store and fire webhook (matching sync path).
+        # Also record the cancellation on the workload-class counter so a
+        # client-disconnected streamed crawl is distinguishable from a success.
+        record_job_cancelled("crawl")
         store.cancel_job(job_id)
         if task_tracker is not None:
             task_tracker.create_background_task(
@@ -355,6 +364,7 @@ async def crawl_event_stream(
         event_id += 1
         yield f"id: {event_id}\ndata: {json.dumps(error_payload)}\n\n"
     finally:
+        record_job_end("crawl")
         if crawl_task and not crawl_task.done():
             crawl_task.cancel()
             import contextlib as _ctxlib
