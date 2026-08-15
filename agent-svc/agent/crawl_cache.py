@@ -304,6 +304,13 @@ class CrawlCache:
                 max_age_ms,
             )
             return False, cached_data, None
+        except Exception:
+            # Redis/Valkey failures (e.g. connection refused) propagate to the
+            # caller but must be recorded as a lookup *error*, not a plain
+            # miss, so the two are distinguishable in the outcome counter.
+            outcome = "error"
+            logger.exception("Crawl cache lookup failed for %s", url)
+            raise
         finally:
             observe_elapsed(
                 _CACHE_LOOKUP_SECONDS, _CACHE_LOOKUP_SECONDS_HELP, {}, started

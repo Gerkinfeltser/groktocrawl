@@ -33,6 +33,16 @@ def _hist_count(stream_type: str) -> float:
     return float(tail.split()[0])
 
 
+def _counter_count(name: str, labels: str) -> float:
+    """Return the observed value for a counter with the given OpenMetrics label set."""
+    text = _metrics_text()
+    marker = f"{name}{{{labels}}}"
+    if marker not in text:
+        return 0.0
+    tail = text[text.index(marker) + len(marker) :].lstrip()
+    return float(tail.split()[0])
+
+
 # ── LLM stage telemetry ───────────────────────────────────────────
 
 
@@ -144,6 +154,31 @@ def test_crawl_cache_bypass_records_miss_outcome():
     text = _metrics_text()
     assert "# TYPE groktocrawl_scrape_cache_lookup_total counter" in text
     assert 'groktocrawl_scrape_cache_lookup_total{outcome="miss"}' in text
+
+
+def test_crawl_cache_lookup_error_records_error_outcome(monkeypatch):
+    """A Redis/Valkey failure during check_cache records outcome=error, not miss."""
+    from agent.crawl_cache import CrawlCache
+
+    cache = CrawlCache("redis://localhost:6379/0")
+
+    def raise_redis(*_args, **_kwargs):
+        raise RuntimeError("valkey connection refused")
+
+    monkeypatch.setattr(cache, "get", raise_redis)
+
+    before = _counter_count("groktocrawl_scrape_cache_lookup_total", 'outcome="error"')
+
+    with pytest.raises(RuntimeError, match="valkey connection refused"):
+        cache.check_cache("https://example.test", max_age_ms=60000)
+
+    text = _metrics_text()
+    assert "# TYPE groktocrawl_scrape_cache_lookup_total counter" in text
+    assert 'groktocrawl_scrape_cache_lookup_total{outcome="error"}' in text
+    assert (
+        _counter_count("groktocrawl_scrape_cache_lookup_total", 'outcome="error"')
+        == before + 1
+    )
 
 
 # ── Streaming TTFB / TTFT ─────────────────────────────────────────
