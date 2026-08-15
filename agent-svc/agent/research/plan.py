@@ -2,11 +2,17 @@
 
 import json
 import logging
+import time
+
+from common.stage_metrics import observe_elapsed
 
 from ..llm import LLMClient
 from .prompts import QUERY_INTELLIGENCE_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
+
+_PLAN_SECONDS = "groktocrawl_research_plan_seconds"
+_PLAN_SECONDS_HELP = "Research planning (query intelligence) latency"
 
 
 async def _generate_research_plan(
@@ -23,10 +29,12 @@ async def _generate_research_plan(
     On any failure (API error, timeout, invalid JSON, empty response),
     falls back to using the prompt itself as a single focused query.
     """
+    started = time.monotonic()
     try:
         raw_response = await llm.generate(
             system_prompt=QUERY_INTELLIGENCE_SYSTEM_PROMPT,
             user_prompt=prompt,
+            stage="plan",
         )
 
         # Strip markdown code fences if present
@@ -65,3 +73,5 @@ async def _generate_research_plan(
             "research_strategy": "focused",
             "focused_queries": [prompt],
         }
+    finally:
+        observe_elapsed(_PLAN_SECONDS, _PLAN_SECONDS_HELP, {}, started)

@@ -7,6 +7,8 @@ import logging
 import time
 from typing import Any
 
+from common.stage_metrics import StreamTiming
+
 from ..llm import LLMClient
 from ..scraper_client import ScraperClient
 from ..searxng_client import SearXNGClient
@@ -70,6 +72,7 @@ async def run_deep_search(
             gap_result = await llm.generate(
                 system_prompt=DEEP_SEARCH_GAP_PROMPT,
                 user_prompt=gap_prompt,
+                stage="deep_search_gap",
             )
             if gap_result and not gap_result.startswith("Error:"):
                 # Parse the JSON array from the LLM response
@@ -226,6 +229,7 @@ async def run_rich_search(
         content = await llm.generate(
             system_prompt=effective_system,
             user_prompt=prompt,
+            stage="rich_search",
         )
 
         result: dict[str, Any] = {}
@@ -303,6 +307,7 @@ async def run_search_stream(
       {"type": "error", "content": "..."}
     """
     start = time.monotonic()
+    timing = StreamTiming("search")
     if llm_model is None:
         raise ValueError("llm_model is required — set via LLM_MODEL env var")
 
@@ -360,6 +365,7 @@ async def run_search_stream(
 
         # ── Yield search_result events ──────────────────────────
         for r in search_results:
+            timing.on_first_event()
             yield {
                 "type": "search_result",
                 "result": {
@@ -508,6 +514,7 @@ async def run_search_stream(
                     content = await llm.generate(
                         system_prompt=effective_system,
                         user_prompt=prompt,
+                        stage="rich_search",
                     )
 
                     parsed_output: Any = content
@@ -539,8 +546,10 @@ async def run_search_stream(
                     async for event in llm.generate_stream(
                         system_prompt=effective_system,
                         user_prompt=prompt,
+                        stage="rich_search",
                     ):
                         if event["type"] == "token":
+                            timing.on_first_token()
                             full_result += event["content"]
                             yield {"type": "token", "content": event["content"]}
                         elif event["type"] == "error":
@@ -565,6 +574,11 @@ async def run_search_stream(
         }
         if output is not None:
             done_event["output"] = output
+        # Ensure TTFB is sampled even when zero results were returned: the
+        # terminal ``done`` event is the only event delivered in that case.
+        # ``on_first_event`` is idempotent, so the loop-entry call for the
+        # normal path is unaffected.
+        timing.on_first_event()
         yield done_event
 
     finally:

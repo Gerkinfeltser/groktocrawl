@@ -1,0 +1,78 @@
+{
+  "commit_sha": "ffdc57c2542052752fcf69f406f2612ab9626ace",
+  "config_class": "synthetic-reference",
+  "results": [
+    {
+      "fixture": "cold scrape",
+      "kind": "cold_scrape",
+      "p50": 0.41,
+      "p95": 0.41,
+      "runs": 1,
+      "samples": [
+        0.41
+      ]
+    },
+    {
+      "fixture": "warm scrape",
+      "kind": "warm_scrape",
+      "p50": 0.02,
+      "p95": 0.02,
+      "runs": 1,
+      "samples": [
+        0.02
+      ]
+    },
+    {
+      "fixture": "lightweight fetch",
+      "kind": "lightweight_fetch",
+      "p50": 0.15,
+      "p95": 0.15,
+      "runs": 1,
+      "samples": [
+        0.15
+      ]
+    },
+    {
+      "fixture": "browser fallback",
+      "kind": "browser_fallback",
+      "p50": 1.25,
+      "p95": 1.25,
+      "runs": 1,
+      "samples": [
+        1.25
+      ]
+    },
+    {
+      "fixture": "answer",
+      "kind": "answer",
+      "p50": 0.62,
+      "p95": 0.62,
+      "runs": 1,
+      "samples": [
+        0.62
+      ]
+    },
+    {
+      "fixture": "agent research",
+      "kind": "agent_research",
+      "p50": 1.8,
+      "p95": 1.8,
+      "runs": 1,
+      "samples": [
+        1.8
+      ]
+    },
+    {
+      "fixture": "batch scrape",
+      "kind": "batch_scrape",
+      "p50": 0.34,
+      "p95": 0.34,
+      "runs": 1,
+      "samples": [
+        0.34
+      ]
+    }
+  ],
+  "runs": 1,
+  "schema_version": 1
+}

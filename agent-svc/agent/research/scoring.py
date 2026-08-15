@@ -1,10 +1,15 @@
 """URL scoring, ranking, and video-platform domain filtering."""
 
 import logging
+import time
 
+from common.stage_metrics import observe_elapsed
 from common.url import extract_domain
 
 logger = logging.getLogger(__name__)
+
+_RANK_SECONDS = "groktocrawl_research_rank_seconds"
+_RANK_SECONDS_HELP = "URL ranking/reranking latency by mode"
 
 # ── Video-platform URL filtering ────────────────────────────────
 # Domains whose primary content is audio-visual (video, audio,
@@ -137,9 +142,13 @@ def _score_url(url: str) -> int:
 
 def _filter_and_rank_urls(urls: list[str], max_urls: int = 20) -> list[str]:
     """Score, sort, filter URLs and return the top N."""
-    scored = [(url, _score_url(url)) for url in urls]
-    # Exclude skip-score URLs
-    scored = [(url, s) for url, s in scored if s > -1000]
-    # Sort by score descending
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return [url for url, _ in scored[:max_urls]]
+    started = time.monotonic()
+    try:
+        scored = [(url, _score_url(url)) for url in urls]
+        # Exclude skip-score URLs
+        scored = [(url, s) for url, s in scored if s > -1000]
+        # Sort by score descending
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [url for url, _ in scored[:max_urls]]
+    finally:
+        observe_elapsed(_RANK_SECONDS, _RANK_SECONDS_HELP, {"mode": "score"}, started)

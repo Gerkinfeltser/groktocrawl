@@ -28,11 +28,19 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 from datetime import UTC, datetime
 
 from redis import Redis
 
+from common.stage_metrics import inc_counter, observe_elapsed
+
 logger = logging.getLogger(__name__)
+
+_CACHE_LOOKUP_SECONDS = "groktocrawl_scrape_cache_lookup_seconds"
+_CACHE_LOOKUP_SECONDS_HELP = "Crawl scrape-cache lookup latency"
+_CACHE_LOOKUP_TOTAL = "groktocrawl_scrape_cache_lookup_total"
+_CACHE_LOOKUP_TOTAL_HELP = "Crawl scrape-cache lookups by outcome"
 
 # Key prefix for all crawl cache entries in Valkey.
 _CACHE_KEY_PREFIX = "crawl:cache:"
@@ -198,92 +206,117 @@ class CrawlCache:
             - ``error_message`` (str | None): An error message if the cache
               returns an error state (e.g., minAge cache miss), or ``None``.
         """
-        # If neither maxAge nor minAge is set, bypass cache entirely
-        if (max_age_ms is None or max_age_ms == 0) and (
-            min_age_ms is None or min_age_ms == 0
-        ):
-            logger.debug(
-                "Cache bypass for %s (maxAge=%s, minAge=%s)",
-                url,
-                max_age_ms,
-                min_age_ms,
-            )
-            return False, None, None
-
-        entry = self.get(url)
-
-        # ── No cached entry ──────────────────────────────────────
-        if entry is None:
-            if min_age_ms is not None and min_age_ms > 0:
-                # minAge mode: cache miss is an error (VAL-SCRAPE-029)
-                err_msg = (
-                    f"Cache miss for {url} — no cached content available "
-                    f"(minAge={min_age_ms}ms)"
-                )
-                logger.debug("Cache MISS (minAge) for %s", url)
-                return False, None, err_msg
-            # Normal cache miss — caller should scrape fresh
-            logger.debug("Cache MISS for %s", url)
-            return False, None, None
-
-        cached_data = entry.get("data")
-        age_ms = self.get_age_ms(url)
-
-        # ── minAge mode — serve cached (with freshness check against maxAge) ─
-        if min_age_ms is not None and min_age_ms > 0:
-            if cached_data is not None:
-                # When both minAge and maxAge are set, check age against maxAge.
-                # If cache is older than maxAge, treat as stale and trigger
-                # a fresh scrape instead of returning stale data.
-                if (
-                    max_age_ms is not None
-                    and max_age_ms > 0
-                    and age_ms is not None
-                    and age_ms >= max_age_ms
-                ):
-                    logger.debug(
-                        "Cache STALE (minAge+maxAge) for %s (age=%dms, maxAge=%dms)",
-                        url,
-                        age_ms,
-                        max_age_ms,
-                    )
-                    return False, cached_data, None
+        started = time.monotonic()
+        outcome = "miss"
+        try:
+            # If neither maxAge nor minAge is set, bypass cache entirely
+            if (max_age_ms is None or max_age_ms == 0) and (
+                min_age_ms is None or min_age_ms == 0
+            ):
                 logger.debug(
-                    "Cache HIT (minAge) for %s (age=%dms, minAge=%dms)",
+                    "Cache bypass for %s (maxAge=%s, minAge=%s)",
                     url,
-                    age_ms or 0,
+                    max_age_ms,
                     min_age_ms,
                 )
-                return True, cached_data, None
-            # Entry exists but has no data — treat as miss
-            err_msg = (
-                f"Cache miss for {url} — cached entry has no data "
-                f"(minAge={min_age_ms}ms)"
-            )
-            return False, None, err_msg
+                return False, None, None
 
-        # ── maxAge mode — check freshness ─────────────────────────
-        # At this point, either maxAge or minAge is set (otherwise we
-        # would have returned early above). If only minAge is set, the
-        # minAge block above already handled it. If we reach here,
-        # maxAge must be set and > 0.
-        assert max_age_ms is not None and max_age_ms > 0  # nosec — type narrowing
-        if age_ms is not None and age_ms < max_age_ms:
+            entry = self.get(url)
+
+            # ── No cached entry ──────────────────────────────────────
+            if entry is None:
+                if min_age_ms is not None and min_age_ms > 0:
+                    outcome = "error"
+                    # minAge mode: cache miss is an error (VAL-SCRAPE-029)
+                    err_msg = (
+                        f"Cache miss for {url} — no cached content available "
+                        f"(minAge={min_age_ms}ms)"
+                    )
+                    logger.debug("Cache MISS (minAge) for %s", url)
+                    return False, None, err_msg
+                # Normal cache miss — caller should scrape fresh
+                logger.debug("Cache MISS for %s", url)
+                return False, None, None
+
+            cached_data = entry.get("data")
+            age_ms = self.get_age_ms(url)
+
+            # ── minAge mode — serve cached (with freshness check against maxAge) ─
+            if min_age_ms is not None and min_age_ms > 0:
+                if cached_data is not None:
+                    # When both minAge and maxAge are set, check age against maxAge.
+                    # If cache is older than maxAge, treat as stale and trigger
+                    # a fresh scrape instead of returning stale data.
+                    if (
+                        max_age_ms is not None
+                        and max_age_ms > 0
+                        and age_ms is not None
+                        and age_ms >= max_age_ms
+                    ):
+                        outcome = "stale"
+                        logger.debug(
+                            "Cache STALE (minAge+maxAge) for %s (age=%dms, maxAge=%dms)",
+                            url,
+                            age_ms,
+                            max_age_ms,
+                        )
+                        return False, cached_data, None
+                    outcome = "hit"
+                    logger.debug(
+                        "Cache HIT (minAge) for %s (age=%dms, minAge=%dms)",
+                        url,
+                        age_ms or 0,
+                        min_age_ms,
+                    )
+                    return True, cached_data, None
+                # Entry exists but has no data — treat as miss
+                outcome = "error"
+                err_msg = (
+                    f"Cache miss for {url} — cached entry has no data "
+                    f"(minAge={min_age_ms}ms)"
+                )
+                return False, None, err_msg
+
+            # ── maxAge mode — check freshness ─────────────────────────
+            # At this point, either maxAge or minAge is set (otherwise we
+            # would have returned early above). If only minAge is set, the
+            # minAge block above already handled it. If we reach here,
+            # maxAge must be set and > 0.
+            assert max_age_ms is not None and max_age_ms > 0  # nosec — type narrowing
+            if age_ms is not None and age_ms < max_age_ms:
+                outcome = "hit"
+                logger.debug(
+                    "Cache HIT for %s (age=%dms, maxAge=%dms)",
+                    url,
+                    age_ms,
+                    max_age_ms,
+                )
+                return True, cached_data, None
+
+            # Cache is stale — caller should scrape fresh.
+            # We still return cached_data so the caller can use it as
+            # a fallback if desired (e.g., serve stale during revalidation).
+            outcome = "stale"
             logger.debug(
-                "Cache HIT for %s (age=%dms, maxAge=%dms)",
+                "Cache STALE for %s (age=%dms, maxAge=%dms)",
                 url,
-                age_ms,
+                age_ms or -1,
                 max_age_ms,
             )
-            return True, cached_data, None
-
-        # Cache is stale — caller should scrape fresh.
-        # We still return cached_data so the caller can use it as
-        # a fallback if desired (e.g., serve stale during revalidation).
-        logger.debug(
-            "Cache STALE for %s (age=%dms, maxAge=%dms)",
-            url,
-            age_ms or -1,
-            max_age_ms,
-        )
-        return False, cached_data, None
+            return False, cached_data, None
+        except Exception:
+            # Redis/Valkey failures (e.g. connection refused) propagate to the
+            # caller but must be recorded as a lookup *error*, not a plain
+            # miss, so the two are distinguishable in the outcome counter.
+            outcome = "error"
+            logger.exception("Crawl cache lookup failed for %s", url)
+            raise
+        finally:
+            observe_elapsed(
+                _CACHE_LOOKUP_SECONDS, _CACHE_LOOKUP_SECONDS_HELP, {}, started
+            )
+            inc_counter(
+                _CACHE_LOOKUP_TOTAL,
+                _CACHE_LOOKUP_TOTAL_HELP,
+                {"outcome": outcome},
+            )

@@ -1,11 +1,19 @@
 """SearXNG JSON API client."""
 
 import logging
+import time
 from dataclasses import dataclass
 
 import httpx
 
+from common.stage_metrics import inc_counter, observe_elapsed
+
 logger = logging.getLogger(__name__)
+
+_SEARCH_QUERY_SECONDS = "groktocrawl_search_query_seconds"
+_SEARCH_QUERY_SECONDS_HELP = "Search query latency by engine"
+_SEARCH_QUERIES_TOTAL = "groktocrawl_search_queries_total"
+_SEARCH_QUERIES_TOTAL_HELP = "Total search queries by engine and outcome"
 
 
 @dataclass
@@ -153,36 +161,41 @@ class SearXNGClient:
         - results: list of dicts with keys: url, title, description, engine.
         - health: SearchHealth dataclass with engine status information.
         """
-        # ── Per-request search budget check ────────────────────
-        if self._search_count >= self._max_searches:
-            from .exceptions import RateLimitedError
+        from .exceptions import RateLimitedError
 
-            raise RateLimitedError(
-                detail=(
-                    f"Search budget exceeded: {self._search_count}/{self._max_searches}"
-                ),
-                details={
-                    "budget_used": self._search_count,
-                    "budget_max": self._max_searches,
-                },
-            )
-        self._search_count += 1
-
-        effective_categories = self._translate(sources, categories)
-        params = {
-            "q": query,
-            "format": "json",
-            "language": "en",
-            "pageno": 1,
-        }
-        params["categories"] = ",".join(effective_categories)
+        started = time.monotonic()
+        outcome = "success"
 
         try:
+            # ── Per-request search budget check ────────────────────
+            if self._search_count >= self._max_searches:
+                outcome = "rate_limited"
+                raise RateLimitedError(
+                    detail=(
+                        f"Search budget exceeded: {self._search_count}/{self._max_searches}"
+                    ),
+                    details={
+                        "budget_used": self._search_count,
+                        "budget_max": self._max_searches,
+                    },
+                )
+            self._search_count += 1
+
+            effective_categories = self._translate(sources, categories)
+            params = {
+                "q": query,
+                "format": "json",
+                "language": "en",
+                "pageno": 1,
+            }
+            params["categories"] = ",".join(effective_categories)
+
             resp = await self._client.get(
                 f"{self.base_url}/search",
                 params=params,  # type: ignore[arg-type]
             )
             if resp.status_code != 200:
+                outcome = "error"
                 logger.warning(
                     "SearXNG returned %d: %s", resp.status_code, resp.text[:200]
                 )
@@ -209,12 +222,28 @@ class SearXNGClient:
 
             return results, health
 
+        except RateLimitedError:
+            raise
         except httpx.TimeoutException:
+            outcome = "timeout"
             logger.warning("SearXNG search timed out for query: %s", query)
             return [], SearchHealth(detail="SearXNG request timed out")
         except Exception as e:
+            outcome = "error"
             logger.error("SearXNG search failed: %s", e)
             return [], SearchHealth(detail=f"SearXNG search failed: {e}")
+        finally:
+            observe_elapsed(
+                _SEARCH_QUERY_SECONDS,
+                _SEARCH_QUERY_SECONDS_HELP,
+                {"engine": "searxng"},
+                started,
+            )
+            inc_counter(
+                _SEARCH_QUERIES_TOTAL,
+                _SEARCH_QUERIES_TOTAL_HELP,
+                {"engine": "searxng", "outcome": outcome},
+            )
 
     async def close(self) -> None:
         await self._client.aclose()

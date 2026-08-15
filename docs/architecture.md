@@ -73,6 +73,10 @@ Adapters cover publishing and media, source code and GitHub social content, recr
 
 `semantic-svc` loads its embedding model during application lifespan and exposes embedding, reranking, index, migration, retention, and search routers. Qdrant persists named-vector collections. `agent-svc` treats indexing as best effort, so a semantic-service outage does not fail a scrape or crawl request.
 
+## Performance telemetry
+
+Stage-level latency and capacity signals are recorded with bounded labels and exported as `groktocrawl_*` metrics (see [ADR-0048](adr/0048-stage-level-telemetry.md) and `docs/observability.md`). Research stages, cache lookups, browser semaphore saturation, scrape-tier/adapter outcomes, active-work/cancellation counts, and streaming time-to-first-event/token are all observable per service. `benchmarks/run_benchmarks.py` reproduces p50/p95 across cold/warm/lightweight/browser fixtures and writes a portable, checked-in baseline artifact — the evidence gate for future browser-process-reuse and adapter-investment decisions.
+
 ## Operational boundaries
 
 - Valkey is the shared state boundary for jobs, monitor/session data, and caches.

@@ -14,8 +14,17 @@ from .scraper_client import ScraperClient
 from .settings import load_settings
 from .store import JobStore
 from .webhook import deliver_webhook
+from .workload_metrics import record_job_cancelled, record_job_end, record_job_start
 
 logger = logging.getLogger(__name__)
+
+
+class JobCancelledError(Exception):
+    """Raised by a work function to signal cooperative cancellation.
+
+    ``_run_job_with_observability`` treats this distinctly from a normal
+    ``Exception`` so a cancelled job is never recorded as completed or failed.
+    """
 
 
 def _get_worker_settings() -> Any:
@@ -40,6 +49,7 @@ async def _run_job_with_observability(
     METRICS.counter("jobs_submitted_total", "Total jobs submitted", ["type"]).inc(
         {"type": job_type}
     )
+    record_job_start(job_type)
     try:
         result = await work_fn()
         store.complete_job(job_id, result)
@@ -52,6 +62,12 @@ async def _run_job_with_observability(
             {"type": job_type}
         )
         logger.info("%s job %s completed in %.2fs", job_type, job_id, elapsed)
+    except JobCancelledError:
+        # Cooperative cancellation: the DELETE handler already marked the job
+        # cancelled in the store. Do not overwrite it, deliver a completion
+        # webhook, or record completed/failed metrics.
+        record_job_cancelled(job_type)
+        logger.info("%s job %s cancelled", job_type, job_id)
     except Exception as e:
         logger.exception("%s job %s failed", job_type, job_id)
         store.fail_job(job_id, str(e))
@@ -64,6 +80,7 @@ async def _run_job_with_observability(
             {"type": job_type}
         )
     finally:
+        record_job_end(job_type)
         if cleanup_fn:
             await cleanup_fn()
 
@@ -182,6 +199,15 @@ async def _process_agent_async(
         )
 
     async def work_fn() -> dict[str, Any]:
+        # Cooperative cancellation: DELETE /v2/agent/{job_id} marks the job
+        # cancelled in the store. Honour it before (and after) the research
+        # pipeline so a cancelled agent job raises JobCancelledError and is
+        # never recorded as completed — mirroring batch_scrape/plan_execute.
+        job_meta = store.get_job(job_id)
+        if job_meta and job_meta.get("status") == "cancelled":
+            logger.info("Agent job %s cancelled before research", job_id)
+            raise JobCancelledError("agent job cancelled via DELETE")
+
         result = await run_research(
             prompt=prompt,
             urls=urls,
@@ -197,6 +223,12 @@ async def _process_agent_async(
             search_type=search_type,
             max_searches_per_request=max_searches_per_request,
         )
+
+        job_meta = store.get_job(job_id)
+        if job_meta and job_meta.get("status") == "cancelled":
+            logger.info("Agent job %s cancelled during research", job_id)
+            raise JobCancelledError("agent job cancelled via DELETE")
+
         # Apply citation style to transform bare [N] markers to [N](url)
         # for compact style, or leave them unchanged for inline style.
         source_details = result.get("source_details", [])
@@ -300,6 +332,7 @@ async def _process_crawl_async(
     METRICS.counter("jobs_submitted_total", "Total jobs submitted", ["type"]).inc(
         {"type": job_type}
     )
+    record_job_start(job_type)
 
     try:
         # ── Fire crawl.started webhook ────────────────────────
@@ -407,6 +440,7 @@ async def _process_crawl_async(
         if was_cancelled:
             # Store is already marked cancelled by cancel_job();
             # do NOT overwrite with complete_job().
+            record_job_cancelled(job_type)
             logger.info("Crawl %s was cancelled — preserving cancelled status", job_id)
             if task_tracker is not None:
                 task_tracker.create_background_task(
@@ -448,12 +482,14 @@ async def _process_crawl_async(
         elapsed = time.monotonic() - start
 
         # ── Existing job-type-agnostic metrics (keep for backward compat) ──
-        METRICS.histogram(
-            "job_duration_seconds", "Job processing duration", ["type", "status"]
-        ).observe({"type": job_type, "status": "completed"}, elapsed)
-        METRICS.counter("jobs_completed_total", "Total completed jobs", ["type"]).inc(
-            {"type": job_type}
-        )
+        # A cancelled crawl must not be double-counted as completed.
+        if not was_cancelled:
+            METRICS.histogram(
+                "job_duration_seconds", "Job processing duration", ["type", "status"]
+            ).observe({"type": job_type, "status": "completed"}, elapsed)
+            METRICS.counter(
+                "jobs_completed_total", "Total completed jobs", ["type"]
+            ).inc({"type": job_type})
 
         # ── Crawl-specific metrics ──────────────────────────────────────────
         crawl_status = "cancelled" if was_cancelled else "completed"
@@ -516,6 +552,7 @@ async def _process_crawl_async(
             ["status"],
         ).observe({"status": "failed"}, elapsed)
     finally:
+        record_job_end(job_type)
         await scraper.close()
 
 
@@ -547,7 +584,7 @@ async def _process_batch_scrape_async(
                     len(pages),
                     total,
                 )
-                break
+                raise JobCancelledError("batch scrape cancelled via DELETE")
 
             try:
                 result = await scraper.scrape(url)
@@ -784,7 +821,7 @@ async def _process_plan_execution_async(
                         phase_idx + 1,
                         len(phases),
                     )
-                    break
+                    raise JobCancelledError("plan execution cancelled via DELETE")
 
                 action = phase.get("action", "search")
                 description = phase.get("description", "")
@@ -882,6 +919,7 @@ async def _process_plan_execution_async(
                         ),
                         user_prompt=synthesis_prompt,
                         context=context or None,
+                        stage="plan_execute",
                     )
                     if full_synthesis:
                         accumulated_context_parts.append(full_synthesis)

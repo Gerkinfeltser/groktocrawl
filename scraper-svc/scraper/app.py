@@ -4,6 +4,7 @@ Single endpoint: POST /scrape — takes a URL, returns clean markdown.
 """
 
 import logging
+import time
 from contextlib import asynccontextmanager
 from enum import StrEnum
 
@@ -15,6 +16,7 @@ from pydantic import BaseModel
 from common.logging import setup_logging
 from common.metrics import METRICS
 from common.middleware import add_request_id_middleware
+from common.stage_metrics import inc_counter, observe_elapsed
 
 from .cookie_store import close_client, get_client
 from .exceptions import BrowserError, CaptchaError, GroktoCrawlError, UpstreamError
@@ -257,12 +259,49 @@ async def scrape(request: ScrapeRequest):
         formats = scrape_opts.get("formats", [])
         needs_images = "images" in formats
 
-        result = await smart_scrape(
-            request.url,
-            force_browser=request.force_browser or needs_images,
-            ignore_robots_txt=request.ignore_robots_txt,
-            robots_user_agent=request.robots_user_agent,
-            scrape_options=request.scrape_options,
+        scrape_started = time.monotonic()
+        try:
+            result = await smart_scrape(
+                request.url,
+                force_browser=request.force_browser or needs_images,
+                ignore_robots_txt=request.ignore_robots_txt,
+                robots_user_agent=request.robots_user_agent,
+                scrape_options=request.scrape_options,
+            )
+        except Exception:
+            # A raise from smart_scrape bypasses the tier telemetry below; record
+            # an error outcome (tier unknown) before re-raising so every scrape
+            # attempt is reflected in the tier counters.
+            observe_elapsed(
+                "groktocrawl_scrape_tier_duration_seconds",
+                "Scrape latency by source tier and outcome",
+                {"tier": "unknown", "outcome": "error"},
+                scrape_started,
+            )
+            inc_counter(
+                "groktocrawl_scrape_tier_total",
+                "Total scrapes by source tier and outcome",
+                {"tier": "unknown", "outcome": "error"},
+            )
+            raise
+        # Bounded tier/outcome telemetry (tier is an enum-like source string).
+        tier = result.get("source", "unknown")
+        if result.get("error"):
+            outcome = "error"
+        elif result.get("warning") or result.get("_degraded_from"):
+            outcome = "degraded"
+        else:
+            outcome = "success"
+        observe_elapsed(
+            "groktocrawl_scrape_tier_duration_seconds",
+            "Scrape latency by source tier and outcome",
+            {"tier": tier, "outcome": outcome},
+            scrape_started,
+        )
+        inc_counter(
+            "groktocrawl_scrape_tier_total",
+            "Total scrapes by source tier and outcome",
+            {"tier": tier, "outcome": outcome},
         )
         if result.get("error"):
             METRICS.counter(

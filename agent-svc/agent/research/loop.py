@@ -7,6 +7,8 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from common.stage_metrics import StreamTiming, observe_elapsed
+
 from ..llm import LLMClient
 from ..models import CitationStyle
 from ..scraper_client import ScraperClient
@@ -188,6 +190,7 @@ async def _run_research_events(
                     user_prompt=prompt,
                     context=combined_context,
                     schema=schema,
+                    stage="synthesis",
                 )
                 _validate_json_if_schema(answer, schema)
                 if not schema and not stream_tokens:
@@ -205,6 +208,7 @@ async def _run_research_events(
                     system_prompt=SYSTEM_PROMPT,
                     user_prompt=prompt,
                     context=combined_context,
+                    stage="synthesis",
                 ):
                     if event["type"] == "token":
                         answer += event["content"]
@@ -235,6 +239,12 @@ async def _run_research_events(
             "latency_ms": int((time.monotonic() - start) * 1000),
         }
     finally:
+        observe_elapsed(
+            "groktocrawl_research_total_seconds",
+            "Total research pipeline latency by search type",
+            {"search_type": search_type},
+            start,
+        )
         await searxng.close()
         await scraper.close()
         await llm.close()
@@ -357,6 +367,7 @@ async def run_extract(
             user_prompt=user_prompt,
             context=context,
             schema=schema,
+            stage="extract",
         )
         _validate_json_if_schema(answer, schema)
         return {
@@ -448,6 +459,7 @@ async def run_answer(
                 user_prompt=user_prompt,
                 context=context,
                 schema=output_schema,
+                stage="answer",
             )
         else:
             user_prompt = _build_answer_user_prompt(query, cs)
@@ -455,6 +467,7 @@ async def run_answer(
                 system_prompt=ANSWER_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 context=context,
+                stage="answer",
             )
 
         # Apply citation style post-processing
@@ -510,6 +523,7 @@ async def run_answer_stream(
       {"type": "error", "content": "..."} — error
     """
     start = time.monotonic()
+    timing = StreamTiming("answer")
 
     cs = (
         citation_style
@@ -556,6 +570,7 @@ async def run_answer_stream(
             for r in search_results
             if r.get("url")
         ]
+        timing.on_first_event()
         yield {"type": "sources_pending", "sources": pending_sources}
 
         # Step 2: Scrape (prefer text sources, use video platforms as fallback)
@@ -647,6 +662,7 @@ async def run_answer_stream(
                 user_prompt=user_prompt,
                 context=context,
                 schema=output_schema,
+                stage="answer",
             )
         else:
             user_prompt = _build_answer_user_prompt(query, cs)
@@ -655,8 +671,10 @@ async def run_answer_stream(
                 system_prompt=ANSWER_SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 context=context,
+                stage="answer",
             ):
                 if event["type"] == "token":
+                    timing.on_first_token()
                     full_answer += event["content"]
                     yield {"type": "token", "content": event["content"]}
                 elif event["type"] == "error":

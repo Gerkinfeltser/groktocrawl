@@ -315,6 +315,10 @@ jobs:
           docker compose exec -T agent-svc mkdir -p /app/scripts
           docker cp scripts/classify_ci_changes.py "$svc":/app/scripts/classify_ci_changes.py
           docker cp scripts/coverage_gate.py "$svc":/app/scripts/coverage_gate.py
+          # Copy the stdlib benchmark harness so tests/service/test_benchmark_harness.py
+          # can `from benchmarks.run_benchmarks import ...` inside the container.
+          docker compose exec -T agent-svc mkdir -p /app/benchmarks
+          docker cp benchmarks/. "$svc":/app/benchmarks/
           docker compose exec -T agent-svc mkdir -p /app/.github/workflows
           docker cp .github/workflows/docker.yml "$svc":/app/.github/workflows/docker.yml
           docker cp .github/workflows/fast-tests.yml "$svc":/app/.github/workflows/fast-tests.yml

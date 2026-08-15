@@ -5,3 +5,17 @@
 # table empty unless a maintainer has reviewed the risk and recorded why focused
 # tests cannot land in the same change.
 [exceptions]
+
+[exceptions."scraper-svc/scraper/fetch_tiers.py"]
+issue = "#528"
+reviewer = "magnus919"
+expires = "2026-12-31"
+reason = "Issue #528 browser semaphore/lifecycle stage telemetry. This module runs in the separate scraper-svc container, so the integration lane's in-process agent-svc pytest cannot execute it, and curl_cffi/playwright are not installed in the integration container. The changed lines are covered >=90% by tests/unit/test_browser_concurrency.py and tests/unit/test_stage_metrics_service_modules.py in the Fast Tests lane."
+reviewed = true
+
+[exceptions."browser-svc/browser_svc/app.py"]
+issue = "#528"
+reviewer = "magnus919"
+expires = "2026-12-31"
+reason = "Issue #528 browser session lifecycle telemetry. This module runs in the separate browser-svc container, so the integration lane's in-process agent-svc pytest cannot execute it, and playwright is not installed in the integration container. The changed lines are covered >=90% by tests/unit/test_stage_metrics_service_modules.py in the Fast Tests lane."
+reviewed = true
