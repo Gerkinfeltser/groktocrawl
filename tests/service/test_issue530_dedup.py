@@ -276,8 +276,8 @@ async def test_rerank_vector_mode_returns_no_artifacts():
 
 
 @pytest.mark.asyncio
-async def test_rerank_hybrid_vector_mode_returns_no_artifacts():
-    """Hybrid-vector mode merges keyword + vector results without scraping."""
+async def test_rerank_hybrid_vector_mode_returns_provenance_artifacts():
+    """Hybrid-vector mode delegates to the shared planner and acquires content."""
     from agent.research.rerank import _rerank_answer_sources
 
     semantic = MagicMock()
@@ -288,8 +288,7 @@ async def test_rerank_hybrid_vector_mode_returns_no_artifacts():
         ]
     )
     semantic.close = AsyncMock()
-    scraper = MagicMock()
-    scraper.close = AsyncMock()
+    scraper = TrackingScraper()
 
     with (
         patch("agent.research.rerank.SemanticClient", return_value=semantic),
@@ -309,7 +308,11 @@ async def test_rerank_hybrid_vector_mode_returns_no_artifacts():
 
     urls = [r["url"] for r in ranked]
     assert urls == ["https://a.com", "https://b.com", "https://c.com"]
-    assert artifacts == []
+    # Artifacts now carry Markdown + provenance for the answer pipeline.
+    assert {a.url for a in artifacts} == set(urls)
+    assert all(a.markdown for a in artifacts)
+    assert all(a.retrieval in ("web", "vector", "both") for a in artifacts)
+    assert all(a.cache_state in ("live", "from_cache") for a in artifacts)
 
 
 @pytest.mark.asyncio

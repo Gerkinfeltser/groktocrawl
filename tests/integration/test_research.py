@@ -1545,8 +1545,17 @@ class TestRerankAnswerSources:
         )
         mock_semantic.close = AsyncMock()
 
-        mock_scraper = MagicMock()
-        mock_scraper.close = AsyncMock()
+        class _Scraper:
+            async def scrape_with_fallback(self, url: str, **kwargs) -> dict:
+                return {
+                    "success": True,
+                    "data": {"markdown": f"content {url}", "source": "test"},
+                }
+
+            async def close(self) -> None:
+                pass
+
+        mock_scraper = _Scraper()
 
         with (
             patch("agent.research.rerank.SemanticClient", return_value=mock_semantic),
@@ -1565,4 +1574,5 @@ class TestRerankAnswerSources:
         assert len(ranked) == 3
         urls = [r["url"] for r in ranked]
         assert urls == ["https://a.com", "https://b.com", "https://c.com"]
-        assert artifacts == []
+        assert {a.url for a in artifacts} == set(urls)
+        assert all(a.markdown for a in artifacts)
