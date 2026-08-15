@@ -28,7 +28,11 @@ from .health import check_all
 from .llm import LLMClient
 from .models import ErrorDetail, ErrorResponse
 from .rate_limiter import SlidingWindowRateLimiter
-from .research_memory import ResearchMemory
+from .research_memory import (
+    DEFAULT_SWEEP_INTERVAL_SECONDS,
+    ResearchMemory,
+    run_research_memory_sweep_loop,
+)
 from .scraper_client import ScraperClient
 from .searxng_client import SearXNGClient
 from .settings import load_settings
@@ -285,6 +289,13 @@ def create_app() -> FastAPI:
         """
         app.state.task_tracker.create_background_task(
             start_analytics_exporter(redis_url=app.state.valkey_url)
+        )
+        app.state.task_tracker.create_background_task(
+            run_research_memory_sweep_loop(
+                app.state.research_memory,
+                DEFAULT_SWEEP_INTERVAL_SECONDS,
+                app.state.task_tracker.shutdown_event,
+            )
         )
 
     @app.on_event("shutdown")

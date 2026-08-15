@@ -43,6 +43,10 @@ class TaskTracker:
     def shutdown_requested(self) -> bool:
         return self._shutdown_event.is_set()
 
+    @property
+    def shutdown_event(self) -> asyncio.Event:
+        return self._shutdown_event
+
     async def shutdown(self, grace_period: float = 5.0) -> None:
         """Signal shutdown, cancel tracked tasks after grace period.
 

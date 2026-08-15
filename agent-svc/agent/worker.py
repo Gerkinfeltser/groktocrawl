@@ -9,7 +9,7 @@ from typing import Any
 
 from .metrics import METRICS
 from .research import run_extract, run_research
-from .research.memory import admit_research_memory
+from .research.memory import finalize_and_admit, refresh_research_memory
 from .scraper_client import ScraperClient
 from .settings import load_settings
 from .store import JobStore
@@ -100,10 +100,13 @@ async def _process_agent_async(
     include_images: bool = False,
     citation_style: Any = None,
     force_fresh: bool = False,
+    stale_while_revalidate: bool = False,
+    max_stale_hours: float | None = None,
     user_id: str | None = None,
     research_memory: Any = None,
     search_type: str = "deep",
     max_searches_per_request: int = 5,
+    fingerprint: str | None = None,
 ) -> None:
     settings = _get_worker_settings()
     redis_url = (
@@ -130,6 +133,8 @@ async def _process_agent_async(
             cache_result = await research_memory.query(
                 prompt=prompt,
                 user_id=user_id if memory_scope == "per_user" else None,
+                fingerprint=fingerprint,
+                max_stale_hours=max_stale_hours if stale_while_revalidate else None,
             )
             if cache_result["hit"]:
                 freshness = cache_result.get("freshness", "stale")
@@ -173,6 +178,114 @@ async def _process_agent_async(
                     await deliver_webhook(
                         webhook_config, "completed", job_id, cached_payload
                     )
+                    return
+                elif (
+                    freshness == "stale"
+                    and stale_while_revalidate
+                    and cache_result.get("swr_eligible")
+                ):
+                    # Stale-while-revalidate: serve stale immediately and start
+                    # ONE background refresh keyed by the compatibility fingerprint.
+                    logger.info(
+                        "Research memory stale hit for agent %s — serving stale and "
+                        "refreshing in background",
+                        job_id,
+                    )
+                    entry = cache_result["artifact"]
+                    sources = entry.get("sources", [])
+                    result_text = entry.get("artifact", "")
+                    from .research import _apply_citation_style
+
+                    result_text, _ = _apply_citation_style(result_text, sources, cs)
+                    stale_payload: dict[str, Any] = {
+                        "result": result_text,
+                        "sources": [s.get("url", "") for s in sources],
+                        "source_details": sources,
+                        "from_cache": True,
+                        "freshness": "stale",
+                        "refreshed": False,
+                        "age_hours": cache_result.get("age_hours"),
+                        "similarity": cache_result.get("similarity", 0),
+                        "memory_id": cache_result.get("memory_id", ""),
+                    }
+                    if cs == CitationStyle.compact:
+                        compact_sources = []
+                        for i, src in enumerate(sources, start=1):
+                            compact_sources.append(
+                                {"index": i, "url": src.get("url", "")}
+                            )
+                        stale_payload["sources_compact"] = compact_sources
+                        stale_payload["source_details"] = []
+                    store.complete_job(job_id, stale_payload)
+                    await deliver_webhook(
+                        webhook_config, "completed", job_id, stale_payload
+                    )
+
+                    async def _refresh_and_update() -> dict[str, Any] | None:
+                        try:
+                            fresh = await refresh_research_memory(
+                                research_memory,
+                                prompt=prompt,
+                                urls=urls,
+                                schema=schema_,
+                                searxng_url=searxng_url,
+                                scraper_url=scraper_url,
+                                llm_base_url=llm_base_url,
+                                llm_api_key=llm_api_key,
+                                llm_model=llm_model,
+                                requested_model=requested_model,
+                                max_searches_per_request=max_searches_per_request,
+                                include_images=include_images,
+                                citation_style=cs,
+                                search_type=search_type,
+                                user_id=user_id,
+                                fingerprint=fingerprint,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Background research memory refresh failed for "
+                                "agent %s",
+                                job_id,
+                                exc_info=True,
+                            )
+                            return None
+                        refreshed_payload: dict[str, Any] = {
+                            "result": fresh.get("result", ""),
+                            "sources": fresh.get("sources", []),
+                            "source_details": fresh.get("source_details", []),
+                            "from_cache": False,
+                            "freshness": "refreshed",
+                            "refreshed": True,
+                            "age_hours": 0.0,
+                            "research_memory_id": fresh.get("research_memory_id"),
+                        }
+                        if cs == CitationStyle.compact:
+                            refreshed_payload["sources_compact"] = fresh.get(
+                                "sources_compact", []
+                            )
+                            refreshed_payload["source_details"] = []
+                        return refreshed_payload
+
+                    refresh_key = fingerprint or f"prompt:{prompt}"
+                    refresh_task = research_memory.start_refresh(
+                        refresh_key, _refresh_and_update
+                    )
+
+                    def _write_refreshed(_future: asyncio.Future[Any]) -> None:
+                        try:
+                            fresh_payload = _future.result()
+                        except Exception:
+                            logger.warning(
+                                "Background research memory refresh failed for "
+                                "agent %s",
+                                job_id,
+                                exc_info=True,
+                            )
+                            return
+                        if fresh_payload:
+                            store.overwrite_job_data(job_id, fresh_payload)
+
+                    refresh_task.add_done_callback(_write_refreshed)
                     return
                 else:
                     # Stale hit — run normal pipeline but note cached version
@@ -230,47 +343,18 @@ async def _process_agent_async(
             raise JobCancelledError("agent job cancelled via DELETE")
 
         # Apply citation style to transform bare [N] markers to [N](url)
-        # for compact style, or leave them unchanged for inline style.
-        source_details = result.get("source_details", [])
-        from .research import _apply_citation_style
-
-        result_text, _ = _apply_citation_style(result["result"], source_details, cs)
-        result["result"] = result_text
-
-        # Save rich source_details for memory storage BEFORE compactifying
-        # the API response. Cache-hit paths expect sources as list[dict].
-        rich_source_details = source_details
-        memory_sources = rich_source_details or result.get("sources", [])
-
-        # When citation_style is compact, replace full source_details with
-        # a compact citations mapping (index → {url}) to reduce
-        # response payload size.
-        if cs == CitationStyle.compact:
-            compact_sources: list[dict[str, str | int]] = []
-            for i, src in enumerate(source_details, start=1):
-                compact_sources.append(
-                    {
-                        "index": i,
-                        "url": src.get("url", ""),
-                    }
-                )
-            result["sources_compact"] = compact_sources
-            # Drop the full source_details from the API response to save payload size
-            result["source_details"] = []
-
-        artifact_id = await admit_research_memory(
+        # for compact style, or leave them unchanged for inline style, then
+        # admit the post-transform artifact to research memory.
+        result = await finalize_and_admit(
             research_memory,
             prompt=prompt,
-            artifact=result.get("result", ""),
-            source_details=memory_sources,
-            model=llm_model,
-            citation_style=cs.value,
+            result=result,
+            llm_model=llm_model,
+            citation_style=cs,
             requested_model=requested_model,
-            latency_ms=result.get("latency_ms", 0),
             user_id=user_id,
+            fingerprint=fingerprint,
         )
-        if artifact_id:
-            result["research_memory_id"] = artifact_id
 
         # Note stale cache existence if applicable
         if stale_cache_hit:

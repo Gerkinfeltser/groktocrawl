@@ -17,17 +17,21 @@ Config via env:
     RESEARCH_MEMORY_MAX_ARTIFACT_BYTES (default 5_242_880 = 5MB)
 """
 
+import asyncio
+import hashlib
 import json
 import logging
 import os
 import time
+from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 from redis import Redis
 
-from common.stage_metrics import inc_counter, observe_elapsed
+from common.metrics import METRICS
+from common.stage_metrics import inc_counter, observe_elapsed, set_gauge
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +46,14 @@ EMBED_DIM: int = 1024  # BAAI/bge-m3
 DEFAULT_TTL: int = 604800  # 7 days
 DEFAULT_MAX_ARTIFACT_BYTES: int = 5_242_880  # 5 MB
 DEFAULT_SIMILARITY_THRESHOLD: float = 0.85
+DEFAULT_SWEEP_INTERVAL_SECONDS: float = 300.0
+
+_MEMORY_SWEEP_RUNS = "groktocrawl_research_memory_sweep_runs_total"
+_MEMORY_SWEEP_RUNS_HELP = "Research memory sweep invocations"
+_MEMORY_ORPHANS_SWEPT = "groktocrawl_research_memory_orphans_swept_total"
+_MEMORY_ORPHANS_SWEPT_HELP = "Orphaned Qdrant points removed by research memory sweep"
+_MEMORY_ORPHANS_GAUGE = "groktocrawl_research_memory_orphans"
+_MEMORY_ORPHANS_GAUGE_HELP = "Orphaned Qdrant points removed in the most recent sweep"
 
 
 def _get_ttl() -> int:
@@ -82,6 +94,131 @@ def _qdrant_url() -> str:
 def _semantic_url() -> str:
     """Semantic service URL from env or Docker default."""
     return os.environ.get("SEMANTIC_URL", "http://semantic-svc:8003").rstrip("/")
+
+
+def _canonical_json(value: Any) -> Any:
+    """Recursively sort dict keys so JSON schemas hash deterministically."""
+    if isinstance(value, dict):
+        return {
+            str(k): _canonical_json(v)
+            for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))
+        }
+    if isinstance(value, list):
+        return [_canonical_json(v) for v in value]
+    return value
+
+
+def compute_fingerprint(
+    *,
+    prompt: str = "",
+    urls: list[str] | None = None,
+    schema: dict | None = None,
+    model: str | None = None,
+    search_type: str = "deep",
+    include_images: bool = False,
+    citation_style: str = "inline",
+    strict_constrain_to_urls: bool = False,
+    force_fresh: bool = False,
+) -> str:
+    """Return a canonical SHA-256 fingerprint of response-affecting fields.
+
+    Only request fields that change source selection, synthesis shape, or
+    response semantics participate.  Dispatch/accounting fields (``mode``,
+    ``stream``, ``webhook``, ``max_credits``) are intentionally excluded.
+    """
+    normalized_prompt = " ".join((prompt or "").split())
+    sorted_urls = sorted(urls) if urls else []
+    canonical_schema = _canonical_json(schema) if schema else None
+    canonical_model = "" if model in (None, "", "default") else model
+    canonical = {
+        "prompt": normalized_prompt,
+        "urls": sorted_urls,
+        "schema": canonical_schema,
+        "model": canonical_model,
+        "search_type": search_type or "deep",
+        "include_images": bool(include_images),
+        "citation_style": citation_style or "inline",
+        "strict_constrain_to_urls": bool(strict_constrain_to_urls),
+        "force_fresh": bool(force_fresh),
+    }
+    payload = json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    """Parse an ISO timestamp; returns an aware UTC datetime or ``None``."""
+    if not isinstance(value, str) or not value:
+        return None
+    s = value.strip()
+    if s.endswith(("Z", "z")):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s).astimezone(UTC)
+    except (ValueError, TypeError):
+        return None
+
+
+def _entry_freshness(
+    artifact: dict[str, Any], now: datetime | None = None
+) -> tuple[float, str, float, str] | None:
+    """Derive ``(age_hours, freshness, ttl_hours, expires_at_iso)``.
+
+    Uses the artifact's stored ``created_at``/``expires_at`` contract and
+    fails closed (``None``) on malformed, missing, or already-expired
+    timestamps — never a ``datetime.now(UTC)`` fallback.
+    """
+    created_at = _parse_iso(artifact.get("created_at"))
+    expires_at = _parse_iso(artifact.get("expires_at"))
+    if created_at is None or expires_at is None:
+        return None
+    now = now or datetime.now(UTC)
+    if now >= expires_at:
+        return None
+    ttl_seconds = (expires_at - created_at).total_seconds()
+    if ttl_seconds <= 0:
+        return None
+    ttl_hours = ttl_seconds / 3600.0
+    age_hours = (now - created_at).total_seconds() / 3600.0
+    if age_hours < ttl_hours / 4:
+        freshness = "fresh"
+    elif age_hours < ttl_hours / 2:
+        freshness = "aging"
+    else:
+        freshness = "stale"
+    return age_hours, freshness, ttl_hours, expires_at.isoformat()
+
+
+def _record_sweep_metrics(removed: int) -> None:
+    """Emit sweep counters/gauges for automatic and manual sweeps."""
+    inc_counter(_MEMORY_SWEEP_RUNS, _MEMORY_SWEEP_RUNS_HELP, {})
+    METRICS.counter(_MEMORY_ORPHANS_SWEPT, _MEMORY_ORPHANS_SWEPT_HELP).inc(
+        value=float(removed)
+    )
+    set_gauge(_MEMORY_ORPHANS_GAUGE, _MEMORY_ORPHANS_GAUGE_HELP, {}, float(removed))
+
+
+async def run_research_memory_sweep_loop(
+    memory: Any,
+    interval: float,
+    shutdown_event: asyncio.Event,
+) -> None:
+    """Periodically sweep dangling Qdrant references until shutdown.
+
+    Runs as a tracked background task; the first sweep happens after one
+    ``interval`` and each iteration checks the shutdown event so the task
+    exits promptly during graceful shutdown.
+    """
+    while not shutdown_event.is_set():
+        try:
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            return
+        if shutdown_event.is_set():
+            return
+        try:
+            await memory.sweep()
+        except Exception:
+            logger.warning("Research memory background sweep failed", exc_info=True)
 
 
 class ResearchMemory:
@@ -132,6 +269,7 @@ class ResearchMemory:
         self.max_artifact_bytes = _get_max_artifact_bytes()
         self._qdrant_client: httpx.AsyncClient | None = None
         self._semantic_client: httpx.AsyncClient | None = None
+        self._refresh_tasks: dict[str, asyncio.Task[Any]] = {}
 
     # ── Internal HTTP clients ───────────────────────────────────
 
@@ -199,12 +337,39 @@ class ResearchMemory:
         data = resp.json()
         return data["embeddings"][0]  # type: ignore[no-any-return]
 
+    # ── Single-flight refresh ───────────────────────────────────
+
+    def start_refresh(
+        self, key: str, coro_factory: Callable[[], Coroutine[Any, Any, Any]]
+    ) -> asyncio.Task[Any]:
+        """Return the single in-flight refresh task for *key*.
+
+        If no task is running for *key*, a new background task is created
+        from ``coro_factory()`` and tracked until completion.  Concurrent
+        callers receive the same task, so a compatible cache key is
+        refreshed exactly once.
+        """
+        task = self._refresh_tasks.get(key)
+        if task is None or task.done():
+            task = asyncio.create_task(coro_factory())
+            self._refresh_tasks[key] = task
+
+            def _discard(_future: asyncio.Future[Any]) -> None:
+                if self._refresh_tasks.get(key) is _future:
+                    self._refresh_tasks.pop(key, None)
+
+            task.add_done_callback(_discard)
+        return task
+
     # ── Public API ──────────────────────────────────────────────
 
     async def query(
         self,
         prompt: str,
         user_id: str | None = None,
+        max_age_hours: float | None = None,
+        fingerprint: str | None = None,
+        max_stale_hours: float | None = None,
     ) -> dict[str, Any]:
         """Search for a semantically similar cached artifact.
 
@@ -216,6 +381,12 @@ class ResearchMemory:
         Args:
             prompt: The research question to search for.
             user_id: Optional user scope for filtering.
+            max_age_hours: Optional hard age cap; artifacts older than
+                this are treated as misses.
+            fingerprint: Optional compatibility fingerprint; a stored
+                entry whose fingerprint differs is treated as a miss.
+            max_stale_hours: Optional stale-while-revalidate window used
+                to compute ``swr_eligible`` for ``stale`` hits.
 
         Returns:
             A dict with:
@@ -224,6 +395,10 @@ class ResearchMemory:
             - ``similarity`` (float) — cosine similarity score
             - ``freshness`` (str | None) — ``fresh``, ``aging``, ``stale``
             - ``memory_id`` (str | None)
+            - ``age_hours`` (float | None)
+            - ``expires_at`` (str | None)
+            - ``compatibility`` (str | None)
+            - ``swr_eligible`` (bool)
         """
         started = time.monotonic()
         outcome = "miss"
@@ -267,7 +442,9 @@ class ResearchMemory:
             if not results:
                 return {"hit": False}
 
-            # Walk results in descending score order; first Valkey hit wins
+            # Walk results in descending score order; first compatible
+            # Valkey hit wins.
+            incompatible_seen = False
             for result in results:
                 score = float(result.get("score", 0))
                 if score < self.threshold:
@@ -304,21 +481,43 @@ class ResearchMemory:
                     logger.debug("Unparseable artifact for memory_id=%s", memory_id)
                     continue
 
-                # ── Freshness classification ────────────────────────
-                created_at_str = artifact.get("created_at", "")
-                try:
-                    created_at = datetime.fromisoformat(created_at_str)
-                except (ValueError, TypeError):
-                    created_at = datetime.now(UTC)
+                # ── Compatibility fingerprint ────────────────────────
+                if fingerprint is not None:
+                    stored_fingerprint = artifact.get("fingerprint", "")
+                    if not stored_fingerprint or stored_fingerprint != fingerprint:
+                        incompatible_seen = True
+                        logger.debug(
+                            "Fingerprint mismatch for memory_id=%s, skipping",
+                            memory_id,
+                        )
+                        continue
 
-                age_seconds = (datetime.now(UTC) - created_at).total_seconds()
+                # ── Freshness from stored timestamps ─────────────────
+                freshness_meta = _entry_freshness(artifact)
+                if freshness_meta is None:
+                    logger.debug(
+                        "Invalid or expired freshness metadata for memory_id=%s, "
+                        "skipping",
+                        memory_id,
+                    )
+                    continue
+                age_hours, freshness, ttl_hours, expires_at = freshness_meta
 
-                if age_seconds < self.ttl / 4:
-                    freshness = "fresh"
-                elif age_seconds < self.ttl / 2:
-                    freshness = "aging"
-                else:
-                    freshness = "stale"
+                # ── Caller age gate ──────────────────────────────────
+                if max_age_hours is not None and age_hours > max_age_hours:
+                    logger.debug(
+                        "memory_id=%s too old (age=%.2fh > max=%.2fh), skipping",
+                        memory_id,
+                        age_hours,
+                        max_age_hours,
+                    )
+                    continue
+
+                swr_eligible = (
+                    max_stale_hours is not None
+                    and freshness == "stale"
+                    and age_hours <= (ttl_hours / 2) + max_stale_hours
+                )
 
                 outcome = freshness
                 logger.info(
@@ -333,8 +532,14 @@ class ResearchMemory:
                     "similarity": score,
                     "freshness": freshness,
                     "memory_id": memory_id,
+                    "age_hours": age_hours,
+                    "expires_at": expires_at,
+                    "compatibility": "compatible" if fingerprint is not None else None,
+                    "swr_eligible": swr_eligible,
                 }
 
+            if incompatible_seen:
+                return {"hit": False, "compatibility": "incompatible"}
             return {"hit": False}
         finally:
             observe_elapsed(
@@ -354,6 +559,7 @@ class ResearchMemory:
         model: str = "",
         user_id: str | None = None,
         metadata: dict | None = None,
+        fingerprint: str | None = None,
     ) -> str:
         """Store a research artifact in the semantic cache.
 
@@ -368,6 +574,8 @@ class ResearchMemory:
             model: The LLM model that produced the artifact.
             user_id: Optional user scope.
             metadata: Optional extra context dict.
+            fingerprint: Optional compatibility fingerprint recorded on
+                the entry and Qdrant payload.
 
         Returns:
             The ``memory_id`` (UUID v4 string).
@@ -401,6 +609,8 @@ class ResearchMemory:
         }
         if metadata:
             entry["metadata"] = metadata
+        if fingerprint:
+            entry["fingerprint"] = fingerprint
 
         # Store in Valkey
         data_key = f"memory:{memory_id}:data"
@@ -413,16 +623,19 @@ class ResearchMemory:
             await self._ensure_collection()
 
             qdrant = await self._get_qdrant()
+            point_payload: dict[str, Any] = {
+                "query": prompt,
+                "memory_id": memory_id,
+                "user_id": user_id,
+                "timestamp": now.isoformat(),
+                "expires_at": expires_at.isoformat(),
+            }
+            if fingerprint:
+                point_payload["fingerprint"] = fingerprint
             point = {
                 "id": memory_id,
                 "vector": embedding,
-                "payload": {
-                    "query": prompt,
-                    "memory_id": memory_id,
-                    "user_id": user_id,
-                    "timestamp": now.isoformat(),
-                    "expires_at": expires_at.isoformat(),
-                },
+                "payload": point_payload,
             }
             resp = await qdrant.put(
                 f"{self._qdrant_url}/collections/{QDRANT_COLLECTION}/points",
@@ -601,6 +814,8 @@ class ResearchMemory:
                 )
         except Exception:
             logger.warning("Research memory sweep failed", exc_info=True)
+        finally:
+            _record_sweep_metrics(removed)
 
         return removed
 
