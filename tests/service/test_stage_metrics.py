@@ -9,6 +9,9 @@ always sorted alphabetically by the exporter).
 
 from __future__ import annotations
 
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from common.metrics import METRICS
@@ -16,6 +19,18 @@ from common.metrics import METRICS
 
 def _metrics_text() -> str:
     return METRICS.generate_openmetrics()
+
+
+def _hist_count(stream_type: str) -> float:
+    """Return the observed ``_count`` for the TTFB histogram of *stream_type*."""
+    text = _metrics_text()
+    marker = (
+        f'groktocrawl_time_to_first_event_seconds_count{{stream_type="{stream_type}"}}'
+    )
+    if marker not in text:
+        return 0.0
+    tail = text[text.index(marker) + len(marker) :].lstrip()
+    return float(tail.split()[0])
 
 
 # ── LLM stage telemetry ───────────────────────────────────────────
@@ -340,3 +355,158 @@ def test_stage_metrics_never_use_raw_urls_as_label_values():
     assert "https://" not in text
     assert "example.test" not in text
     assert 'groktocrawl_llm_calls_total{outcome="success",stage="plan"}' in text
+
+
+# ── TTFB timing boundaries (crawl / agent streams) ────────────────
+
+
+@pytest.mark.asyncio
+async def test_crawl_stream_ttfb_fires_on_first_page_event(monkeypatch):
+    import agent.crawl_stream as cs
+    from agent.crawler import CrawlResult
+
+    push_gate = asyncio.Event()
+
+    class FakeEngine:
+        def __init__(self, scraper, store=None, options=None):
+            self._scraped_count = 0
+            self._queue: list = []
+
+        async def run(self, url, job_id=None, page_callback=None, error_callback=None):
+            await push_gate.wait()
+            await page_callback(
+                job_id, {"url": url, "markdown": "# hi", "metadata": {}}
+            )
+            return CrawlResult(pages=[], total=1, completed=1)
+
+        async def close(self):
+            return None
+
+    class FakeScraper:
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(cs, "CrawlEngine", FakeEngine)
+    monkeypatch.setattr(cs, "ScraperClient", lambda url: FakeScraper())
+    monkeypatch.setattr(cs, "deliver_webhook", AsyncMock())
+
+    store = MagicMock()
+    store.get_job.return_value = None
+
+    gen = cs.crawl_event_stream(
+        job_id="j",
+        url="https://example.test",
+        max_pages=1,
+        max_depth=1,
+        scraper_url="http://scraper.test",
+        store=store,
+    )
+
+    before = _hist_count("crawl")
+    task = asyncio.create_task(gen.__anext__())
+    await asyncio.sleep(0)
+
+    # While the engine is still waiting to push its first page, TTFB must not
+    # have fired yet (the old loop-entry instrumentation recorded it here).
+    assert _hist_count("crawl") == before
+
+    push_gate.set()
+    first = await task
+    assert '"type": "page"' in first
+    assert _hist_count("crawl") == before + 1
+
+    await gen.aclose()
+
+
+@pytest.mark.asyncio
+async def test_agent_stream_ttfb_ignores_planning_sentinels(monkeypatch):
+    import agent.research.streaming as streaming
+    from agent.models import CitationStyle
+
+    async def _sentinel_then_done(*_args, **_kwargs):
+        yield {"type": "status", "state": "planning"}
+        yield {
+            "type": "research_plan",
+            "strategy": "deep",
+            "queries": ["q"],
+            "reasoning": "",
+        }
+        yield {
+            "type": "done",
+            "result": "ok",
+            "sources": [],
+            "source_details": [],
+            "latency_ms": 1,
+        }
+
+    monkeypatch.setattr(streaming, "run_research_stream", _sentinel_then_done)
+
+    before = _hist_count("agent")
+    chunks = [
+        chunk
+        async for chunk in streaming.stream_research_live(
+            prompt="q",
+            urls=None,
+            schema=None,
+            searxng_url="http://s",
+            scraper_url="http://sc",
+            llm_base_url="http://llm",
+            llm_api_key="k",
+            llm_model="m",
+            requested_model=None,
+            max_searches_per_request=5,
+            include_images=False,
+            citation_style=CitationStyle.inline,
+        )
+    ]
+    after = _hist_count("agent")
+
+    assert chunks[-1] == "data: [DONE]\n\n"
+    assert after == before + 1
+
+
+# ── Scraper tier telemetry on raise ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_scrape_tier_metrics_record_error_when_smart_scrape_raises(monkeypatch):
+    import scraper.app as app
+
+    async def raising_smart_scrape(*_args, **_kwargs):
+        raise RuntimeError("upstream unavailable")
+
+    monkeypatch.setattr(app, "smart_scrape", raising_smart_scrape)
+
+    with pytest.raises(app.UpstreamError):
+        await app.scrape(app.ScrapeRequest(url="https://example.test"))
+
+    text = _metrics_text()
+    assert 'groktocrawl_scrape_tier_total{outcome="error",tier="unknown"}' in text
+    assert "# TYPE groktocrawl_scrape_tier_duration_seconds histogram" in text
+
+
+# ── Browser-svc create-failure semantics ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_browser_create_failure_does_not_count_as_destroyed(monkeypatch):
+    import browser_svc.app as bapp
+    from browser_svc.app import BrowserCreateRequest
+
+    bapp._sessions.clear()
+    bapp._update_active_sessions_gauge()
+
+    def fail_start(*_args, **_kwargs):
+        raise RuntimeError("launch unavailable")
+
+    monkeypatch.setattr(bapp, "async_playwright", fail_start)
+
+    with pytest.raises(bapp.HTTPException):
+        await bapp.create_browser(BrowserCreateRequest())
+
+    text = _metrics_text()
+    assert (
+        'groktocrawl_browser_sessions_destroyed_total{reason="create_failed"}'
+        not in text
+    )
+    assert "groktocrawl_browser_active_sessions 0.0" in text
