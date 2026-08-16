@@ -9,7 +9,7 @@ __pypackages__/
 .hermes/
 .opencode/
 .planning/
-.coverage
+.coverage*
 graphify-out/
 docker-compose.override.yml
 ofelia/config.local.ini
