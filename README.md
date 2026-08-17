@@ -81,7 +81,7 @@ curl -N -X POST http://localhost:8080/v2/crawl \
 - [Feature guides](docs/guides/features.md) — scraping, crawl, search, research, sessions, browser, monitors, parse, portal, and MCP.
 - [Architecture](docs/architecture.md) — current service and data-flow design.
 - [Contributor guide](CONTRIBUTING.md) — contribution intake, local development, tests, API/CLI parity, and ADRs.
-- [Roadmap](ROADMAP.md) — Now / Next / Later priorities.
+- [Roadmap](docs/roadmap.md) — Now / Next / Later priorities.
 - [Public surface inventory](docs/reference/public-surface.md) — validated route, CLI, compose, and configuration indexes.
 
 When the stack is running, FastAPI publishes the canonical request/response schema at [Swagger UI](http://localhost:8080/docs) and [OpenAPI JSON](http://localhost:8080/openapi.json). The Markdown guides explain behavior and workflows; OpenAPI is authoritative for wire schemas.
@@ -100,7 +100,7 @@ Set `API_KEY` for authentication, restrict network exposure, and review outbound
 
 ## Status
 
-Core Firecrawl-compatible workflows and GroktoCrawl extensions are actively developed. Review the [roadmap](ROADMAP.md) for Now / Next / Later priorities, the [changelog](CHANGELOG.md), [ADRs](docs/adr/README.md), and [issues](https://github.com/groktopus/groktocrawl/issues) for change history and planned work. Bugs and feature ideas are filed through the [contribution intake](CONTRIBUTING.md#contribution-intake-and-triage) route.
+Core Firecrawl-compatible workflows and GroktoCrawl extensions are actively developed. Review the [roadmap](docs/roadmap.md) for Now / Next / Later priorities, the [changelog](CHANGELOG.md), [ADRs](docs/adr/README.md), and [issues](https://github.com/groktopus/groktocrawl/issues) for change history and planned work. Bugs and feature ideas are filed through the [contribution intake](CONTRIBUTING.md#contribution-intake-and-triage) route.
 
 ## Development policy
 

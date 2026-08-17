@@ -3,8 +3,8 @@
 A lightweight, best-effort view of where GroktoCrawl is heading. It is **not a
 commitment** to ship any specific item by a date. Priorities shift as
 contributors engage, bugs surface, and the project's direction evolves. See
-[Contribution intake](CONTRIBUTING.md#contribution-intake-and-triage) if you
-want to influence what appears here.
+[Contribution intake](../CONTRIBUTING.md#contribution-intake-and-triage) if
+you want to influence what appears here.
 
 Buckets:
 
@@ -27,14 +27,14 @@ Buckets:
 ## Next
 
 - **Restart-safe async job execution.** Jobs currently run in-process and are
-  not resume-safe after a restart (see [ADR-0047](docs/adr/0047-defer-restart-safe-execution.md)).
+  not resume-safe after a restart (see [ADR-0047](adr/0047-defer-restart-safe-execution.md)).
   Making execution durable needs an explicit design (ownership, leases,
   retries, cancellation, artifact consistency, webhook idempotency) before any
   queue technology is chosen.
 - **Semantic index operations.** Smarter retention and a migration path for
   embedding models are on the table as design work
-  ([ADR-0027](docs/adr/0027-smarter-index-retention.md),
-  [ADR-0028](docs/adr/0028-embedding-model-migration-path.md)).
+  ([ADR-0027](adr/0027-smarter-index-retention.md),
+  [ADR-0028](adr/0028-embedding-model-migration-path.md)).
 - **Adopter-driven hardening.** Surface reliability gaps reported through the
   intake route that are scoped and well-evidenced.
 
@@ -53,6 +53,6 @@ Buckets:
 The maintainers review the open backlog and this roadmap periodically and
 re-balance the buckets as contributors engage and new evidence surfaces. A
 well-scoped issue with a reproducible bug report or a concrete feature proposal
-— raised through the [intake route](CONTRIBUTING.md#contribution-intake-and-triage) —
+— raised through the [intake route](../CONTRIBUTING.md#contribution-intake-and-triage) —
 is the most reliable way to get a candidate into **Now** or **Next**. Triage is
 best-effort; there is **no guaranteed response or resolution SLA**.

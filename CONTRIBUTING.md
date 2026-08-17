@@ -17,12 +17,12 @@ matches what you want to do and use the route below.
 |---------------------|-------|
 | Report a bug | Open a [bug report](.github/ISSUE_TEMPLATE/bug_report.md) |
 | Propose a feature | Open a [feature request](.github/ISSUE_TEMPLATE/feature_request.md) |
-| Signal implementation interest | Comment "I'd like to work on this" on an existing issue, or open a feature request stating what you intend to build and reference the [roadmap](ROADMAP.md) |
+| Signal implementation interest | Comment "I'd like to work on this" on an existing issue, or open a feature request stating what you intend to build and reference the [roadmap](docs/roadmap.md) |
 
 **Triage is best-effort, with no SLA.** A small maintainer team runs this
 project and responds as time allows. We do **not** promise a response or
 resolution time. Issues are scoped, labelled, and prioritized as the backlog
-allows; the [roadmap](ROADMAP.md) shows the current **Now / Next / Later**
+allows; the [roadmap](docs/roadmap.md) shows the current **Now / Next / Later**
 priorities and how they relate to the open backlog.
 
 What makes triage and prioritization fastest:
@@ -53,7 +53,7 @@ Open a [feature request](.github/ISSUE_TEMPLATE/feature_request.md) with:
 
 ### Signaling Implementation Interest
 
-If an open issue or a [roadmap](ROADMAP.md) item matches something you want to
+If an open issue or a [roadmap](docs/roadmap.md) item matches something you want to
 build, say so on the issue thread before starting large work: "I'd like to work
 on this." For brand-new ideas, open a feature request and state your intent to
 implement. Coordination up front avoids two people building the same thing and
