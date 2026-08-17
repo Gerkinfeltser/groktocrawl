@@ -37,16 +37,28 @@ _CROSS_CUTTING_PATHS = ("docker-compose.yml",)
 _COMMON_PREFIX = "common/"
 
 
+def _is_docs_only(path: str) -> bool:
+    """Return whether a path is documentation-only.
+
+    A path is docs-only when it is an allowlisted root-level prose file, sits
+    under a docs-only prefix, or is a root-level markdown file (e.g. ROADMAP.md,
+    CHANGELOG.md). Any other root-level file (e.g. requirements.txt) stays
+    runtime-relevant and preserves the unknown-path escalation.
+    """
+    return (
+        path in DOCS_ONLY_FILES
+        or path.startswith(DOCS_ONLY_PREFIXES)
+        or ("/" not in path and path.endswith(".md"))
+    )
+
+
 def requires_full_runtime(paths: Iterable[str]) -> bool:
     """Return whether changed paths require the Docker integration runtime."""
     path_list = list(paths)
     if not path_list:
         return True
 
-    return any(
-        path not in DOCS_ONLY_FILES and not path.startswith(DOCS_ONLY_PREFIXES)
-        for path in path_list
-    )
+    return any(not _is_docs_only(path) for path in path_list)
 
 
 def affected_services(paths: Iterable[str]) -> frozenset[str]:
@@ -74,7 +86,7 @@ def affected_services(paths: Iterable[str]) -> frozenset[str]:
             continue
         # Path is not under a known service dir. If it is runtime-relevant at
         # all (i.e. not docs-only), escalate to a full rebuild.
-        if path not in DOCS_ONLY_FILES and not path.startswith(DOCS_ONLY_PREFIXES):
+        if not _is_docs_only(path):
             return frozenset({"all"})
 
     return frozenset(affected)
