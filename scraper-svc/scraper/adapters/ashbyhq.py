@@ -455,6 +455,18 @@ def _format_job(data: dict, company: str, uuid: str) -> tuple[str, dict]:
 # ── API-tier formatting ──────────────────────────────────────────
 
 
+def _escape_cell(value) -> str:
+    """Escape a value for use inside a single markdown table cell.
+
+    Replaces ``|`` with ``\\|`` and collapses newlines to ``<br>`` so a field
+    containing a pipe or line break renders as one cell instead of breaking
+    the table layout.
+    """
+    text = "" if value is None else str(value)
+    text = text.replace("|", "\\|")
+    return text.replace("\r\n", "<br>").replace("\r", "<br>").replace("\n", "<br>")
+
+
 def _location_string(job: dict) -> str:
     """Combine ``location`` and ``secondaryLocations`` into one string."""
     primary = job.get("location")
@@ -538,13 +550,13 @@ def _format_api_listing(jobs: list, board: str) -> tuple[str, dict]:
 
     for job in jobs:
         row = [
-            job.get("title", ""),
-            job.get("department", "") or "",
-            job.get("team", "") or "",
-            _location_string(job),
-            job.get("workplaceType", "") or "",
-            job.get("employmentType", "") or "",
-            _format_compensation(job.get("compensation")),
+            _escape_cell(job.get("title", "")),
+            _escape_cell(job.get("department", "") or ""),
+            _escape_cell(job.get("team", "") or ""),
+            _escape_cell(_location_string(job)),
+            _escape_cell(job.get("workplaceType", "") or ""),
+            _escape_cell(job.get("employmentType", "") or ""),
+            _escape_cell(_format_compensation(job.get("compensation"))),
         ]
         parts.append("| " + " | ".join(row) + " |")
 
@@ -600,7 +612,7 @@ def _format_api_job(job: dict, board: str, uuid: str) -> tuple[str, dict]:
     parts.append("|-------|-------|")
     for label, val in detail_items:
         if val:
-            parts.append(f"| **{label}** | {val} |")
+            parts.append(f"| **{label}** | {_escape_cell(val)} |")
     parts.append("")
 
     description_html = job.get("descriptionHtml", "")
