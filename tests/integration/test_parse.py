@@ -110,13 +110,16 @@ def test_response_shape():
 # (fixture filename, expected metadata format)
 _ANYDOC_FORMATS = [
     ("text.doc", "doc"),
+    ("text.docx", "docx"),
     ("text.odt", "odt"),
     ("sheet.ods", "ods"),
     ("pres.odp", "odp"),
     ("text.rtf", "rtf"),
     ("book.epub", "epub"),
     ("sheet.xls", "xls"),
+    ("sheet.xlsx", "xlsx"),
     ("pres.ppt", "ppt"),
+    ("pres.pptx", "pptx"),
 ]
 
 
@@ -140,7 +143,14 @@ def test_legacy_and_odf_formats(filename, ext):
     ],
 )
 def test_macro_variants(filename, ext):
-    """Macro-enabled variants are accepted (200) and convert to markdown."""
+    """Macro-enabled variants are accepted (200) and convert to markdown.
+
+    Genuine macro-enabled binary files (.xlsb/.docm/.pptm) are not available
+    offline, so these fixtures are real base-format files renamed to the macro
+    extension. They verify the /parse allow-list accepts the extension and that
+    it dispatches to a working converter (anydoc canonicalizes .docm->docx,
+    .xlsm/.xlsb->xlsx, .pptm->pptx) without returning a 400.
+    """
     resp = _upload(filename)
     assert resp.status_code == 200
     data = resp.json()

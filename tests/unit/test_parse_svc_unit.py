@@ -92,16 +92,19 @@ class TestParseAnyDoc:
     # (fixture filename, expected metadata format)
     FORMATS = [
         ("text.doc", "doc"),
+        ("text.docx", "docx"),
         ("text.docm", "docm"),
         ("text.odt", "odt"),
         ("text.rtf", "rtf"),
         ("book.epub", "epub"),
         ("sheet.ods", "ods"),
         ("sheet.xls", "xls"),
+        ("sheet.xlsx", "xlsx"),
         ("sheet.xlsm", "xlsm"),
         ("sheet.xlsb", "xlsb"),
         ("pres.odp", "odp"),
         ("pres.ppt", "ppt"),
+        ("pres.pptx", "pptx"),
         ("pres.pptm", "pptm"),
     ]
 
