@@ -6,11 +6,39 @@ Thanks for your interest! GroktoCrawl is MIT-licensed and contributions of all k
 
 Be excellent to each other. This project is small but aims to be a welcoming space for contributors of all experience levels.
 
+## Contribution intake and triage
+
+Issue filing on this repository is **open** — anyone can create an issue
+directly, with no invitation or blank-issue gate. The issue templates exist to
+keep reports structured, not to restrict who can file. Pick the template that
+matches what you want to do and use the route below.
+
+| What you want to do | Route |
+|---------------------|-------|
+| Report a bug | Open a [bug report](.github/ISSUE_TEMPLATE/bug_report.md) |
+| Propose a feature | Open a [feature request](.github/ISSUE_TEMPLATE/feature_request.md) |
+| Signal implementation interest | Comment "I'd like to work on this" on an existing issue, or open a feature request stating what you intend to build and reference the [roadmap](ROADMAP.md) |
+
+**Triage is best-effort, with no SLA.** A small maintainer team runs this
+project and responds as time allows. We do **not** promise a response or
+resolution time. Issues are scoped, labelled, and prioritized as the backlog
+allows; the [roadmap](ROADMAP.md) shows the current **Now / Next / Later**
+priorities and how they relate to the open backlog.
+
+What makes triage and prioritization fastest:
+
+- A concrete, reproducible bug — steps, `docker compose logs` output, and a
+  redacted `.env` (no real API keys)
+- A feature proposal framed as a user problem and use case, not just a desired
+  flag or endpoint
+- A clear statement of what you're willing to build, test, or investigate
+  yourself
+
 ## How to Contribute
 
 ### Reporting Bugs
 
-Open a GitHub issue with:
+Open a [bug report](.github/ISSUE_TEMPLATE/bug_report.md) with:
 - A clear description of the bug
 - Steps to reproduce
 - The output of `docker compose logs` for the affected service
@@ -18,10 +46,18 @@ Open a GitHub issue with:
 
 ### Suggesting Features
 
-Open a GitHub issue with:
+Open a [feature request](.github/ISSUE_TEMPLATE/feature_request.md) with:
 - What you want to accomplish
 - Why it doesn't fit as a post-MVP improvement
 - A sketch of the API or behavior change (optional but helpful)
+
+### Signaling Implementation Interest
+
+If an open issue or a [roadmap](ROADMAP.md) item matches something you want to
+build, say so on the issue thread before starting large work: "I'd like to work
+on this." For brand-new ideas, open a feature request and state your intent to
+implement. Coordination up front avoids two people building the same thing and
+lets maintainers flag scope or design concerns early.
 
 ### Pull Requests
 

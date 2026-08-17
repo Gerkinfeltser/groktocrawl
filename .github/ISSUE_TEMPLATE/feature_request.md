@@ -7,6 +7,11 @@ assignees: ''
 
 ---
 
+> **Before you file:** issues are triaged best-effort with **no response SLA**.
+> See [Contribution intake](https://github.com/groktopus/groktocrawl/blob/main/CONTRIBUTING.md#contribution-intake-and-triage)
+> and the [roadmap](https://github.com/groktopus/groktocrawl/blob/main/ROADMAP.md) —
+> especially **Now / Next** — to check whether your idea is already in flight.
+
 ## Problem
 
 What user need or pain point does this address? Describe the scenario where this matters.
