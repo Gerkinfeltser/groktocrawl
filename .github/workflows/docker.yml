@@ -194,6 +194,9 @@ jobs:
           # mcp-svc DNS-rebinding allowlist: include the compose service name
           # so the integration lane exercises a real non-loopback Host path.
           echo "MCP_ALLOWED_HOSTS=localhost:*,127.0.0.1:*,[::1]:*,mcp-svc:*" >> .env
+          # Disposable token for the direct SlopSearX MCP companion in CI.
+          # Production deployments must provide their own strong token.
+          echo "SLOPSEARX_MCP_AUTH_TOKEN=ci-only-test-token" >> .env
 
       - name: Force-remove all stale project containers
         run: docker ps -a --filter name=groktocrawl -q | xargs -r docker rm -f || true
