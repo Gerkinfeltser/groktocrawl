@@ -27,6 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       requires_full_runtime: ${{ steps.classify.outputs.requires_full_runtime }}
+      affected_services: ${{ steps.classify.outputs.affected_services }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -56,6 +57,8 @@ jobs:
 
           requires_full_runtime=$(printf '%s\n' "$changed_paths" | python3 scripts/classify_ci_changes.py)
           echo "requires_full_runtime=$requires_full_runtime" >> "$GITHUB_OUTPUT"
+          affected_services=$(printf '%s\n' "$changed_paths" | python3 scripts/classify_ci_changes.py --affected-services)
+          echo "affected_services=$affected_services" >> "$GITHUB_OUTPUT"
 
   build-and-push:
     name: ${{ matrix.service }}
@@ -214,8 +217,41 @@ jobs:
       - name: Ensure HF model cache volume exists
         run: docker volume inspect hf-cache || docker volume create hf-cache
 
+      # Image provisioning is decoupled from stack startup so each service image
+      # is built at most once per event:
+      #   - on push/main, build-and-push already built and published every image,
+      #     so this job just pulls the freshly published tags (no rebuild).
+      #   - on a PR, only the images for services whose paths changed are built
+      #     (service-local), gated on the classifier's affected-services output.
+      #   - unknown/cross-cutting runtime paths escalate to a full rebuild.
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull freshly published service images
+        if: github.event_name == 'push'
+        run: docker compose --profile indexing pull
+        timeout-minutes: 10
+
+      - name: Build affected service images (service-local PR build)
+        if: github.event_name == 'pull_request'
+        run: |
+          affected="${{ needs.changes.outputs.affected_services }}"
+          if [ -z "$affected" ] || [ "$affected" = "all" ]; then
+            echo "No service-local subset identified; building the full runtime stack."
+            docker compose --profile indexing build
+          else
+            echo "Service-local PR build for: $affected"
+            docker compose --profile indexing build $affected
+          fi
+        timeout-minutes: 10
+
       - name: Start the Docker stack
-        run: docker compose --profile indexing up --build -d
+        run: docker compose --profile indexing up -d
         timeout-minutes: 10
 
       - name: Start test fixtures
