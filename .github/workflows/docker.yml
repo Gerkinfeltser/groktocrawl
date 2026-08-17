@@ -164,6 +164,12 @@ jobs:
   integration-tests:
     name: Integration Tests
     needs: [changes, build-and-push]
+    # The fork guard (mirroring droid-review.yml) keeps untrusted fork PR code off the
+    # self-hosted runner. This is a best-effort in-workflow control: on `pull_request`
+    # events GitHub runs the workflow from the PR merge ref, so a fork that edits this
+    # file could bypass the guard. The authoritative, non-bypassable control is
+    # platform-level (deny fork PRs to the runner group / require workflow approval for
+    # outside collaborators), which is outside this repo and must be configured there.
     if: >-
       always() && ((github.event_name == 'pull_request' && needs.changes.result == 'success' &&
       needs.changes.outputs.requires_full_runtime == 'true' &&

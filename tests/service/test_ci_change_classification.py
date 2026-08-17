@@ -284,10 +284,14 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
     def test_fork_pr_runtime_gate_succeeds_noop(self) -> None:
         self.assertIn("if: always()", self.runtime_gate)
         self.assertIn(
-            "github.event.pull_request.head.repo.fork == true", self.runtime_gate
-        )
-        self.assertIn(
             "Fork pull request: self-hosted integration skipped for security.",
+            self.runtime_gate,
+        )
+        # Pin the fork exclusion to the fail-when-runtime-failed step
+        # specifically (the closing paren before `&&` only appears there, not in
+        # the summarize-fork step), so removing it regresses this test.
+        self.assertIn(
+            "github.event.pull_request.head.repo.fork == true) &&",
             self.runtime_gate,
         )
 
