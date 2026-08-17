@@ -89,8 +89,8 @@ jobs:
             dockerfile: parse-svc/Dockerfile
             image: ghcr.io/groktopus/groktocrawl-parse
           - service: mcp-svc
-            context: mcp-svc
-            dockerfile: Dockerfile
+            context: .
+            dockerfile: mcp-svc/Dockerfile
             image: ghcr.io/groktopus/groktocrawl-mcp
       max-parallel: 2
 
