@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib
 
+import pytest
 import scraper.adapters.ashbyhq as mod
 import scraper.adapters.base as base_mod
 from scraper.adapters.ashbyhq import (
@@ -28,7 +29,7 @@ from scraper.adapters.ashbyhq import (
     _format_compensation,
     _location_string,
 )
-from scraper.adapters.base import AdapterContext, AdapterRegistry
+from scraper.adapters.base import AdapterContext, AdapterError, AdapterRegistry
 
 # ── Sample data (inline, no HTTP) ────────────────────────────────
 
@@ -312,11 +313,40 @@ async def test_rpc_engages_with_api_key(monkeypatch):
     monkeypatch.setattr(mod, "_fetch_board", fake_fetch_board)
     monkeypatch.setattr(mod, "_fetch_rpc_jobs", fake_rpc)
     ctx = AdapterContext(config={"ASHBY_API_KEY": "test-key"})
-    result = await AshbyHQAdapter().scrape("https://jobs.ashbyhq.com/acme", ctx)
+    url = f"https://jobs.ashbyhq.com/acme/{JOB_1_UUID}"
+    result = await AshbyHQAdapter().scrape(url, ctx)
     assert result.success is True
     assert result.source == "ashbyhq-api"
     assert calls == ["test-key"]
     assert "Software Engineer" in result.markdown
+
+
+async def test_rpc_not_used_for_listing_with_key(monkeypatch):
+    # jobPosting.list is scoped to the key owner's company, so it must never
+    # be used to render an arbitrary listing board — even when a key is set.
+    calls: list[str] = []
+
+    async def fake_fetch_board(board, include_compensation=True):
+        return None  # public tier unavailable
+
+    async def fake_rpc(api_key):
+        calls.append(api_key)
+        return SAMPLE_RPC_RESULTS
+
+    async def fake_appdata(url):
+        return None
+
+    async def fake_scrape_page(url, timeout=15.0):
+        return None
+
+    monkeypatch.setattr(mod, "_fetch_board", fake_fetch_board)
+    monkeypatch.setattr(mod, "_fetch_and_parse_appdata", fake_appdata)
+    monkeypatch.setattr(mod, "scrape_page", fake_scrape_page)
+    monkeypatch.setattr(mod, "_fetch_rpc_jobs", fake_rpc)
+    ctx = AdapterContext(config={"ADAPTER_ASHBY_API_KEY": "test-key"})
+    with pytest.raises(AdapterError):
+        await AshbyHQAdapter().scrape("https://jobs.ashbyhq.com/other", ctx)
+    assert calls == []  # RPC transport never invoked for a listing URL
 
 
 # ── Registry registration + dispatch (VAL-ASHBY-012) ─────────────

@@ -686,10 +686,15 @@ class AshbyHQAdapter(SiteAdapter):
             # uuid not among published jobs → fall through to SSR
 
         # Tier 2: authenticated jobPosting.list RPC (gated by ASHBY_API_KEY)
-        api_key = ctx.config.get("ASHBY_API_KEY") or ctx.config.get(
-            "ADAPTER_ASHBY_API_KEY"
+        #
+        # Only engaged for individual job URLs: jobPosting.list is scoped to
+        # the company that owns the key, so its results cannot be trusted to
+        # represent an arbitrary listing board. Individual postings are safe
+        # because posting UUIDs are globally unique.
+        api_key = ctx.config.get("ADAPTER_ASHBY_API_KEY") or ctx.config.get(
+            "ASHBY_API_KEY"
         )
-        if api_key:
+        if api_key and uuid:
             logger.info("AshbyHQ adapter: trying authenticated RPC for %s", url)
             rpc_results = await ctx.with_timeout(_fetch_rpc_jobs(api_key), timeout=15)
             if rpc_results:
