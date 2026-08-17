@@ -164,9 +164,16 @@ jobs:
   integration-tests:
     name: Integration Tests
     needs: [changes, build-and-push]
+    # The fork guard (mirroring droid-review.yml) keeps untrusted fork PR code off the
+    # self-hosted runner. This is a best-effort in-workflow control: on `pull_request`
+    # events GitHub runs the workflow from the PR merge ref, so a fork that edits this
+    # file could bypass the guard. The authoritative, non-bypassable control is
+    # platform-level (deny fork PRs to the runner group / require workflow approval for
+    # outside collaborators), which is outside this repo and must be configured there.
     if: >-
       always() && ((github.event_name == 'pull_request' && needs.changes.result == 'success' &&
-      needs.changes.outputs.requires_full_runtime == 'true') ||
+      needs.changes.outputs.requires_full_runtime == 'true' &&
+      github.event.pull_request.head.repo.fork == false) ||
       (github.event_name == 'push' && needs.build-and-push.result == 'success'))
     runs-on: [self-hosted, groktopus, docker]
     concurrency:
@@ -539,6 +546,12 @@ jobs:
           needs.changes.outputs.requires_full_runtime == 'false'
         run: echo "Runtime integration was intentionally not needed for this docs-only pull request."
 
+      - name: Summarize fork pull request (integration skipped)
+        if: >-
+          github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true &&
+          needs.changes.result == 'success'
+        run: 'echo "Fork pull request: self-hosted integration skipped for security."'
+
       - name: Summarize successful runtime validation
         if: >-
           github.event_name == 'pull_request' && needs.changes.result == 'success' &&
@@ -559,6 +572,8 @@ jobs:
           needs.changes.result == 'success' &&
           !(github.event_name == 'pull_request' &&
           needs.changes.outputs.requires_full_runtime == 'false') &&
+          !(github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.fork == true) &&
           needs.integration-tests.result != 'success'
         run: |
           echo "Required runtime integration did not complete successfully."
