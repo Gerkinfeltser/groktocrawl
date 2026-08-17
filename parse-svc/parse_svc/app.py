@@ -1,16 +1,17 @@
-"""Document parsing service — PDF, DOCX, PPTX, XLSX, and more to markdown.
+"""Document parsing service — PDF and office documents to markdown.
 
-Routes files to the right parser based on extension, with OCR fallback
-for scanned PDFs and table extraction for tabular data.
+Routes files to the right parser based on extension. Office documents,
+ebooks, and CSV are converted by firecrawl-anydoc; PDFs use a text-extraction
+tier with an OCR fallback for scanned or image-only files.
 """
 
 import io
 import logging
 import os
-import tempfile
 from pathlib import Path
 from typing import Any
 
+import anydoc
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
@@ -45,12 +46,34 @@ def _ext(filename: str) -> str:
     return Path(filename).suffix.lower().lstrip(".")
 
 
-SUPPORTED_FORMATS = {
-    "pdf": "PDF document",
+# Document formats handled by firecrawl-anydoc, including legacy and
+# macro-enabled variants. The extension is resolved to a canonical anydoc
+# format (e.g. .docm -> docx, .xlsb -> xlsx) at conversion time.
+ANYDOC_FORMATS = {
+    "doc": "Word document",
     "docx": "Word document",
+    "docm": "Word document (macro-enabled)",
+    "ppt": "PowerPoint presentation",
+    "pps": "PowerPoint slideshow",
+    "pot": "PowerPoint template",
     "pptx": "PowerPoint presentation",
+    "pptm": "PowerPoint presentation (macro-enabled)",
+    "ppsx": "PowerPoint slideshow",
+    "ppsm": "PowerPoint slideshow (macro-enabled)",
+    "xls": "Excel workbook",
     "xlsx": "Excel workbook",
+    "xlsm": "Excel workbook (macro-enabled)",
+    "xlsb": "Excel binary workbook",
+    "odt": "OpenDocument text",
+    "ods": "OpenDocument spreadsheet",
+    "odp": "OpenDocument presentation",
+    "rtf": "Rich Text Format",
+    "epub": "EPUB ebook",
     "csv": "CSV data",
+}
+
+# Plain-text formats passed through as-is.
+TEXT_FORMATS = {
     "md": "Markdown",
     "txt": "Plain text",
     "json": "JSON data",
@@ -59,6 +82,12 @@ SUPPORTED_FORMATS = {
     "xml": "XML data",
     "html": "HTML document",
     "htm": "HTML document",
+}
+
+SUPPORTED_FORMATS = {
+    "pdf": "PDF document",
+    **ANYDOC_FORMATS,
+    **TEXT_FORMATS,
 }
 
 
@@ -141,116 +170,6 @@ def _parse_pdf(content: bytes, filename: str) -> dict:
     return {"markdown": "\n\n".join(markdown_parts).strip(), "metadata": metadata}
 
 
-def _parse_docx(content: bytes, filename: str) -> dict:
-    """Parse DOCX to markdown."""
-    try:
-        from docx import Document
-
-        doc = Document(io.BytesIO(content))
-        paragraphs = []
-        for para in doc.paragraphs:
-            if para.text.strip():
-                paragraphs.append(para.text)
-        text = "\n\n".join(paragraphs)
-
-        # Extract tables
-        table_parts = []
-        for table in doc.tables:
-            rows = []
-            for row in table.rows:
-                cells = [cell.text.strip() for cell in row.cells]
-                rows.append(cells)
-            if rows:
-                from tabulate import tabulate
-
-                table_parts.append(
-                    tabulate(rows, headers="firstrow", tablefmt="github")
-                )
-        if table_parts:
-            text += "\n\n### Tables\n\n" + "\n\n".join(table_parts)
-
-        metadata = {
-            "format": "docx",
-            "filename": filename,
-            "paragraphs": len(doc.paragraphs),
-            "tables": len(doc.tables),
-        }
-        return {"markdown": text.strip(), "metadata": metadata}
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Failed to parse DOCX: {e}")  # noqa: B904
-
-
-def _parse_pptx(content: bytes, filename: str) -> dict:
-    """Parse PPTX to markdown — slides, notes, and speaker notes."""
-    try:
-        from pptx import Presentation
-
-        prs = Presentation(io.BytesIO(content))
-        slides_text = []
-        for i, slide in enumerate(prs.slides, 1):
-            slide_parts = [f"## Slide {i}"]
-            for shape in slide.shapes:
-                if shape.has_text_frame:
-                    for para in shape.text_frame.paragraphs:
-                        if para.text.strip():
-                            slide_parts.append(para.text)
-                if shape.has_table:
-                    table = shape.table
-                    rows = []
-                    for row in table.rows:
-                        cells = [cell.text.strip() for cell in row.cells]
-                        rows.append(cells)
-                    if rows:
-                        from tabulate import tabulate
-
-                        slide_parts.append(
-                            tabulate(rows, headers="firstrow", tablefmt="github")
-                        )
-            slides_text.append("\n\n".join(slide_parts))
-
-        metadata = {
-            "format": "pptx",
-            "filename": filename,
-            "slides": len(prs.slides),
-        }
-        return {
-            "markdown": "\n\n---\n\n".join(slides_text).strip(),
-            "metadata": metadata,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Failed to parse PPTX: {e}")  # noqa: B904
-
-
-def _parse_xlsx(content: bytes, filename: str) -> dict:
-    """Parse XLSX to markdown tables."""
-    try:
-        import openpyxl
-
-        wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
-        sheets_md = []
-        for sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            rows = []
-            for row in ws.iter_rows(values_only=True):
-                rows.append([str(c) if c is not None else "" for c in row])
-            if rows:
-                from tabulate import tabulate
-
-                sheets_md.append(
-                    f"### Sheet: {sheet_name}\n\n{tabulate(rows, headers='firstrow', tablefmt='github')}"
-                )
-
-        wb.close()
-        metadata = {
-            "format": "xlsx",
-            "filename": filename,
-            "sheets": len(wb.sheetnames),
-        }
-        return {"markdown": "\n\n".join(sheets_md).strip(), "metadata": metadata}
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Failed to parse XLSX: {e}")  # noqa: B904
-
-
 def _parse_text(content: bytes, filename: str) -> dict:
     """Plain text / code / markdown files."""
     text = content.decode("utf-8", errors="replace")
@@ -258,75 +177,35 @@ def _parse_text(content: bytes, filename: str) -> dict:
     return {"markdown": text.strip(), "metadata": metadata}
 
 
-def _parse_csv(content: bytes, filename: str) -> dict:
-    """Parse CSV to markdown table."""
-    text = content.decode("utf-8", errors="replace")
-    import csv
-    import io as io_module
-
-    reader = csv.reader(io_module.StringIO(text))
-    rows = list(reader)
-    if rows:
-        from tabulate import tabulate
-
-        md = tabulate(rows, headers="firstrow", tablefmt="github")
-    else:
-        md = text
-    metadata = {"format": "csv", "filename": filename, "rows": len(rows)}
-    return {"markdown": md, "metadata": metadata}
-
-
-def _parse_via_markitdown(content: bytes, filename: str) -> dict:
-    """Use Microsoft markitdown as a catch-all fallback."""
+def _parse_anydoc(content: bytes, filename: str) -> dict:
+    """Convert an office document / ebook / CSV to markdown via firecrawl-anydoc."""
+    ext = _ext(filename)
     try:
-        from markitdown import MarkItDown
-
-        md_converter = MarkItDown()
-        with tempfile.NamedTemporaryFile(
-            suffix=f".{_ext(filename)}", delete=False
-        ) as tmp:
-            tmp.write(content)
-            tmp_path = tmp.name
-        try:
-            result = md_converter.convert(tmp_path)
-            return {
-                "markdown": result.text_content.strip(),
-                "metadata": {
-                    "format": _ext(filename),
-                    "filename": filename,
-                    "extraction": "markitdown",
-                },
-            }
-        finally:
-            os.unlink(tmp_path)
-    except Exception as e:
-        logger.warning("markitdown failed for %s: %s", filename, e)
-        return {
-            "markdown": content.decode("utf-8", errors="replace")[:50000],
-            "metadata": {
-                "format": _ext(filename),
-                "filename": filename,
-                "extraction": "raw",
-            },
-        }
+        fmt = anydoc.format_from_extension(ext)
+        markdown = anydoc.to_markdown_bytes(content, format=fmt)
+    except anydoc.EncryptedError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Failed to parse {filename}: document is encrypted",
+        ) from e
+    except anydoc.ConvertError as e:
+        raise HTTPException(
+            status_code=422, detail=f"Failed to parse {filename}: {e}"
+        ) from e
+    metadata = {
+        "format": ext,
+        "filename": filename,
+        "extraction": "anydoc",
+    }
+    return {"markdown": markdown.strip(), "metadata": metadata}
 
 
 # ---- Router ----
 
 PARSERS = {
     "pdf": _parse_pdf,
-    "docx": _parse_docx,
-    "pptx": _parse_pptx,
-    "xlsx": _parse_xlsx,
-    "csv": _parse_csv,
-    "md": _parse_text,
-    "txt": _parse_text,
-    "json": _parse_text,
-    "yaml": _parse_text,
-    "yml": _parse_text,
-    "xml": _parse_text,
-    "html": _parse_text,
-    "htm": _parse_text,
+    **dict.fromkeys(ANYDOC_FORMATS, _parse_anydoc),
+    **dict.fromkeys(TEXT_FORMATS, _parse_text),
 }
 
 
@@ -371,7 +250,7 @@ async def parse_file(file: UploadFile):
 
     logger.info("Parsing %s (%s, %d bytes)", file.filename, ext, len(content))
 
-    parser = PARSERS.get(ext, _parse_via_markitdown)
+    parser = PARSERS[ext]
     try:
         result = parser(content, file.filename)
         md = result.get("markdown", "")
