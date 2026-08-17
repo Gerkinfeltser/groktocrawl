@@ -115,12 +115,14 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
         changes_result: str,
         requires_full_runtime: str,
         build_result: str,
+        fork: bool,
     ) -> bool:
-        """Evaluate the workflow's two supported integration-test lanes."""
+        """Evaluate the workflow's integration-test lanes (PR, fork-PR, push)."""
         return (
             event_name == "pull_request"
             and changes_result == "success"
             and requires_full_runtime == "true"
+            and not fork
         ) or (event_name == "push" and build_result == "success")
 
     def test_docker_build_matrix_is_push_only(self) -> None:
@@ -134,7 +136,8 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
             self.integration_condition,
             "always() && ((github.event_name == 'pull_request' && "
             "needs.changes.result == 'success' && "
-            "needs.changes.outputs.requires_full_runtime == 'true') || "
+            "needs.changes.outputs.requires_full_runtime == 'true' && "
+            "github.event.pull_request.head.repo.fork == false) || "
             "(github.event_name == 'push' && needs.build-and-push.result == 'success'))",
         )
         self.assertFalse(
@@ -143,6 +146,7 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
                 changes_result="success",
                 requires_full_runtime="false",
                 build_result="skipped",
+                fork=False,
             )
         )
 
@@ -153,6 +157,22 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
                 changes_result="success",
                 requires_full_runtime="true",
                 build_result="skipped",
+                fork=False,
+            )
+        )
+
+    def test_fork_pull_request_cannot_run_integration_tests(self) -> None:
+        self.assertIn(
+            "github.event.pull_request.head.repo.fork == false",
+            self.integration_condition,
+        )
+        self.assertFalse(
+            self.integration_tests_runs_for(
+                event_name="pull_request",
+                changes_result="success",
+                requires_full_runtime="true",
+                build_result="skipped",
+                fork=True,
             )
         )
 
@@ -259,6 +279,16 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
         )
         self.assertIn(
             "needs.changes.outputs.requires_full_runtime == 'false'", self.runtime_gate
+        )
+
+    def test_fork_pr_runtime_gate_succeeds_noop(self) -> None:
+        self.assertIn("if: always()", self.runtime_gate)
+        self.assertIn(
+            "github.event.pull_request.head.repo.fork == true", self.runtime_gate
+        )
+        self.assertIn(
+            "Fork pull request: self-hosted integration skipped for security.",
+            self.runtime_gate,
         )
 
     def test_runtime_gate_fails_when_classification_or_required_runtime_fails(
