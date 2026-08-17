@@ -7,6 +7,7 @@ import datetime
 import logging
 import math
 import urllib.parse
+from typing import Any
 
 from app import COLLECTION_NAME, MAX_DOCS
 from metrics import METRICS
@@ -175,8 +176,8 @@ async def _evict_if_needed(qdrant: QdrantClient):
         MAX_DOCS,
     )
 
-    scored_points: list[tuple[float, int]] = []
-    next_offset: int | None = None
+    scored_points: list[tuple[float, models.ExtendedPointId]] = []
+    next_offset: Any = None
     page_size = 2000
 
     while len(scored_points) < target_delete or next_offset is not None:
