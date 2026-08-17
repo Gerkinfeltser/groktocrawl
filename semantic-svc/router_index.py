@@ -301,7 +301,7 @@ async def index_batch(body: IndexBatchRequest):
         points.append(
             models.PointStruct(
                 id=point_id,
-                vector=vectors,
+                vector=vectors,  # type: ignore[arg-type]
                 payload=payload,
             )
         )

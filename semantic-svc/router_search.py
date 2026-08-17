@@ -75,8 +75,8 @@ async def search_vector(body: VectorSearchRequest):
 
     results = [
         VectorSearchResult(
-            url=h.payload.get("url", ""),
-            title=h.payload.get("title", ""),
+            url=h.payload.get("url", ""),  # type: ignore[union-attr]
+            title=h.payload.get("title", ""),  # type: ignore[union-attr]
             score=float(h.score),
         )
         for h in hits

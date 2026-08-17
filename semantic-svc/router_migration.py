@@ -172,7 +172,7 @@ async def migrate_start(body: MigrationStartRequest):
     try:
         collection_info = qdrant.get_collection(COLLECTION_NAME)
         vectors_config = collection_info.config.params.vectors
-        if hasattr(vectors_config, "get") and target_nv not in vectors_config:
+        if isinstance(vectors_config, dict) and target_nv not in vectors_config:
             raise HTTPException(
                 400,
                 f"Target named vector '{target_nv}' is not configured on the collection. "
