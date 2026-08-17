@@ -59,6 +59,49 @@ class CiChangeClassificationTests(unittest.TestCase):
         self.assertTrue(MODULE.requires_full_runtime([""]))
         self.assertTrue(MODULE.requires_full_runtime(["  "]))
 
+    def test_affected_services_maps_only_changed_runtime_services(self) -> None:
+        self.assertEqual(
+            MODULE.affected_services(["agent-svc/agent/app.py"]),
+            frozenset({"agent-svc"}),
+        )
+        self.assertEqual(
+            MODULE.affected_services(
+                ["scraper-svc/scraper/fetch.py", "parse-svc/parse_svc/app.py"]
+            ),
+            frozenset({"scraper-svc", "parse-svc"}),
+        )
+
+    def test_affected_services_escalates_cross_cutting_paths_to_all(self) -> None:
+        for path in ("docker-compose.yml", "common/models.py"):
+            with self.subTest(path=path):
+                self.assertEqual(MODULE.affected_services([path]), frozenset({"all"}))
+
+    def test_affected_services_escalates_unrecognized_runtime_paths_to_all(
+        self,
+    ) -> None:
+        for path in (
+            "notes.txt",
+            "requirements.txt",
+            "scripts/check-docs-surface.py",
+            ".github/workflows/docker.yml",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(MODULE.affected_services([path]), frozenset({"all"}))
+
+    def test_affected_services_escalates_empty_and_malformed_input_to_all(self) -> None:
+        self.assertEqual(MODULE.affected_services([]), frozenset({"all"}))
+        self.assertEqual(MODULE.affected_services([""]), frozenset({"all"}))
+        self.assertEqual(MODULE.affected_services(["  "]), frozenset({"all"}))
+
+    def test_affected_services_docs_only_paths_are_ignored(self) -> None:
+        self.assertEqual(MODULE.affected_services(["docs/guides/ci.md"]), frozenset())
+
+    def test_affected_services_ignores_docs_paths_in_mixed_set(self) -> None:
+        self.assertEqual(
+            MODULE.affected_services(["docs/guides/ci.md", "agent-svc/agent/app.py"]),
+            frozenset({"agent-svc"}),
+        )
+
     def test_cli_reads_stdin_and_prints_boolean(self) -> None:
         result = subprocess.run(
             [sys.executable, str(CLASSIFIER)],
@@ -189,6 +232,82 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
             'changed_paths=$(git diff --name-only "$base" "$head")',
             self.pull_request_classification,
         )
+
+    def test_changes_job_exposes_affected_services_output(self) -> None:
+        self.assertIn(
+            "affected_services: ${{ steps.classify.outputs.affected_services }}",
+            self.changes,
+        )
+        self.assertIn(
+            "--affected-services",
+            self.changes,
+        )
+        self.assertIn(
+            'echo "affected_services=$affected_services" >> "$GITHUB_OUTPUT"',
+            self.changes,
+        )
+
+    def test_pr_build_step_is_service_local_and_gated_on_affected_services(
+        self,
+    ) -> None:
+        self.assertIn(
+            "Build service images (service-local PR build / tag-push full build)",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "needs.changes.outputs.affected_services",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "docker compose --profile indexing build $affected",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "docker compose --profile indexing build",
+            self.integration_tests,
+        )
+        self.assertIn("github.event_name == 'pull_request'", self.integration_tests)
+
+    def test_pr_lane_pulls_published_images_before_service_local_build(self) -> None:
+        # Reproducibility (#494): before the service-local PR build, the stack is
+        # refreshed from the latest published images so unchanged services match a
+        # known commit; GHCR login runs for pull_request events.
+        self.assertIn("Pull freshly published service images", self.integration_tests)
+        self.assertIn("docker compose --profile indexing pull", self.integration_tests)
+        self.assertIn(
+            "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+            self.integration_tests,
+        )
+        self.assertIn("github.event_name == 'pull_request'", self.integration_tests)
+
+    def test_main_push_pulls_published_images_without_rebuilding(self) -> None:
+        self.assertIn("Pull freshly published service images", self.integration_tests)
+        self.assertIn("docker compose --profile indexing pull", self.integration_tests)
+        self.assertIn(
+            "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+            self.integration_tests,
+        )
+
+    def test_tag_push_builds_full_stack_from_tagged_source(self) -> None:
+        # P1 (#494 review): tag pushes (v*) must not pull stale :latest; they
+        # rebuild the full runtime stack from the tagged source.
+        self.assertIn(
+            "github.event_name == 'push' && github.ref != 'refs/heads/main'",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "Building the full runtime stack.",
+            self.integration_tests,
+        )
+
+    def test_start_stack_step_no_longer_uses_build(self) -> None:
+        self.assertIn("docker compose --profile indexing up -d", self.integration_tests)
+        self.assertNotIn(
+            "docker compose --profile indexing up --build -d", self.integration_tests
+        )
+        # The only `up` is build-less: no event rebuilds the full stack on top of
+        # an already-provisioned image set.
+        self.assertNotIn("up --build", self.integration_tests)
 
     def test_integration_test_staging_copies_only_required_contract_inputs(
         self,

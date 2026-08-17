@@ -27,6 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       requires_full_runtime: ${{ steps.classify.outputs.requires_full_runtime }}
+      affected_services: ${{ steps.classify.outputs.affected_services }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -56,6 +57,8 @@ jobs:
 
           requires_full_runtime=$(printf '%s\n' "$changed_paths" | python3 scripts/classify_ci_changes.py)
           echo "requires_full_runtime=$requires_full_runtime" >> "$GITHUB_OUTPUT"
+          affected_services=$(printf '%s\n' "$changed_paths" | python3 scripts/classify_ci_changes.py --affected-services)
+          echo "affected_services=$affected_services" >> "$GITHUB_OUTPUT"
 
   build-and-push:
     name: ${{ matrix.service }}
@@ -214,8 +217,57 @@ jobs:
       - name: Ensure HF model cache volume exists
         run: docker volume inspect hf-cache || docker volume create hf-cache
 
+      # Image provisioning is decoupled from stack startup so each service image
+      # is built at most once per event (except release tag pushes, which must
+      # both publish semver tags and validate the tagged source):
+      #   - main push: build-and-push already built and published every image, so
+      #     this job pulls the freshly published :latest tags (no rebuild).
+      #   - PR: pulls the latest published images for unchanged services (so the
+      #     stack matches a known commit), then builds only the images for
+      #     services whose paths changed (service-local), gated on the
+      #     classifier's affected-services output; unknown/cross-cutting runtime
+      #     paths escalate to a full rebuild.
+      #   - tag push (v*): build-and-push published only semver tags, so this job
+      #     builds the full runtime stack from the tagged source.
+      - name: Log in to GitHub Container Registry
+        if: >-
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          github.event_name == 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull freshly published service images
+        if: >-
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          github.event_name == 'pull_request'
+        run: |
+          # Best-effort refresh of the published image set. A service may not
+          # have a published tag yet (e.g. a newly added service), which fails
+          # its manifest lookup; tolerate that and let the build/up steps build
+          # the missing image from source instead.
+          docker compose --profile indexing pull || true
+        timeout-minutes: 10
+
+      - name: Build service images (service-local PR build / tag-push full build)
+        if: >-
+          github.event_name == 'pull_request' ||
+          (github.event_name == 'push' && github.ref != 'refs/heads/main')
+        run: |
+          affected="${{ needs.changes.outputs.affected_services }}"
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ -n "$affected" ] && [ "$affected" != "all" ]; then
+            echo "Service-local PR build for: $affected"
+            docker compose --profile indexing build $affected
+          else
+            echo "Building the full runtime stack."
+            docker compose --profile indexing build
+          fi
+        timeout-minutes: 10
+
       - name: Start the Docker stack
-        run: docker compose --profile indexing up --build -d
+        run: docker compose --profile indexing up -d
         timeout-minutes: 10
 
       - name: Start test fixtures

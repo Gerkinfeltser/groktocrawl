@@ -10,7 +10,12 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_integration_workflow_enables_indexing_profile():
     workflow_path = ROOT / ".github/workflows/docker.yml"
     workflow = workflow_path.read_text()
-    assert "docker compose --profile indexing up --build -d" in workflow
+    # The stack startup still activates the indexing profile (semantic-svc/qdrant),
+    # but no longer redundantly rebuilds the full stack on top of build-and-push
+    # (#494): images are provisioned separately (pulled on push, service-local
+    # build on PR) before an `up -d` with no `--build`.
+    assert "docker compose --profile indexing up -d" in workflow
+    assert "docker compose --profile indexing up --build -d" not in workflow
     assert "docker compose exec -T agent-svc env \\" in workflow
     assert "docker compose exec -T \\\\n            -e" not in workflow
 
