@@ -4,16 +4,64 @@ GroktoCrawl is a self-hosted, MIT-licensed web data platform compatible with the
 
 ## Start here
 
+Choose your path. Both run the same Docker stack defined in `docker-compose.yml`; they differ in which services and credentials you configure.
+
+### Local demo (fixture profile)
+
+The fastest end-to-end smoke test, with no external credentials. The `fixture` profile starts a local LLM fixture (`llm-svc`) and two fixture test sites (`test-site`, `tier3-fixture`).
+
+**Config:** copy `.env.sample` to `.env` and set a non-empty `SLOPSEARX_MCP_AUTH_TOKEN` (used by the default `slopsearx-mcp` service; Compose fails if it is unset).
+
 ```bash
-cp .env.sample .env
+cp .env.sample .env   # set SLOPSEARX_MCP_AUTH_TOKEN
 docker compose --profile fixture up --build -d
 curl http://localhost:8080/health
 ./groktocrawl scrape https://example.com
 ```
 
-The `fixture` profile starts a local LLM fixture and test sites. For production, omit that profile and configure an OpenAI-compatible provider plus `BRAVE_API_KEY` for web search. Set `API_KEY` before exposing the API outside a trusted network.
+**Expected success output:** `curl http://localhost:8080/health` returns `{"status":"ok", "checks":{...}}` once all dependencies are up, and `./groktocrawl scrape https://example.com` prints example.com rendered as markdown.
 
-> **Background jobs are best-effort.** Async jobs (crawl, agent, extract, batch-scrape, llmstxt, plan execution) run in-process and are not restart-safe; see [Deployment and configuration](docs/guides/deployment.md#job-durability-and-recovery) for the durability contract and recovery procedure.
+### Production minimum (no fixture profile)
+
+The same stack pointed at a real LLM provider, an open-web search backend, and a hardened API — without the fixture-only services.
+
+**Config (in `.env`):** an OpenAI-compatible LLM provider (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`), `BRAVE_API_KEY` for web search, `API_KEY` for API authentication, and a non-empty `SLOPSEARX_MCP_AUTH_TOKEN`. `llm-svc`, `test-site`, and `tier3-fixture` are fixture-only and must **not** be started in production; omit the `fixture` profile.
+
+```bash
+cp .env.sample .env   # set LLM_BASE_URL/LLM_API_KEY/LLM_MODEL, BRAVE_API_KEY, API_KEY, SLOPSEARX_MCP_AUTH_TOKEN
+docker compose up --build -d
+curl http://localhost:8080/health
+./groktocrawl scrape https://example.com
+```
+
+**Expected success output:** `curl http://localhost:8080/health` returns `{"status":"ok", "checks":{...}}`, and `./groktocrawl scrape https://example.com` prints example.com as markdown. Set `API_KEY` before exposing the API outside a trusted network.
+
+### End-to-end example: an async crawl with a webhook and SSE
+
+This exercises the async job path end to end and shows why the durability boundary matters. The CLI `crawl` command is documented in the [CLI guide](docs/guides/cli.md); the `curl` forms below show the underlying API.
+
+```bash
+# Create an async crawl job with a completion webhook
+curl -X POST http://localhost:8080/v2/crawl \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com","maxDepth":2,"limit":20,"webhook":{"url":"https://your-host.example/hook"}}'
+# → {"id":"crawl_<job_id>","status":"processing", ...}
+
+# Poll status until the crawl finishes
+curl http://localhost:8080/v2/crawl/crawl_<job_id>
+# → {"status":"completed","completed":N,"total":N,"data":[ ... ], ...}
+
+# Or stream live progress inline (stream: true runs the crawl in the response)
+curl -N -X POST http://localhost:8080/v2/crawl \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com","maxDepth":2,"limit":20,"stream":true}'
+# → data: {"type":"page","url":...,"markdown":...}
+#   data: {"type":"done","id":...,"status":"completed","pages":N,...}
+```
+
+**Expected success output:** the webhook fires a `crawl.started` event before scraping, a `crawl.page` event after each page, and a `crawl.completed` event at the end — each with a unique `webhookId` (omit an `events` filter to receive all of them). The SSE stream emits flat `page` events and a terminal `done` event.
+
+> **Background jobs are best-effort.** Async jobs (crawl, agent, extract, batch-scrape, llmstxt, plan execution) run in-process and are **not restart-safe**: a restart does not resume interrupted work, roll back partial artifacts, or replay undelivered webhooks. After any `agent-svc` restart, reconcile jobs stranded in `processing` — see [Job durability and recovery](docs/guides/deployment.md#job-durability-and-recovery), the [Interrupted Jobs runbook](docs/runbooks/interrupted-jobs.md), and [ADR-0047](docs/adr/0047-defer-restart-safe-execution.md).
 
 ## What it provides
 
