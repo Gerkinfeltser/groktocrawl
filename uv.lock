@@ -324,16 +324,16 @@ wheels = [
 
 [[package]]
 name = "cloakbrowser"
-version = "0.5.2"
+version = "0.5.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
     { name = "playwright" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a9/7d/d0598e63f311a8ae550c0d3c658b594a2a48571afe5177b0a8926967886f/cloakbrowser-0.5.2.tar.gz", hash = "sha256:763f7df17b9768ad613bfec430cd9d121d566d4302c6280b79f5f63273a6b5dd", size = 5641027, upload-time = "2026-07-25T06:42:55.014Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3c/66/a0f3e06aadb89f5aa8a403864bf2bce296d2eb10e5983a13a62ce19cb493/cloakbrowser-0.5.3.tar.gz", hash = "sha256:720369cf0fce12cc895e5a09f98b18f809d9c55f17f4d5f854204d720e8133c3", size = 5644946, upload-time = "2026-07-30T01:18:58.282Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3d/c0/a7d81fd6a49d1470f919f35726ddd11c1ad7efa683cf444f75ab2e8fd75d/cloakbrowser-0.5.2-py3-none-any.whl", hash = "sha256:7e9088fa38e56d4f31c630e42c47204619d39974518bb44f9dfce8401e7b50cb", size = 112056, upload-time = "2026-07-25T06:42:53.41Z" },
+    { url = "https://files.pythonhosted.org/packages/93/e8/f0d86ca18b3a1e132ffd965268f621897f60c47ea8c61b1ee9a786fffb36/cloakbrowser-0.5.3-py3-none-any.whl", hash = "sha256:9082cfd2f104342fd718d9882984da7674ef6616308dd7932bff4b8bd5cf3cfe", size = 112895, upload-time = "2026-07-30T01:18:56.523Z" },
 ]
 
 [[package]]
@@ -850,7 +850,7 @@ dev = [
     { name = "vulture", specifier = ">=2.16" },
 ]
 fast-tests = [
-    { name = "cloakbrowser", specifier = "==0.5.2" },
+    { name = "cloakbrowser", specifier = "==0.5.3" },
     { name = "curl-cffi", specifier = ">=0.15.0" },
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "markdownify", specifier = "==1.2.3" },
@@ -2445,7 +2445,7 @@ playwright = [
 [package.metadata]
 requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.13.0" },
-    { name = "cloakbrowser", specifier = "==0.5.2" },
+    { name = "cloakbrowser", specifier = "==0.5.3" },
     { name = "curl-cffi", specifier = ">=0.15.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.28.0" },
