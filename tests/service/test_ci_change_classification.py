@@ -96,6 +96,49 @@ class CiChangeClassificationTests(unittest.TestCase):
     def test_affected_services_docs_only_paths_are_ignored(self) -> None:
         self.assertEqual(MODULE.affected_services(["docs/guides/ci.md"]), frozenset())
 
+    def test_root_level_markdown_files_are_docs_only(self) -> None:
+        # #561: a root-level *.md (e.g. ROADMAP.md, CHANGELOG.md, SECURITY.md) is
+        # documentation, not runtime code, so it must not require full runtime
+        # validation nor trigger any image rebuild.
+        for path in ("ROADMAP.md", "CHANGELOG.md", "SECURITY.md", "VISION.md"):
+            with self.subTest(path=path):
+                self.assertFalse(MODULE.requires_full_runtime([path]))
+                self.assertEqual(MODULE.affected_services([path]), frozenset())
+
+    def test_github_markdown_files_are_docs_only(self) -> None:
+        # #561: prose markdown under .github/ (e.g. PULL_REQUEST_TEMPLATE.md) is
+        # documentation too, mirroring the existing .github/ISSUE_TEMPLATE/ prefix.
+        # Non-markdown workflow/config files under .github/ still escalate.
+        self.assertFalse(
+            MODULE.requires_full_runtime([".github/PULL_REQUEST_TEMPLATE.md"])
+        )
+        self.assertEqual(
+            MODULE.affected_services([".github/PULL_REQUEST_TEMPLATE.md"]),
+            frozenset(),
+        )
+        self.assertTrue(MODULE.requires_full_runtime([".github/workflows/docker.yml"]))
+        self.assertEqual(
+            MODULE.affected_services([".github/workflows/docker.yml"]),
+            frozenset({"all"}),
+        )
+
+    def test_root_level_markdown_is_ignored_in_mixed_set(self) -> None:
+        self.assertEqual(
+            MODULE.affected_services(["ROADMAP.md", "agent-svc/agent/app.py"]),
+            frozenset({"agent-svc"}),
+        )
+        self.assertTrue(
+            MODULE.requires_full_runtime(["ROADMAP.md", "agent-svc/agent/app.py"])
+        )
+
+    def test_root_level_non_markdown_still_escalates(self) -> None:
+        # The root-*.md extension must not swallow unknown root-level files:
+        # only markdown becomes docs-only; anything else escalates to all.
+        for path in ("requirements.txt", "notes.txt", "Makefile"):
+            with self.subTest(path=path):
+                self.assertTrue(MODULE.requires_full_runtime([path]))
+                self.assertEqual(MODULE.affected_services([path]), frozenset({"all"}))
+
     def test_affected_services_ignores_docs_paths_in_mixed_set(self) -> None:
         self.assertEqual(
             MODULE.affected_services(["docs/guides/ci.md", "agent-svc/agent/app.py"]),
@@ -127,6 +170,16 @@ class CiChangeClassificationTests(unittest.TestCase):
         )
         self.assertEqual(result.stdout, "true\n")
 
+    def test_cli_classifies_root_markdown_as_docs_only(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(CLASSIFIER)],
+            input="ROADMAP.md\n",
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        self.assertEqual(result.stdout, "false\n")
+
 
 class RuntimeGateWorkflowContractTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -134,6 +187,11 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
         self.build_and_push = workflow.split("\n  build-and-push:\n", maxsplit=1)[
             1
         ].split("\n  integration-tests:\n", maxsplit=1)[0]
+        self.build_matrix_services = {
+            line.split("service:", 1)[1].strip()
+            for line in self.build_and_push.splitlines()
+            if line.strip().startswith("- service:")
+        }
         self.integration_tests = workflow.split("\n  integration-tests:\n", maxsplit=1)[
             1
         ].split("\n  runtime-gate:\n", maxsplit=1)[0]
@@ -173,6 +231,15 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
         self.assertIn("matrix:\n        include:", self.build_and_push)
         self.assertIn("- service: agent-svc", self.build_and_push)
         self.assertIn("- service: scraper-svc", self.build_and_push)
+
+    def test_runtime_services_match_build_and_push_matrix(self) -> None:
+        # Contract (#561): the classifier's RUNTIME_SERVICES must exactly mirror
+        # the docker.yml build-and-push image matrix. A service added to the
+        # compose/build matrix but not to RUNTIME_SERVICES would silently break
+        # service-local PR builds and runtime classification, so this guard keeps
+        # the two from drifting apart.
+        self.assertTrue(self.build_matrix_services)
+        self.assertEqual(set(MODULE.RUNTIME_SERVICES), self.build_matrix_services)
 
     def test_docs_only_pull_request_cannot_run_integration_tests(self) -> None:
         self.assertEqual(
