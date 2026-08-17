@@ -243,7 +243,12 @@ jobs:
         if: >-
           (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
           github.event_name == 'pull_request'
-        run: docker compose --profile indexing pull
+        run: |
+          # Best-effort refresh of the published image set. A service may not
+          # have a published tag yet (e.g. a newly added service), which fails
+          # its manifest lookup; tolerate that and let the build/up steps build
+          # the missing image from source instead.
+          docker compose --profile indexing pull || true
         timeout-minutes: 10
 
       - name: Build service images (service-local PR build / tag-push full build)
