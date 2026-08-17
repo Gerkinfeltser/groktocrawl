@@ -251,7 +251,7 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
         self,
     ) -> None:
         self.assertIn(
-            "Build affected service images (service-local PR build)",
+            "Build service images (service-local PR build / tag-push full build)",
             self.integration_tests,
         )
         self.assertIn(
@@ -268,10 +268,37 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
         )
         self.assertIn("github.event_name == 'pull_request'", self.integration_tests)
 
-    def test_push_lane_pulls_published_images_without_rebuilding(self) -> None:
+    def test_pr_lane_pulls_published_images_before_service_local_build(self) -> None:
+        # Reproducibility (#494): before the service-local PR build, the stack is
+        # refreshed from the latest published images so unchanged services match a
+        # known commit; GHCR login runs for pull_request events.
         self.assertIn("Pull freshly published service images", self.integration_tests)
         self.assertIn("docker compose --profile indexing pull", self.integration_tests)
-        self.assertIn("github.event_name == 'push'", self.integration_tests)
+        self.assertIn(
+            "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+            self.integration_tests,
+        )
+        self.assertIn("github.event_name == 'pull_request'", self.integration_tests)
+
+    def test_main_push_pulls_published_images_without_rebuilding(self) -> None:
+        self.assertIn("Pull freshly published service images", self.integration_tests)
+        self.assertIn("docker compose --profile indexing pull", self.integration_tests)
+        self.assertIn(
+            "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+            self.integration_tests,
+        )
+
+    def test_tag_push_builds_full_stack_from_tagged_source(self) -> None:
+        # P1 (#494 review): tag pushes (v*) must not pull stale :latest; they
+        # rebuild the full runtime stack from the tagged source.
+        self.assertIn(
+            "github.event_name == 'push' && github.ref != 'refs/heads/main'",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "Building the full runtime stack.",
+            self.integration_tests,
+        )
 
     def test_start_stack_step_no_longer_uses_build(self) -> None:
         self.assertIn("docker compose --profile indexing up -d", self.integration_tests)
