@@ -112,6 +112,7 @@ The configuration inventory follows `.env.sample`; unlisted implementation-only 
 <!-- env-inventory:start -->
 - ACTIVE_EMBED_MODEL
 - ADAPTER_ABUSEIPDB_API_KEY
+- ADAPTER_ASHBY_API_KEY
 - ADAPTER_CENSYS_API_ID
 - ADAPTER_CENSYS_API_SECRET
 - ADAPTER_HIBP_API_KEY
@@ -127,6 +128,7 @@ The configuration inventory follows `.env.sample`; unlisted implementation-only 
 - AGENT_MAX_SEARCHES_PER_REQUEST
 - AGENT_SEARCH_RATE_LIMIT
 - API_KEY
+- ASHBY_API_KEY
 - BROWSER_SVC_URL
 - BRAVE_API_KEY
 - CAPTCHA_VISION_API_KEY

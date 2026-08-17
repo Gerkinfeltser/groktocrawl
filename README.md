@@ -92,7 +92,7 @@ When the stack is running, FastAPI publishes the canonical request/response sche
 
 ## Adapters
 
-Site adapters run before the generic scraper pipeline and fall back safely to it when their specialized extraction fails. Supported categories include GitHub, YouTube, Bluesky, Substack, Gutenberg, Greenhouse, AshbyHQ, Shopify, and security/threat-intelligence sources such as NVD, CVE.org, AbuseIPDB, Shodan, VirusTotal, and VulnCheck. Configuration and extension guidance are in the [scraping guide](docs/guides/features.md#scraping-and-adapters).
+Site adapters run before the generic scraper pipeline and fall back safely to it when their specialized extraction fails. Supported categories include GitHub, YouTube, Bluesky, Substack, Gutenberg, Greenhouse, AshbyHQ (official posting API with SSR fallback), Shopify, and security/threat-intelligence sources such as NVD, CVE.org, AbuseIPDB, Shodan, VirusTotal, and VulnCheck. Configuration and extension guidance are in the [scraping guide](docs/guides/features.md#scraping-and-adapters).
 
 ## Security
 
