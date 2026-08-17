@@ -27,9 +27,25 @@ services:
 
   slopsearx-mcp:
     image: ghcr.io/magnus919/slopsearx:latest
-    entrypoint: ["python"]
-    command: ["-m", "slopsearx.mcp"]
+    # The MCP companion must never run unauthenticated, but a required-token
+    # guard using the Compose `:?` operator would abort a no-config
+    # `docker compose up` at load time (Compose interpolates the whole file
+    # regardless of profiles). Instead the token defaults to empty and this
+    # wrapper refuses to start the server when it is missing.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -z "$MCP_AUTH_TOKEN" ]; then
+          echo "error: SLOPSEARX_MCP_AUTH_TOKEN must be set to a non-empty value when the mcp profile is enabled" >&2
+          exit 1
+        fi
+        exec python -m slopsearx.mcp
     restart: unless-stopped
+    # Opt-in: this companion exposes direct SlopSearX search-engine tools, so it
+    # runs only when the `mcp` profile is enabled (`docker compose --profile mcp up`).
+    # Auth is still required: see MCP_AUTH_TOKEN below.
+    profiles:
+      - mcp
     ports:
       - "${SLOPSEARX_MCP_PORT:-8007}:8000"
     environment:
@@ -38,7 +54,7 @@ services:
       - MCP_TRANSPORT=http
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8000
-      - MCP_AUTH_TOKEN=${SLOPSEARX_MCP_AUTH_TOKEN:?SLOPSEARX_MCP_AUTH_TOKEN must be set}
+      - MCP_AUTH_TOKEN=${SLOPSEARX_MCP_AUTH_TOKEN:-}
       - MCP_GRANT_JOBS=${MCP_GRANT_JOBS:-1}
       - MCP_GRANT_SCIENCE=${MCP_GRANT_SCIENCE:-1}
       - MCP_GRANT_RESEARCH=${MCP_GRANT_RESEARCH:-1}

@@ -2,9 +2,9 @@
 
 ## Services and profiles
 
-`docker compose up -d` starts the production service graph. `docker compose --profile fixture up --build -d` additionally starts `llm-svc`, `test-site`, and `tier3-fixture` for local evaluation. Semantic indexing is optional and best-effort on constrained hosts; before first enabling it, create the external model-cache volume with `docker volume create hf-cache`, then start `semantic-svc` and Qdrant with `docker compose --profile indexing up -d`. Without that profile, ordinary scrape and keyword/deep search continue, while vector and hybrid-vector retrieval, semantic/hybrid reranking, `/v2/find-similar`, and semantic-backed research-memory indexing are unavailable. The main public ports are agent API `8080`, portal `8082`, scraper `8001`, semantic service `8003` when indexing is enabled, SlopSearX `8081`, GroktoCrawl MCP `8002`, and direct SlopSearX MCP `8007` by default.
+`docker compose up -d` starts the production service graph. `docker compose --profile fixture up --build -d` additionally starts `llm-svc`, `test-site`, and `tier3-fixture` for local evaluation. Semantic indexing is optional and best-effort on constrained hosts; before first enabling it, create the external model-cache volume with `docker volume create hf-cache`, then start `semantic-svc` and Qdrant with `docker compose --profile indexing up -d`. Without that profile, ordinary scrape and keyword/deep search continue, while vector and hybrid-vector retrieval, semantic/hybrid reranking, `/v2/find-similar`, and semantic-backed research-memory indexing are unavailable. The main public ports are agent API `8080`, portal `8082`, scraper `8001`, semantic service `8003` when indexing is enabled, SlopSearX `8081`, GroktoCrawl MCP `8002`, and direct SlopSearX MCP `8007` when the `mcp` profile is enabled.
 
-`agent-svc` coordinates requests; `scraper-svc` fetches content; optional `semantic-svc` uses Qdrant; Valkey stores operational state; SlopSearX discovers web results; `browser-svc`, `parse-svc`, `portal-svc`, `mcp-svc`, `slopsearx-mcp`, and Ofelia provide specialized capabilities. `mcp-svc` exposes GroktoCrawl API tools; the default-on `slopsearx-mcp` companion exposes direct SlopSearX search-engine tools. The [architecture guide](../architecture.md) describes ownership and data flow.
+`agent-svc` coordinates requests; `scraper-svc` fetches content; optional `semantic-svc` uses Qdrant; Valkey stores operational state; SlopSearX discovers web results; `browser-svc`, `parse-svc`, `portal-svc`, `mcp-svc`, `slopsearx-mcp`, and Ofelia provide specialized capabilities. `mcp-svc` exposes GroktoCrawl API tools; the opt-in `slopsearx-mcp` companion exposes direct SlopSearX search-engine tools when the `mcp` profile is enabled. The [architecture guide](../architecture.md) describes ownership and data flow.
 
 ## Configuration
 
@@ -14,8 +14,8 @@ Only expose or override internal service URLs when deliberately splitting the co
 
 ### Direct SlopSearX MCP grants
 
-`slopsearx-mcp` is part of the normal production graph and requires a non-empty
-`SLOPSEARX_MCP_AUTH_TOKEN`; Compose fails clearly when it is absent. Its host
+`slopsearx-mcp` is an opt-in companion started with `docker compose --profile mcp up`. It requires a non-empty
+`SLOPSEARX_MCP_AUTH_TOKEN`; the container refuses to start without it (a no-config `docker compose up` does not abort). Its host
 port is `SLOPSEARX_MCP_PORT` (default `8007`). The companion shares the normal
 Brave credential and Valkey service wiring, but no grant creates credentials or
 bypasses HTTP MCP authentication.

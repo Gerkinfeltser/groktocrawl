@@ -10,10 +10,10 @@ Choose your path. Both run the same Docker stack defined in `docker-compose.yml`
 
 The fastest end-to-end smoke test, with no external credentials. The `fixture` profile starts a local LLM fixture (`llm-svc`) and two fixture test sites (`test-site`, `tier3-fixture`).
 
-**Config:** copy `.env.sample` to `.env` and set a non-empty `SLOPSEARX_MCP_AUTH_TOKEN` (used by the default `slopsearx-mcp` service; Compose fails if it is unset).
+**Config:** copy `.env.sample` to `.env`. No credentials are required; the optional direct SlopSearX MCP companion (`slopsearx-mcp`) is opt-in via the `mcp` Compose profile and only then needs a non-empty `SLOPSEARX_MCP_AUTH_TOKEN`.
 
 ```bash
-cp .env.sample .env   # set SLOPSEARX_MCP_AUTH_TOKEN
+cp .env.sample .env
 docker compose --profile fixture up --build -d
 curl http://localhost:8080/health
 ./groktocrawl scrape https://example.com
@@ -25,10 +25,10 @@ curl http://localhost:8080/health
 
 The same stack pointed at a real LLM provider, an open-web search backend, and a hardened API — without the fixture-only services.
 
-**Config (in `.env`):** an OpenAI-compatible LLM provider (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`), `BRAVE_API_KEY` for web search, `API_KEY` for API authentication, and a non-empty `SLOPSEARX_MCP_AUTH_TOKEN`. `llm-svc`, `test-site`, and `tier3-fixture` are fixture-only and must **not** be started in production; omit the `fixture` profile.
+**Config (in `.env`):** an OpenAI-compatible LLM provider (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`), `BRAVE_API_KEY` for web search, and `API_KEY` for API authentication. `llm-svc`, `test-site`, and `tier3-fixture` are fixture-only and must **not** be started in production; omit the `fixture` profile. The optional direct SlopSearX MCP companion (`slopsearx-mcp`) is opt-in via the `mcp` Compose profile and then requires a non-empty `SLOPSEARX_MCP_AUTH_TOKEN`.
 
 ```bash
-cp .env.sample .env   # set LLM_BASE_URL/LLM_API_KEY/LLM_MODEL, BRAVE_API_KEY, API_KEY, SLOPSEARX_MCP_AUTH_TOKEN
+cp .env.sample .env   # set LLM_BASE_URL/LLM_API_KEY/LLM_MODEL, BRAVE_API_KEY, API_KEY
 docker compose up --build -d
 curl http://localhost:8080/health
 ./groktocrawl scrape https://example.com
