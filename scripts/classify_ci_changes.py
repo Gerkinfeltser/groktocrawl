@@ -41,14 +41,16 @@ def _is_docs_only(path: str) -> bool:
     """Return whether a path is documentation-only.
 
     A path is docs-only when it is an allowlisted root-level prose file, sits
-    under a docs-only prefix, or is a root-level markdown file (e.g. ROADMAP.md,
-    CHANGELOG.md). Any other root-level file (e.g. requirements.txt) stays
-    runtime-relevant and preserves the unknown-path escalation.
+    under a docs-only prefix, or is markdown at the repo root or under
+    ``.github/`` (e.g. ROADMAP.md, CHANGELOG.md, .github/PULL_REQUEST_TEMPLATE.md).
+    Any other root-level file (e.g. requirements.txt) stays runtime-relevant and
+    preserves the unknown-path escalation.
     """
     return (
         path in DOCS_ONLY_FILES
         or path.startswith(DOCS_ONLY_PREFIXES)
         or ("/" not in path and path.endswith(".md"))
+        or (path.startswith(".github/") and path.endswith(".md"))
     )
 
 

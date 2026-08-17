@@ -97,13 +97,30 @@ class CiChangeClassificationTests(unittest.TestCase):
         self.assertEqual(MODULE.affected_services(["docs/guides/ci.md"]), frozenset())
 
     def test_root_level_markdown_files_are_docs_only(self) -> None:
-        # #561: a root-level *.md (e.g. ROADMAP.md, CHANGELOG.md, LICENSE.md) is
+        # #561: a root-level *.md (e.g. ROADMAP.md, CHANGELOG.md, SECURITY.md) is
         # documentation, not runtime code, so it must not require full runtime
         # validation nor trigger any image rebuild.
-        for path in ("ROADMAP.md", "CHANGELOG.md", "LICENSE.md"):
+        for path in ("ROADMAP.md", "CHANGELOG.md", "SECURITY.md", "VISION.md"):
             with self.subTest(path=path):
                 self.assertFalse(MODULE.requires_full_runtime([path]))
                 self.assertEqual(MODULE.affected_services([path]), frozenset())
+
+    def test_github_markdown_files_are_docs_only(self) -> None:
+        # #561: prose markdown under .github/ (e.g. PULL_REQUEST_TEMPLATE.md) is
+        # documentation too, mirroring the existing .github/ISSUE_TEMPLATE/ prefix.
+        # Non-markdown workflow/config files under .github/ still escalate.
+        self.assertFalse(
+            MODULE.requires_full_runtime([".github/PULL_REQUEST_TEMPLATE.md"])
+        )
+        self.assertEqual(
+            MODULE.affected_services([".github/PULL_REQUEST_TEMPLATE.md"]),
+            frozenset(),
+        )
+        self.assertTrue(MODULE.requires_full_runtime([".github/workflows/docker.yml"]))
+        self.assertEqual(
+            MODULE.affected_services([".github/workflows/docker.yml"]),
+            frozenset({"all"}),
+        )
 
     def test_root_level_markdown_is_ignored_in_mixed_set(self) -> None:
         self.assertEqual(
