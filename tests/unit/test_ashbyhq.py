@@ -212,6 +212,74 @@ def test_listing_empty():
     assert "Job Openings" in markdown
 
 
+def test_api_listing_escapes_pipe_in_cell():
+    # VAL-FU-003: a title containing a pipe must render as one cell, not
+    # split the table into extra columns.
+    job = {
+        "id": JOB_1_UUID,
+        "title": "Engineer | Senior",
+        "department": "Product",
+        "team": "Engineering",
+        "location": "North America",
+        "secondaryLocations": [],
+        "workplaceType": "Hybrid",
+        "employmentType": "FullTime",
+        "compensation": {},
+    }
+    markdown, _ = _format_api_listing([job], "acme")
+    assert "| Engineer \\| Senior |" in markdown
+    # The title pipe is escaped, so the data row keeps the same number of
+    # cells as the header (7 columns) instead of splitting into an extra one.
+    header = next(line for line in markdown.splitlines() if line.startswith("| Title"))
+    row = next(line for line in markdown.splitlines() if line.startswith("| Engineer"))
+    assert row.count(" | ") == header.count(" | ")
+
+
+def test_api_listing_escapes_newline_in_cell():
+    # VAL-FU-003: a location containing a newline must render as a single
+    # escaped cell rather than breaking onto a new line.
+    job = {
+        "id": JOB_1_UUID,
+        "title": "Engineer",
+        "department": "Product",
+        "team": "Engineering",
+        "location": "North America",
+        "secondaryLocations": ["San Francisco\nCA"],
+        "workplaceType": "Hybrid",
+        "employmentType": "FullTime",
+        "compensation": {},
+    }
+    markdown, _ = _format_api_listing([job], "acme")
+    assert "San Francisco<br>CA" in markdown
+    # Only the header (2 rows) and this job row plus blank/spacer lines; the
+    # newline must not have introduced an extra table row.
+    table_lines = [line for line in markdown.splitlines() if line.startswith("|")]
+    assert len(table_lines) == 3  # header, separator, single data row
+
+
+def test_api_job_escapes_pipe_and_newline_in_cells():
+    # VAL-FU-003: individual-job detail table cells must escape pipes and
+    # newlines in title/location so the table stays intact.
+    job = {
+        "id": JOB_1_UUID,
+        "title": "Engineer\nSenior",
+        "department": "Product",
+        "team": "Engineering",
+        "location": "NYC|Remote",
+        "secondaryLocations": [],
+        "workplaceType": "Hybrid",
+        "employmentType": "FullTime",
+        "publishedAt": "2024-01-15T10:00:00.000+00:00",
+        "jobUrl": f"https://jobs.ashbyhq.com/acme/{JOB_1_UUID}",
+        "descriptionHtml": "<p>Build great software.</p>",
+        "compensation": {},
+    }
+    markdown, _ = _format_api_job(job, "acme", JOB_1_UUID)
+    assert "| **Location** | NYC\\|Remote |" in markdown
+    # A field with a newline must not inject a line break into the table.
+    assert "| Field | Value |" in markdown
+
+
 # ── Dispatch: listing vs individual (VAL-ASHBY-010) ──────────────
 
 
