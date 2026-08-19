@@ -59,6 +59,92 @@ class CiChangeClassificationTests(unittest.TestCase):
         self.assertTrue(MODULE.requires_full_runtime([""]))
         self.assertTrue(MODULE.requires_full_runtime(["  "]))
 
+    def test_affected_services_maps_only_changed_runtime_services(self) -> None:
+        self.assertEqual(
+            MODULE.affected_services(["agent-svc/agent/app.py"]),
+            frozenset({"agent-svc"}),
+        )
+        self.assertEqual(
+            MODULE.affected_services(
+                ["scraper-svc/scraper/fetch.py", "parse-svc/parse_svc/app.py"]
+            ),
+            frozenset({"scraper-svc", "parse-svc"}),
+        )
+
+    def test_affected_services_escalates_cross_cutting_paths_to_all(self) -> None:
+        for path in ("docker-compose.yml", "common/models.py"):
+            with self.subTest(path=path):
+                self.assertEqual(MODULE.affected_services([path]), frozenset({"all"}))
+
+    def test_affected_services_escalates_unrecognized_runtime_paths_to_all(
+        self,
+    ) -> None:
+        for path in (
+            "notes.txt",
+            "requirements.txt",
+            "scripts/check-docs-surface.py",
+            ".github/workflows/docker.yml",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(MODULE.affected_services([path]), frozenset({"all"}))
+
+    def test_affected_services_escalates_empty_and_malformed_input_to_all(self) -> None:
+        self.assertEqual(MODULE.affected_services([]), frozenset({"all"}))
+        self.assertEqual(MODULE.affected_services([""]), frozenset({"all"}))
+        self.assertEqual(MODULE.affected_services(["  "]), frozenset({"all"}))
+
+    def test_affected_services_docs_only_paths_are_ignored(self) -> None:
+        self.assertEqual(MODULE.affected_services(["docs/guides/ci.md"]), frozenset())
+
+    def test_root_level_markdown_files_are_docs_only(self) -> None:
+        # #561: a root-level *.md (e.g. ROADMAP.md, CHANGELOG.md, SECURITY.md) is
+        # documentation, not runtime code, so it must not require full runtime
+        # validation nor trigger any image rebuild.
+        for path in ("ROADMAP.md", "CHANGELOG.md", "SECURITY.md", "VISION.md"):
+            with self.subTest(path=path):
+                self.assertFalse(MODULE.requires_full_runtime([path]))
+                self.assertEqual(MODULE.affected_services([path]), frozenset())
+
+    def test_github_markdown_files_are_docs_only(self) -> None:
+        # #561: prose markdown under .github/ (e.g. PULL_REQUEST_TEMPLATE.md) is
+        # documentation too, mirroring the existing .github/ISSUE_TEMPLATE/ prefix.
+        # Non-markdown workflow/config files under .github/ still escalate.
+        self.assertFalse(
+            MODULE.requires_full_runtime([".github/PULL_REQUEST_TEMPLATE.md"])
+        )
+        self.assertEqual(
+            MODULE.affected_services([".github/PULL_REQUEST_TEMPLATE.md"]),
+            frozenset(),
+        )
+        self.assertTrue(MODULE.requires_full_runtime([".github/workflows/docker.yml"]))
+        self.assertEqual(
+            MODULE.affected_services([".github/workflows/docker.yml"]),
+            frozenset({"all"}),
+        )
+
+    def test_root_level_markdown_is_ignored_in_mixed_set(self) -> None:
+        self.assertEqual(
+            MODULE.affected_services(["ROADMAP.md", "agent-svc/agent/app.py"]),
+            frozenset({"agent-svc"}),
+        )
+        self.assertTrue(
+            MODULE.requires_full_runtime(["ROADMAP.md", "agent-svc/agent/app.py"])
+        )
+
+    def test_root_level_non_markdown_still_escalates(self) -> None:
+        # The root-*.md extension must not swallow unknown root-level files:
+        # only markdown becomes docs-only; anything else escalates to all.
+        for path in ("requirements.txt", "notes.txt", "Makefile"):
+            with self.subTest(path=path):
+                self.assertTrue(MODULE.requires_full_runtime([path]))
+                self.assertEqual(MODULE.affected_services([path]), frozenset({"all"}))
+
+    def test_affected_services_ignores_docs_paths_in_mixed_set(self) -> None:
+        self.assertEqual(
+            MODULE.affected_services(["docs/guides/ci.md", "agent-svc/agent/app.py"]),
+            frozenset({"agent-svc"}),
+        )
+
     def test_cli_reads_stdin_and_prints_boolean(self) -> None:
         result = subprocess.run(
             [sys.executable, str(CLASSIFIER)],
@@ -84,6 +170,16 @@ class CiChangeClassificationTests(unittest.TestCase):
         )
         self.assertEqual(result.stdout, "true\n")
 
+    def test_cli_classifies_root_markdown_as_docs_only(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(CLASSIFIER)],
+            input="ROADMAP.md\n",
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        self.assertEqual(result.stdout, "false\n")
+
 
 class RuntimeGateWorkflowContractTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -91,6 +187,11 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
         self.build_and_push = workflow.split("\n  build-and-push:\n", maxsplit=1)[
             1
         ].split("\n  integration-tests:\n", maxsplit=1)[0]
+        self.build_matrix_services = {
+            line.split("service:", 1)[1].strip()
+            for line in self.build_and_push.splitlines()
+            if line.strip().startswith("- service:")
+        }
         self.integration_tests = workflow.split("\n  integration-tests:\n", maxsplit=1)[
             1
         ].split("\n  runtime-gate:\n", maxsplit=1)[0]
@@ -115,12 +216,14 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
         changes_result: str,
         requires_full_runtime: str,
         build_result: str,
+        fork: bool,
     ) -> bool:
-        """Evaluate the workflow's two supported integration-test lanes."""
+        """Evaluate the workflow's integration-test lanes (PR, fork-PR, push)."""
         return (
             event_name == "pull_request"
             and changes_result == "success"
             and requires_full_runtime == "true"
+            and not fork
         ) or (event_name == "push" and build_result == "success")
 
     def test_docker_build_matrix_is_push_only(self) -> None:
@@ -129,12 +232,22 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
         self.assertIn("- service: agent-svc", self.build_and_push)
         self.assertIn("- service: scraper-svc", self.build_and_push)
 
+    def test_runtime_services_match_build_and_push_matrix(self) -> None:
+        # Contract (#561): the classifier's RUNTIME_SERVICES must exactly mirror
+        # the docker.yml build-and-push image matrix. A service added to the
+        # compose/build matrix but not to RUNTIME_SERVICES would silently break
+        # service-local PR builds and runtime classification, so this guard keeps
+        # the two from drifting apart.
+        self.assertTrue(self.build_matrix_services)
+        self.assertEqual(set(MODULE.RUNTIME_SERVICES), self.build_matrix_services)
+
     def test_docs_only_pull_request_cannot_run_integration_tests(self) -> None:
         self.assertEqual(
             self.integration_condition,
             "always() && ((github.event_name == 'pull_request' && "
             "needs.changes.result == 'success' && "
-            "needs.changes.outputs.requires_full_runtime == 'true') || "
+            "needs.changes.outputs.requires_full_runtime == 'true' && "
+            "github.event.pull_request.head.repo.fork == false) || "
             "(github.event_name == 'push' && needs.build-and-push.result == 'success'))",
         )
         self.assertFalse(
@@ -143,6 +256,7 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
                 changes_result="success",
                 requires_full_runtime="false",
                 build_result="skipped",
+                fork=False,
             )
         )
 
@@ -153,6 +267,22 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
                 changes_result="success",
                 requires_full_runtime="true",
                 build_result="skipped",
+                fork=False,
+            )
+        )
+
+    def test_fork_pull_request_cannot_run_integration_tests(self) -> None:
+        self.assertIn(
+            "github.event.pull_request.head.repo.fork == false",
+            self.integration_condition,
+        )
+        self.assertFalse(
+            self.integration_tests_runs_for(
+                event_name="pull_request",
+                changes_result="success",
+                requires_full_runtime="true",
+                build_result="skipped",
+                fork=True,
             )
         )
 
@@ -169,6 +299,82 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
             'changed_paths=$(git diff --name-only "$base" "$head")',
             self.pull_request_classification,
         )
+
+    def test_changes_job_exposes_affected_services_output(self) -> None:
+        self.assertIn(
+            "affected_services: ${{ steps.classify.outputs.affected_services }}",
+            self.changes,
+        )
+        self.assertIn(
+            "--affected-services",
+            self.changes,
+        )
+        self.assertIn(
+            'echo "affected_services=$affected_services" >> "$GITHUB_OUTPUT"',
+            self.changes,
+        )
+
+    def test_pr_build_step_is_service_local_and_gated_on_affected_services(
+        self,
+    ) -> None:
+        self.assertIn(
+            "Build service images (service-local PR build / tag-push full build)",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "needs.changes.outputs.affected_services",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "docker compose --profile indexing build $affected",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "docker compose --profile indexing build",
+            self.integration_tests,
+        )
+        self.assertIn("github.event_name == 'pull_request'", self.integration_tests)
+
+    def test_pr_lane_pulls_published_images_before_service_local_build(self) -> None:
+        # Reproducibility (#494): before the service-local PR build, the stack is
+        # refreshed from the latest published images so unchanged services match a
+        # known commit; GHCR login runs for pull_request events.
+        self.assertIn("Pull freshly published service images", self.integration_tests)
+        self.assertIn("docker compose --profile indexing pull", self.integration_tests)
+        self.assertIn(
+            "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+            self.integration_tests,
+        )
+        self.assertIn("github.event_name == 'pull_request'", self.integration_tests)
+
+    def test_main_push_pulls_published_images_without_rebuilding(self) -> None:
+        self.assertIn("Pull freshly published service images", self.integration_tests)
+        self.assertIn("docker compose --profile indexing pull", self.integration_tests)
+        self.assertIn(
+            "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+            self.integration_tests,
+        )
+
+    def test_tag_push_builds_full_stack_from_tagged_source(self) -> None:
+        # P1 (#494 review): tag pushes (v*) must not pull stale :latest; they
+        # rebuild the full runtime stack from the tagged source.
+        self.assertIn(
+            "github.event_name == 'push' && github.ref != 'refs/heads/main'",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "Building the full runtime stack.",
+            self.integration_tests,
+        )
+
+    def test_start_stack_step_no_longer_uses_build(self) -> None:
+        self.assertIn("docker compose --profile indexing up -d", self.integration_tests)
+        self.assertNotIn(
+            "docker compose --profile indexing up --build -d", self.integration_tests
+        )
+        # The only `up` is build-less: no event rebuilds the full stack on top of
+        # an already-provisioned image set.
+        self.assertNotIn("up --build", self.integration_tests)
 
     def test_integration_test_staging_copies_only_required_contract_inputs(
         self,
@@ -259,6 +465,20 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
         )
         self.assertIn(
             "needs.changes.outputs.requires_full_runtime == 'false'", self.runtime_gate
+        )
+
+    def test_fork_pr_runtime_gate_succeeds_noop(self) -> None:
+        self.assertIn("if: always()", self.runtime_gate)
+        self.assertIn(
+            "Fork pull request: self-hosted integration skipped for security.",
+            self.runtime_gate,
+        )
+        # Pin the fork exclusion to the fail-when-runtime-failed step
+        # specifically (the closing paren before `&&` only appears there, not in
+        # the summarize-fork step), so removing it regresses this test.
+        self.assertIn(
+            "github.event.pull_request.head.repo.fork == true) &&",
+            self.runtime_gate,
         )
 
     def test_runtime_gate_fails_when_classification_or_required_runtime_fails(

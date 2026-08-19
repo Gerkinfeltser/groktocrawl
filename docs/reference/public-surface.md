@@ -99,6 +99,7 @@ DELETE /v2/session/{session_id}
 - scraper-svc
 - semantic-svc
 - slopsearx
+- slopsearx-mcp
 - test-site
 - tier3-fixture
 - valkey
@@ -111,6 +112,7 @@ The configuration inventory follows `.env.sample`; unlisted implementation-only 
 <!-- env-inventory:start -->
 - ACTIVE_EMBED_MODEL
 - ADAPTER_ABUSEIPDB_API_KEY
+- ADAPTER_ASHBY_API_KEY
 - ADAPTER_CENSYS_API_ID
 - ADAPTER_CENSYS_API_SECRET
 - ADAPTER_HIBP_API_KEY
@@ -126,6 +128,7 @@ The configuration inventory follows `.env.sample`; unlisted implementation-only 
 - AGENT_MAX_SEARCHES_PER_REQUEST
 - AGENT_SEARCH_RATE_LIMIT
 - API_KEY
+- ASHBY_API_KEY
 - BROWSER_SVC_URL
 - BRAVE_API_KEY
 - CAPTCHA_VISION_API_KEY
@@ -156,7 +159,12 @@ The configuration inventory follows `.env.sample`; unlisted implementation-only 
 - LOG_LEVEL
 - MCP_ALLOWED_HOSTS
 - MCP_ALLOWED_ORIGINS
+- MCP_GRANT_JOBS
+- MCP_GRANT_RESEARCH
+- MCP_GRANT_SCIENCE
+- MCP_GRANT_SECURITY
 - MCP_PORT
+- MCP_TARGETED_SENSITIVE_ALLOWED
 - NEAR_DUP_MODE
 - NEAR_DUP_THRESHOLD
 - QDRANT_URL
@@ -177,6 +185,8 @@ The configuration inventory follows `.env.sample`; unlisted implementation-only 
 - SCRAPER_PRIVATE_URL_ALLOWLIST
 - SCRAPER_PROXY_URL
 - SCRAPER_URL
+- SLOPSEARX_MCP_AUTH_TOKEN
+- SLOPSEARX_MCP_PORT
 - SCRAPE_CACHE_DOMAIN_TTLS
 - SCRAPE_CACHE_MAX_TTL
 - SCRAPE_CACHE_MIN_TTL

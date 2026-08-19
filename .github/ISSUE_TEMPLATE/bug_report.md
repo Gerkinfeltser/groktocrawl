@@ -7,6 +7,10 @@ assignees: ''
 
 ---
 
+> **Before you file:** bugs and features are triaged best-effort with **no
+> response SLA**. See [Contribution intake](https://github.com/groktopus/groktocrawl/blob/main/CONTRIBUTING.md#contribution-intake-and-triage)
+> and the [roadmap](https://github.com/groktopus/groktocrawl/blob/main/docs/roadmap.md).
+
 ## Bug Description
 
 A clear, concise description of the bug.

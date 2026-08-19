@@ -27,6 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       requires_full_runtime: ${{ steps.classify.outputs.requires_full_runtime }}
+      affected_services: ${{ steps.classify.outputs.affected_services }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -56,6 +57,8 @@ jobs:
 
           requires_full_runtime=$(printf '%s\n' "$changed_paths" | python3 scripts/classify_ci_changes.py)
           echo "requires_full_runtime=$requires_full_runtime" >> "$GITHUB_OUTPUT"
+          affected_services=$(printf '%s\n' "$changed_paths" | python3 scripts/classify_ci_changes.py --affected-services)
+          echo "affected_services=$affected_services" >> "$GITHUB_OUTPUT"
 
   build-and-push:
     name: ${{ matrix.service }}
@@ -90,7 +93,7 @@ jobs:
             image: ghcr.io/groktopus/groktocrawl-parse
           - service: mcp-svc
             context: mcp-svc
-            dockerfile: Dockerfile
+            dockerfile: mcp-svc/Dockerfile
             image: ghcr.io/groktopus/groktocrawl-mcp
       max-parallel: 2
 
@@ -164,9 +167,16 @@ jobs:
   integration-tests:
     name: Integration Tests
     needs: [changes, build-and-push]
+    # The fork guard (mirroring droid-review.yml) keeps untrusted fork PR code off the
+    # self-hosted runner. This is a best-effort in-workflow control: on `pull_request`
+    # events GitHub runs the workflow from the PR merge ref, so a fork that edits this
+    # file could bypass the guard. The authoritative, non-bypassable control is
+    # platform-level (deny fork PRs to the runner group / require workflow approval for
+    # outside collaborators), which is outside this repo and must be configured there.
     if: >-
       always() && ((github.event_name == 'pull_request' && needs.changes.result == 'success' &&
-      needs.changes.outputs.requires_full_runtime == 'true') ||
+      needs.changes.outputs.requires_full_runtime == 'true' &&
+      github.event.pull_request.head.repo.fork == false) ||
       (github.event_name == 'push' && needs.build-and-push.result == 'success'))
     runs-on: [self-hosted, groktopus, docker]
     concurrency:
@@ -194,6 +204,8 @@ jobs:
           # mcp-svc DNS-rebinding allowlist: include the compose service name
           # so the integration lane exercises a real non-loopback Host path.
           echo "MCP_ALLOWED_HOSTS=localhost:*,127.0.0.1:*,[::1]:*,mcp-svc:*" >> .env
+          # slopsearx-mcp is an opt-in profile-gated companion; it is not run in
+          # the integration lane, so no token is needed here.
 
       - name: Force-remove all stale project containers
         run: docker ps -a --filter name=groktocrawl -q | xargs -r docker rm -f || true
@@ -204,8 +216,57 @@ jobs:
       - name: Ensure HF model cache volume exists
         run: docker volume inspect hf-cache || docker volume create hf-cache
 
+      # Image provisioning is decoupled from stack startup so each service image
+      # is built at most once per event (except release tag pushes, which must
+      # both publish semver tags and validate the tagged source):
+      #   - main push: build-and-push already built and published every image, so
+      #     this job pulls the freshly published :latest tags (no rebuild).
+      #   - PR: pulls the latest published images for unchanged services (so the
+      #     stack matches a known commit), then builds only the images for
+      #     services whose paths changed (service-local), gated on the
+      #     classifier's affected-services output; unknown/cross-cutting runtime
+      #     paths escalate to a full rebuild.
+      #   - tag push (v*): build-and-push published only semver tags, so this job
+      #     builds the full runtime stack from the tagged source.
+      - name: Log in to GitHub Container Registry
+        if: >-
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          github.event_name == 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull freshly published service images
+        if: >-
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          github.event_name == 'pull_request'
+        run: |
+          # Best-effort refresh of the published image set. A service may not
+          # have a published tag yet (e.g. a newly added service), which fails
+          # its manifest lookup; tolerate that and let the build/up steps build
+          # the missing image from source instead.
+          docker compose --profile indexing pull || true
+        timeout-minutes: 10
+
+      - name: Build service images (service-local PR build / tag-push full build)
+        if: >-
+          github.event_name == 'pull_request' ||
+          (github.event_name == 'push' && github.ref != 'refs/heads/main')
+        run: |
+          affected="${{ needs.changes.outputs.affected_services }}"
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ -n "$affected" ] && [ "$affected" != "all" ]; then
+            echo "Service-local PR build for: $affected"
+            docker compose --profile indexing build $affected
+          else
+            echo "Building the full runtime stack."
+            docker compose --profile indexing build
+          fi
+        timeout-minutes: 10
+
       - name: Start the Docker stack
-        run: docker compose --profile indexing up --build -d
+        run: docker compose --profile indexing up -d
         timeout-minutes: 10
 
       - name: Start test fixtures
@@ -344,7 +405,7 @@ jobs:
 
       - name: Critical journey smoke
         run: |
-          docker compose exec -T agent-svc pip install pytest pytest-asyncio pytest-cov pytest-timeout jinja2 python-docx python-pptx openpyxl tabulate markdownify==1.2.3 readability-lxml==0.8.4.1 -q
+          docker compose exec -T agent-svc pip install pytest pytest-asyncio pytest-cov pytest-timeout jinja2 tabulate markdownify==1.2.3 readability-lxml==0.8.4.1 firecrawl-anydoc==0.1.9 pypdf -q
           docker compose exec -T agent-svc mkdir -p /app/coverage
           set +e
           docker compose exec -T agent-svc env \
@@ -383,7 +444,7 @@ jobs:
 
       - name: Run integration tests
         run: |
-          docker compose exec -T agent-svc pip install pytest pytest-asyncio pytest-cov pytest-xdist pytest-timeout jinja2 python-docx python-pptx openpyxl tabulate markdownify==1.2.3 readability-lxml==0.8.4.1 PyYAML -q
+          docker compose exec -T agent-svc pip install pytest pytest-asyncio pytest-cov pytest-xdist pytest-timeout jinja2 tabulate markdownify==1.2.3 readability-lxml==0.8.4.1 firecrawl-anydoc==0.1.9 pypdf PyYAML -q
           docker compose exec -T agent-svc mkdir -p /app/coverage
           set +e
           docker compose exec -T agent-svc env \
@@ -536,6 +597,12 @@ jobs:
           needs.changes.outputs.requires_full_runtime == 'false'
         run: echo "Runtime integration was intentionally not needed for this docs-only pull request."
 
+      - name: Summarize fork pull request (integration skipped)
+        if: >-
+          github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true &&
+          needs.changes.result == 'success'
+        run: 'echo "Fork pull request: self-hosted integration skipped for security."'
+
       - name: Summarize successful runtime validation
         if: >-
           github.event_name == 'pull_request' && needs.changes.result == 'success' &&
@@ -556,6 +623,8 @@ jobs:
           needs.changes.result == 'success' &&
           !(github.event_name == 'pull_request' &&
           needs.changes.outputs.requires_full_runtime == 'false') &&
+          !(github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.fork == true) &&
           needs.integration-tests.result != 'success'
         run: |
           echo "Required runtime integration did not complete successfully."

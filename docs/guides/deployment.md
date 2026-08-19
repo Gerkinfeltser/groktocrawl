@@ -2,15 +2,36 @@
 
 ## Services and profiles
 
-`docker compose up -d` starts the production service graph. `docker compose --profile fixture up --build -d` additionally starts `llm-svc`, `test-site`, and `tier3-fixture` for local evaluation. Semantic indexing is optional and best-effort on constrained hosts; before first enabling it, create the external model-cache volume with `docker volume create hf-cache`, then start `semantic-svc` and Qdrant with `docker compose --profile indexing up -d`. Without that profile, ordinary scrape and keyword/deep search continue, while vector and hybrid-vector retrieval, semantic/hybrid reranking, `/v2/find-similar`, and semantic-backed research-memory indexing are unavailable. The main public ports are agent API `8080`, portal `8082`, scraper `8001`, semantic service `8003` when indexing is enabled, SlopSearX `8081`, and MCP `8002` by default.
+`docker compose up -d` starts the production service graph. `docker compose --profile fixture up --build -d` additionally starts `llm-svc`, `test-site`, and `tier3-fixture` for local evaluation. Semantic indexing is optional and best-effort on constrained hosts; before first enabling it, create the external model-cache volume with `docker volume create hf-cache`, then start `semantic-svc` and Qdrant with `docker compose --profile indexing up -d`. Without that profile, ordinary scrape and keyword/deep search continue, while vector and hybrid-vector retrieval, semantic/hybrid reranking, `/v2/find-similar`, and semantic-backed research-memory indexing are unavailable. The main public ports are agent API `8080`, portal `8082`, scraper `8001`, semantic service `8003` when indexing is enabled, SlopSearX `8081`, GroktoCrawl MCP `8002`, and direct SlopSearX MCP `8007` when the `mcp` profile is enabled.
 
-`agent-svc` coordinates requests; `scraper-svc` fetches content; optional `semantic-svc` uses Qdrant; Valkey stores operational state; SlopSearX discovers web results; `browser-svc`, `parse-svc`, `portal-svc`, `mcp-svc`, and Ofelia provide specialized capabilities. The [architecture guide](../architecture.md) describes ownership and data flow.
+`agent-svc` coordinates requests; `scraper-svc` fetches content; optional `semantic-svc` uses Qdrant; Valkey stores operational state; SlopSearX discovers web results; `browser-svc`, `parse-svc`, `portal-svc`, `mcp-svc`, `slopsearx-mcp`, and Ofelia provide specialized capabilities. `mcp-svc` exposes GroktoCrawl API tools; the opt-in `slopsearx-mcp` companion exposes direct SlopSearX search-engine tools when the `mcp` profile is enabled. The [architecture guide](../architecture.md) describes ownership and data flow.
 
 ## Configuration
 
 Copy `.env.sample` to `.env` and configure an OpenAI-compatible LLM for non-fixture use. `BRAVE_API_KEY` is required for useful open-web search results. The [configuration inventory](../reference/public-surface.md#configuration-keys) is validated against `.env.sample`; it separates provider, service URLs, vector index, adapters, cache, politeness, search controls, crawl limits, and research-memory settings.
 
 Only expose or override internal service URLs when deliberately splitting the compose deployment. Persist Valkey and Qdrant volumes in production; the embedding model cache volume avoids repeated model downloads.
+
+### Direct SlopSearX MCP grants
+
+`slopsearx-mcp` is an opt-in companion started with `docker compose --profile mcp up`. It requires a non-empty
+`SLOPSEARX_MCP_AUTH_TOKEN`; the container refuses to start without it (a no-config `docker compose up` does not abort). Its host
+port is `SLOPSEARX_MCP_PORT` (default `8007`). The companion shares the normal
+Brave credential and Valkey service wiring, but no grant creates credentials or
+bypasses HTTP MCP authentication.
+
+All grants default to `1`: `MCP_GRANT_JOBS` controls jobs tools,
+`MCP_GRANT_SCIENCE` science tools, `MCP_GRANT_RESEARCH` research tools,
+`MCP_GRANT_SECURITY` security tools, and
+`MCP_TARGETED_SENSITIVE_ALLOWED` targeted sensitive-engine selection. Disable
+only the capability group you do not want, for example
+`MCP_GRANT_SECURITY=0` or `MCP_TARGETED_SENSITIVE_ALLOWED=0` in `.env`.
+
+The service healthcheck sends a bounded, authenticated MCP `initialize`
+request to its local Streamable HTTP endpoint. It verifies MCP protocol
+readiness without invoking search, so it does not need a provider credential
+beyond the service token. This repository tests the rendered configuration; a
+live protocol probe requires a Docker-capable deployment environment.
 
 CAPTCHA image-grid recovery is optional. Set all of `CAPTCHA_VISION_BASE_URL`,
 `CAPTCHA_VISION_API_KEY`, and `CAPTCHA_VISION_MODEL` to an OpenAI-compatible

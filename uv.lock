@@ -324,16 +324,16 @@ wheels = [
 
 [[package]]
 name = "cloakbrowser"
-version = "0.5.2"
+version = "0.5.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
     { name = "playwright" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a9/7d/d0598e63f311a8ae550c0d3c658b594a2a48571afe5177b0a8926967886f/cloakbrowser-0.5.2.tar.gz", hash = "sha256:763f7df17b9768ad613bfec430cd9d121d566d4302c6280b79f5f63273a6b5dd", size = 5641027, upload-time = "2026-07-25T06:42:55.014Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3c/66/a0f3e06aadb89f5aa8a403864bf2bce296d2eb10e5983a13a62ce19cb493/cloakbrowser-0.5.3.tar.gz", hash = "sha256:720369cf0fce12cc895e5a09f98b18f809d9c55f17f4d5f854204d720e8133c3", size = 5644946, upload-time = "2026-07-30T01:18:58.282Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3d/c0/a7d81fd6a49d1470f919f35726ddd11c1ad7efa683cf444f75ab2e8fd75d/cloakbrowser-0.5.2-py3-none-any.whl", hash = "sha256:7e9088fa38e56d4f31c630e42c47204619d39974518bb44f9dfce8401e7b50cb", size = 112056, upload-time = "2026-07-25T06:42:53.41Z" },
+    { url = "https://files.pythonhosted.org/packages/93/e8/f0d86ca18b3a1e132ffd965268f621897f60c47ea8c61b1ee9a786fffb36/cloakbrowser-0.5.3-py3-none-any.whl", hash = "sha256:9082cfd2f104342fd718d9882984da7674ef6616308dd7932bff4b8bd5cf3cfe", size = 112895, upload-time = "2026-07-30T01:18:56.523Z" },
 ]
 
 [[package]]
@@ -683,6 +683,21 @@ wheels = [
 ]
 
 [[package]]
+name = "firecrawl-anydoc"
+version = "0.1.9"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/aa/16/e37d4f284482a4f30e0502ce439a9fd8ccf013e6ae4438b4dfa209e48750/firecrawl_anydoc-0.1.9.tar.gz", hash = "sha256:0dfc64b82b4e971143dd6f0e4f39f8152fcc38be6523663682a241d8f3301b14", size = 197914, upload-time = "2026-08-13T21:48:27.989Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/42/37/866bf6270ad8552eaf6edf3b8e1a360acf3e8764140641361ae7b440514e/firecrawl_anydoc-0.1.9-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:ebd956831822d3ea1831253406736e0e4d9b217e3471eb68c9bf2eba9302ce73", size = 3469321, upload-time = "2026-08-13T21:48:16.775Z" },
+    { url = "https://files.pythonhosted.org/packages/b1/9a/8fbe0726cdf69154e1eb05c119332b1fdfd8200eeafcfd1675741ac5f03d/firecrawl_anydoc-0.1.9-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:a2372d97826e8e7e68fd28cd415d08815f6aa66dcc09c6b423ac33dd2dfa91cf", size = 3287520, upload-time = "2026-08-13T21:48:18.37Z" },
+    { url = "https://files.pythonhosted.org/packages/b0/ce/86a626224c365d8de65699d6ac8f4626ac05e7e75c3ae76c82f4904a07d2/firecrawl_anydoc-0.1.9-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:ba1c19bdaa97f4850daf3fb4ca2855cefa146b5621ce7b22a71d158d3b84e54e", size = 3331094, upload-time = "2026-08-13T21:48:19.961Z" },
+    { url = "https://files.pythonhosted.org/packages/0e/28/00d1d48fe205ab66eda4a2a22cce44aadf586ef1495e703349b791c8de32/firecrawl_anydoc-0.1.9-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:deea7a270fccda9be29c73235e938ca32e0f703e1ae120f08bf0fdb39301c6b4", size = 3555945, upload-time = "2026-08-13T21:48:21.822Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/25/ac52d98c5d082ef92396b2fcb398745a3b054816c67a12d19de86c1ba535/firecrawl_anydoc-0.1.9-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:de0858decd18188b0b88545689544fb3703ec08ade37f63c2857e4414e99bdf1", size = 3510861, upload-time = "2026-08-13T21:48:23.369Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/d3/e80314b5746c4ca85150f3ab2a527b2167012c16e706e148733211cb88b3/firecrawl_anydoc-0.1.9-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:e4e1765ed5574fa502931f8bfaec1f87af913afa5bb432aaaf5f9c094efc7f43", size = 3797896, upload-time = "2026-08-13T21:48:25.061Z" },
+    { url = "https://files.pythonhosted.org/packages/8e/d0/e7b35c2365498d5e9f1bdb4b3ded78571b6dafbaba1880538490d27b71c9/firecrawl_anydoc-0.1.9-cp310-abi3-win_amd64.whl", hash = "sha256:aa6a5ca2e10939a87c9bd21c918ef8b146ad0061fedae661d4483ef5a5bbdf60", size = 3642084, upload-time = "2026-08-13T21:48:26.702Z" },
+]
+
+[[package]]
 name = "flatbuffers"
 version = "25.12.19"
 source = { registry = "https://pypi.org/simple" }
@@ -801,6 +816,7 @@ dev = [
 fast-tests = [
     { name = "cloakbrowser" },
     { name = "curl-cffi" },
+    { name = "firecrawl-anydoc" },
     { name = "jinja2" },
     { name = "markdownify" },
     { name = "markitdown" },
@@ -850,8 +866,9 @@ dev = [
     { name = "vulture", specifier = ">=2.16" },
 ]
 fast-tests = [
-    { name = "cloakbrowser", specifier = "==0.5.2" },
+    { name = "cloakbrowser", specifier = "==0.5.3" },
     { name = "curl-cffi", specifier = ">=0.15.0" },
+    { name = "firecrawl-anydoc", specifier = "==0.1.9" },
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "markdownify", specifier = "==1.2.3" },
     { name = "markitdown", specifier = ">=0.1.0" },
@@ -868,7 +885,7 @@ fast-tests = [
     { name = "python-multipart", specifier = ">=0.0.20" },
     { name = "python-pptx", specifier = ">=1.0.0" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "qdrant-client", specifier = ">=1.13.0,<1.19.0" },
+    { name = "qdrant-client", specifier = ">=1.13.0,<1.20.0" },
     { name = "readability-lxml", specifier = "==0.8.4.1" },
     { name = "tabulate", specifier = ">=0.9.0" },
     { name = "youtube-transcript-api", specifier = ">=1.0.0" },
@@ -1648,14 +1665,11 @@ version = "0.2.0"
 source = { virtual = "parse-svc" }
 dependencies = [
     { name = "fastapi" },
-    { name = "markitdown" },
-    { name = "openpyxl" },
+    { name = "firecrawl-anydoc" },
     { name = "pillow" },
     { name = "pydantic" },
     { name = "pypdf" },
-    { name = "python-docx" },
     { name = "python-multipart" },
-    { name = "python-pptx" },
     { name = "tabulate" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -1663,14 +1677,11 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115.0" },
-    { name = "markitdown", specifier = ">=0.1.0" },
-    { name = "openpyxl", specifier = ">=3.1.0" },
+    { name = "firecrawl-anydoc", specifier = "==0.1.9" },
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "pypdf", specifier = ">=5.0.0" },
-    { name = "python-docx", specifier = ">=1.1.0" },
     { name = "python-multipart", specifier = ">=0.0.20" },
-    { name = "python-pptx", specifier = ">=1.0.0" },
     { name = "tabulate", specifier = ">=0.9.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
 ]
@@ -2445,7 +2456,7 @@ playwright = [
 [package.metadata]
 requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.13.0" },
-    { name = "cloakbrowser", specifier = "==0.5.2" },
+    { name = "cloakbrowser", specifier = "==0.5.3" },
     { name = "curl-cffi", specifier = ">=0.15.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.28.0" },
@@ -2477,7 +2488,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "numpy", specifier = ">=1.26.0" },
     { name = "pydantic", specifier = ">=2.10.0" },
-    { name = "qdrant-client", specifier = ">=1.13.0,<1.19.0" },
+    { name = "qdrant-client", specifier = ">=1.13.0,<1.20.0" },
     { name = "sentence-transformers", specifier = ">=3.0.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
 ]
