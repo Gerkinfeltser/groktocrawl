@@ -8,6 +8,13 @@
 
 ## Configuration
 
+For deterministic Compose integration runs, set
+`SEARXNG_URL=http://slopsearx-fixture:8080` and enable the fixture profile. The
+source-owned `slopsearx-fixture` is a
+versioned contract emulator with deterministic scenarios and process-local
+diagnostic state; it is not a ranking or index replica and is not a production
+default.
+
 Copy `.env.sample` to `.env` and configure an OpenAI-compatible LLM for non-fixture use. `BRAVE_API_KEY` is required for useful open-web search results. The [configuration inventory](../reference/public-surface.md#configuration-keys) is validated against `.env.sample`; it separates provider, service URLs, vector index, adapters, cache, politeness, search controls, crawl limits, and research-memory settings.
 
 Only expose or override internal service URLs when deliberately splitting the compose deployment. Persist Valkey and Qdrant volumes in production; the embedding model cache volume avoids repeated model downloads.

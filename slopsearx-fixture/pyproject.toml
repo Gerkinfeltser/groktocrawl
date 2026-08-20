@@ -1,0 +1,13 @@
+[project]
+name = "slopsearx-fixture"
+version = "0.1.0"
+description = "Deterministic SlopSearX-compatible HTTP fixture for GroktoCrawl"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "pydantic>=2.10.0",
+]
+
+[tool.deptry.per_rule_ignores]
+DEP002 = ["uvicorn"]

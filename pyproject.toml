@@ -25,6 +25,7 @@ members = [
     "portal-svc",
     "scraper-svc",
     "semantic-svc",
+    "slopsearx-fixture",
 ]
 
 [project.optional-dependencies]

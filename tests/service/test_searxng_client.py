@@ -198,6 +198,22 @@ class TestSearch:
             assert "failed" in health.detail.lower()
 
     @pytest.mark.asyncio
+    async def test_failure_diagnostics_do_not_expose_query_text(self, client, caplog):
+        secret_query = "private fixture query"
+
+        with pytest.MonkeyPatch.context() as mp:
+
+            async def mock_get(url, params=None):
+                raise ValueError(f"failed request for {secret_query}")
+
+            mp.setattr(client._client, "get", mock_get)
+
+            results, health = await client.search(secret_query)
+            assert results == []
+            assert secret_query not in health.detail
+            assert secret_query not in caplog.text
+
+    @pytest.mark.asyncio
     async def test_respects_limit(self, client):
         mock_data = {
             "results": [

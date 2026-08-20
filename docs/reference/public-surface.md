@@ -99,6 +99,7 @@ DELETE /v2/session/{session_id}
 - scraper-svc
 - semantic-svc
 - slopsearx
+- slopsearx-fixture
 - slopsearx-mcp
 - test-site
 - tier3-fixture

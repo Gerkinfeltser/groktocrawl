@@ -216,7 +216,9 @@ def test_crawl_batch_search_and_map_endpoints_exist():
     assert search.status_code == 200
     search_payload = search.json()
     assert search_payload["success"] is True
-    assert len(search_payload["data"]["web"]) >= 1
+    web_results = search_payload["data"].get("web")
+    assert isinstance(web_results, list) and web_results
+    assert all(result["url"].startswith(TEST_SITE + "/") for result in web_results)
 
     map_resp = httpx.post(
         AGENT + "/v2/map", json={"url": TEST_SITE, "limit": 10}, timeout=120

@@ -407,9 +407,15 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
             self.integration_tests,
         )
         self.assertIn(
-            "for pkg in scraper-svc/scraper parse-svc/parse_svc portal-svc/portal browser-svc/browser_svc llm-svc/llm_svc common; do",
+            "for pkg in scraper-svc/scraper parse-svc/parse_svc portal-svc/portal browser-svc/browser_svc llm-svc/llm_svc slopsearx-fixture/slopsearx_fixture common; do",
             self.integration_tests,
         )
+        self.assertIn(
+            "SEARCH_BASE_URL=http://slopsearx-fixture:8080",
+            self.integration_tests,
+        )
+        self.assertIn("Wait for slopsearx-fixture", self.integration_tests)
+        self.assertIn("Timed out waiting for slopsearx-fixture", self.integration_tests)
         self.assertIn("--cov=/app/agent", self.integration_tests)
         self.assertNotIn("--cov=/app/agent-svc/agent", self.integration_tests)
         self.assertNotIn(
