@@ -445,6 +445,10 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
         self.assertIn(
             "Run targeted source-backed agent contracts", self.integration_tests
         )
+        self.assertIn("Reset isolated test state", self.integration_tests)
+        self.assertIn("valkey-cli -n 0 FLUSHDB", self.integration_tests)
+        self.assertIn("valkey-cli -n 1 FLUSHDB", self.integration_tests)
+        reset_index = self.integration_tests.index("Reset isolated test state")
         probe_index = self.integration_tests.index(
             "Verify LLM fixture contract and agent routing"
         )
@@ -452,6 +456,7 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
             "Run targeted source-backed agent contracts"
         )
         critical_index = self.integration_tests.index("Critical journey smoke")
+        self.assertLess(reset_index, probe_index)
         self.assertLess(probe_index, targeted_index)
         self.assertLess(targeted_index, critical_index)
         self.assertNotIn(

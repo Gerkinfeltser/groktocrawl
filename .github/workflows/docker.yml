@@ -409,6 +409,11 @@ jobs:
               raise RuntimeError('Timed out waiting for agent-svc-fixture')
           "
 
+      - name: Reset isolated test state
+        run: |
+          docker compose exec -T valkey valkey-cli -n 0 FLUSHDB
+          docker compose exec -T valkey valkey-cli -n 1 FLUSHDB
+
       - name: Copy test files and source directories
         run: |
           mkdir -p coverage
