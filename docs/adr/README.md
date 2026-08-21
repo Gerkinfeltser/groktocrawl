@@ -19,7 +19,7 @@ An Architecture Decision Record captures an important architectural decision mad
 
 **Status legend:** accepted ADRs describe decisions used by the current implementation. Proposed ADRs are design work, not promises of current behavior. Superseded ADRs are historical context only; use their successor when documenting current behavior.
 
-**Current accepted decisions:** ADR-0001–0012, 0014–0022, 0026, 0029–0035, 0038, 0039, 0043, 0044, 0045, 0046, 0047, 0048, 0049, 0050, 0051, 0052, 0053, and 0054.
+**Current accepted decisions:** ADR-0001–0007, 0009–0012, 0014–0022, 0026, 0029–0035, 0038, 0039, 0043, 0044, 0045, 0046, 0047, 0048, 0049, 0050, 0051, 0052, 0053, 0054, 0055, and 0056.
 
 **Proposed work:** ADR-0023–0025, 0027, 0028, 0036, 0037, and 0040–0042.
 
@@ -32,7 +32,7 @@ An Architecture Decision Record captures an important architectural decision mad
 | 0005 | [In-Repo Adapters with Entry-Point Path Reserved](0005-in-repo-adapters-with-entry-point-path-reserved.md) | accepted |
 | 0006 | [Auto-Registration via @adapter Decorator](0006-auto-registration-via-adapter-decorator.md) | accepted |
 | 0007 | [Adapter Timeout and Circuit Breaker](0007-adapter-timeout-and-circuit-breaker.md) | accepted |
-| 0008 | [Three-Layer Testing Strategy](0008-three-layer-testing-strategy.md) | accepted |
+| 0008 | [Three-Layer Testing Strategy](0008-three-layer-testing-strategy.md) | superseded |
 | 0009 | [Zero CLI Surface Changes](0009-zero-cli-surface-changes.md) | accepted |
 | 0010 | [Five-Tier Scraper Pipeline with LLM Recovery](0010-five-tier-scraper-with-llm-recovery.md) | accepted |
 | 0011 | [Stealth Playwright Configuration](0011-stealth-playwright-configuration.md) | accepted |
@@ -80,4 +80,5 @@ An Architecture Decision Record captures an important architectural decision mad
 | 0053 | [Retryable Rate-Limit Contract](0053-retryable-rate-limit-contract.md) | accepted |
 | 0054 | [Deterministic SlopSearX Contract Fixture](0054-deterministic-slopsearx-contract-fixture.md) | accepted |
 | 0055 | [Deterministic LLM Contract Fixture](0055-deterministic-llm-contract-fixture.md) | accepted |
+| 0056 | [Twin CI Evidence and Trusted Calibration](0056-twin-ci-evidence-and-calibration.md) | accepted |
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full ADR workflow: when to write an ADR, how to number it, and how to get it reviewed in a PR.

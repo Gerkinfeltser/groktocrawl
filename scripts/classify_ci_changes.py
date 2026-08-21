@@ -10,6 +10,9 @@ Modes:
 - ``--affected-services``: prints the space-separated list of runtime service
   images that must be rebuilt for a pull request, or ``all`` when the change is
   cross-cutting/unrecognized and the full stack must be rebuilt.
+- ``--requires-twin-contracts``: prints ``true`` when deterministic twin
+  contracts are required.
+- ``--twin-test-selection``: prints ``search``, ``llm``, ``all``, or ``none``.
 """
 
 from __future__ import annotations
@@ -35,6 +38,31 @@ RUNTIME_SERVICES = (
 # Paths whose change affects every service image.
 _CROSS_CUTTING_PATHS = ("docker-compose.yml",)
 _COMMON_PREFIX = "common/"
+_TWIN_PREFIXES = (
+    "llm-svc/",
+    "slopsearx-fixture/",
+    "scenarios/",
+    "scenario/",
+    "tests/scenarios/",
+    "tests/fixtures/",
+    "provenance/",
+    "scripts/twin_",
+    "scripts/live_calibration",
+)
+_TWIN_EXACT_PATHS = frozenset(
+    {
+        "docker-compose.yml",
+        ".github/workflows/docker.yml",
+        ".github/workflows/live-calibration.yml",
+    }
+)
+_TWIN_CLIENT_SUFFIXES = (
+    "/llm.py",
+    "/searxng_client.py",
+    "/retry.py",
+    "/retry_policy.py",
+    "/caller_policy.py",
+)
 
 
 def _is_docs_only(path: str) -> bool:
@@ -94,11 +122,64 @@ def affected_services(paths: Iterable[str]) -> frozenset[str]:
     return frozenset(affected)
 
 
+def twin_test_selection(paths: Iterable[str]) -> str:
+    """Select the narrow twin lane, escalating mixed/unknown changes to all."""
+    path_list = list(paths)
+    if not path_list or any(not path.strip() for path in path_list):
+        return "all"
+    relevant = [path for path in path_list if not _is_docs_only(path)]
+    if not relevant:
+        return "none"
+    if any(
+        path in _TWIN_EXACT_PATHS or path.startswith(_TWIN_PREFIXES[2:])
+        for path in relevant
+    ):
+        return "all"
+    search = any(
+        path.startswith(
+            ("slopsearx-fixture/", "tests/integration/test_slopsearx_fixture.py")
+        )
+        or path.endswith("/searxng_client.py")
+        for path in relevant
+    )
+    llm = any(
+        path.startswith("llm-svc/")
+        or path.endswith("/llm.py")
+        or path
+        in {"tests/service/test_llm_fixture_contract.py", "tests/service/test_llm.py"}
+        for path in relevant
+    )
+    if search and llm:
+        return "all"
+    if search:
+        return "search"
+    if llm:
+        return "llm"
+    return "all"
+
+
+def requires_twin_contracts(paths: Iterable[str]) -> bool:
+    return twin_test_selection(paths) != "none"
+
+
 def main(argv: list[str]) -> int:
     if "--affected-services" in argv:
         args = [a for a in argv if a != "--affected-services"]
         paths = args or sys.stdin.read().splitlines()
         print(" ".join(sorted(affected_services(paths))))
+        return 0
+
+    if "--requires-twin-contracts" in argv or "--twin-test-selection" in argv:
+        args = [
+            a
+            for a in argv
+            if a not in {"--requires-twin-contracts", "--twin-test-selection"}
+        ]
+        paths = args or sys.stdin.read().splitlines()
+        if "--requires-twin-contracts" in argv:
+            print(str(requires_twin_contracts(paths)).lower())
+        else:
+            print(twin_test_selection(paths))
         return 0
 
     paths = argv or sys.stdin.read().splitlines()
