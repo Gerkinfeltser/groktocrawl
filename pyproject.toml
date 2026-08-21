@@ -201,6 +201,7 @@ fast-tests = [
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
     "PyYAML>=6.0",
+    "jsonschema>=4.23.0",
     # Service imports exercised by tests/unit and tests/service, excluding ML models.
     "cloakbrowser==0.5.3",
     "firecrawl-anydoc==0.1.9",

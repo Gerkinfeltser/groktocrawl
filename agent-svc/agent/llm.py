@@ -43,7 +43,7 @@ def _completion_content(result: object) -> str:
                 detail="LLM provider returned an unusable response"
             )
         content = message.get("content")
-    except (KeyError, IndexError, TypeError) as exc:
+    except (KeyError, IndexError, TypeError, AttributeError) as exc:
         raise ProviderOutputError(
             detail="LLM provider returned an invalid response"
         ) from exc
@@ -251,7 +251,13 @@ class LLMClient:
                             if token:
                                 full_content += token
                                 yield {"type": "token", "content": token}
-                        except (json.JSONDecodeError, ValueError, TypeError, KeyError):
+                        except (
+                            json.JSONDecodeError,
+                            ValueError,
+                            TypeError,
+                            KeyError,
+                            AttributeError,
+                        ):
                             outcome = "malformed"
                             yield {
                                 "type": "error",

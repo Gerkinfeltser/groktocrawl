@@ -5,6 +5,7 @@ import logging
 
 from jsonschema import SchemaError, ValidationError
 from jsonschema.validators import validator_for
+from referencing.exceptions import Unresolvable
 
 from ..exceptions import StructuredOutputError
 
@@ -32,6 +33,7 @@ def _validate_json_if_schema(answer: str, schema: dict | None) -> None:
         json.JSONDecodeError,
         SchemaError,
         ValidationError,
+        Unresolvable,
         TypeError,
         AttributeError,
         KeyError,

@@ -105,6 +105,19 @@ async def test_real_client_streams_multiple_chunkings(fixture_url: str, chunks: 
 
 
 @pytest.mark.asyncio
+async def test_default_scenario_honors_streaming_request(fixture_url: str):
+    client = _client(fixture_url)
+    try:
+        events = [event async for event in client.generate_stream("system", "question")]
+        assert events[-1]["type"] == "done"
+        assert events[-1]["full_content"] == (
+            "Synthesized answer from provided context."
+        )
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_streaming_and_polling_normalize_to_same_artifact(fixture_url: str):
     polling = _client(fixture_url)
     streaming = _client(fixture_url, "streaming", "?chunks=7")

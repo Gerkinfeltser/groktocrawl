@@ -356,6 +356,7 @@ def create_app() -> FastAPI:
         if scenario == "refusal":
             response["choices"][0]["message"]["refusal"] = "fixture refusal"
         if not req.stream or scenario not in {
+            "default",
             "streaming",
             "stream-malformed",
             "stream-truncated",

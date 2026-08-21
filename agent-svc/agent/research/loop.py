@@ -9,7 +9,11 @@ from typing import Any
 
 from common.stage_metrics import StreamTiming, observe_elapsed
 
-from ..exceptions import StructuredOutputError
+from ..exceptions import (
+    ProviderOutputError,
+    RetryableRateLimitError,
+    StructuredOutputError,
+)
 from ..llm import LLMClient
 from ..models import CitationStyle
 from ..scraper_client import ScraperClient
@@ -204,13 +208,33 @@ async def _run_research_events(
 
             yield {"type": "status", "state": "synthesizing"}
             if schema or not stream_tokens:
-                answer = await llm.generate(
-                    system_prompt=SYSTEM_PROMPT,
-                    user_prompt=prompt,
-                    context=combined_context,
-                    schema=schema,
-                    stage="synthesis",
-                )
+                try:
+                    answer = await llm.generate(
+                        system_prompt=SYSTEM_PROMPT,
+                        user_prompt=prompt,
+                        context=combined_context,
+                        schema=schema,
+                        stage="synthesis",
+                    )
+                except RetryableRateLimitError as exc:
+                    if stream_tokens:
+                        yield {
+                            "type": "error",
+                            "classification": "retryable",
+                            "retry_after_seconds": exc.retry_after_seconds,
+                            "content": exc.detail,
+                        }
+                        return
+                    raise
+                except ProviderOutputError as exc:
+                    if stream_tokens:
+                        yield {
+                            "type": "error",
+                            "classification": "non_retryable",
+                            "content": exc.detail,
+                        }
+                        return
+                    raise
                 try:
                     _validate_json_if_schema(answer, schema)
                 except StructuredOutputError as exc:
@@ -642,13 +666,29 @@ async def run_answer_stream(
                 f"Question: {query}\n\n"
                 f"Cite sources using [1], [2], etc. corresponding to the source numbers above."
             )
-            full_answer = await llm.generate(
-                system_prompt=ANSWER_SYSTEM_PROMPT,
-                user_prompt=user_prompt,
-                context=context,
-                schema=output_schema,
-                stage="answer",
-            )
+            try:
+                full_answer = await llm.generate(
+                    system_prompt=ANSWER_SYSTEM_PROMPT,
+                    user_prompt=user_prompt,
+                    context=context,
+                    schema=output_schema,
+                    stage="answer",
+                )
+            except RetryableRateLimitError as exc:
+                yield {
+                    "type": "error",
+                    "classification": "retryable",
+                    "retry_after_seconds": exc.retry_after_seconds,
+                    "content": exc.detail,
+                }
+                return
+            except ProviderOutputError as exc:
+                yield {
+                    "type": "error",
+                    "classification": "non_retryable",
+                    "content": exc.detail,
+                }
+                return
             try:
                 _validate_json_if_schema(full_answer, output_schema)
             except StructuredOutputError as exc:

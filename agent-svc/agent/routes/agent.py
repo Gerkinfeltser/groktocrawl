@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any
 
 from fastapi import APIRouter, Request, Response
@@ -28,6 +29,37 @@ from ._helpers import _derive_user_id, _get_client_ip, _resolve_output_schema
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+async def _serialize_answer_stream(
+    events: AsyncIterator[dict[str, Any]],
+) -> AsyncGenerator[str, None]:
+    """Serialize answer events without masking terminal error semantics."""
+    async for event in events:
+        if event["type"] == "sources_pending":
+            payload = {"type": "sources_pending", "sources": event["sources"]}
+        elif event["type"] == "sources":
+            payload = {"type": "sources", "sources": event["sources"]}
+        elif event["type"] == "token":
+            payload = {"type": "token", "content": event["content"]}
+        elif event["type"] == "done":
+            payload = {
+                "type": "done",
+                "answer": event["answer"],
+                "citations": event["citations"],
+                "latency_ms": event["latency_ms"],
+            }
+        elif event["type"] == "error":
+            payload = {"type": "error", "content": event["content"]}
+            for key in ("classification", "retry_after_seconds"):
+                if key in event:
+                    payload[key] = event[key]
+            yield f"data: {json.dumps(payload)}\n\n"
+            return
+        else:
+            continue
+        yield f"data: {json.dumps(payload)}\n\n"
+    yield "data: [DONE]\n\n"
 
 
 def fingerprint_from_agent_request(body: AgentRequest) -> str:
@@ -415,7 +447,7 @@ async def answer(request: Request, body: AnswerRequest, response: Response) -> A
         async def event_stream() -> Any:
             from ..research import run_answer_stream
 
-            async for event in run_answer_stream(
+            events = run_answer_stream(
                 query=body.query,
                 num_sources=body.num_sources,
                 search_type=body.search_type,
@@ -430,18 +462,9 @@ async def answer(request: Request, body: AnswerRequest, response: Response) -> A
                 max_searches_per_request=max_searches,
                 output_schema=effective_schema,
                 citation_style=body.citation_style,
-            ):
-                if event["type"] == "sources_pending":
-                    yield f"data: {json.dumps({'type': 'sources_pending', 'sources': event['sources']})}\n\n"
-                elif event["type"] == "sources":
-                    yield f"data: {json.dumps({'type': 'sources', 'sources': event['sources']})}\n\n"
-                elif event["type"] == "token":
-                    yield f"data: {json.dumps({'type': 'token', 'content': event['content']})}\n\n"
-                elif event["type"] == "done":
-                    yield f"data: {json.dumps({'type': 'done', 'answer': event['answer'], 'citations': event['citations'], 'latency_ms': event['latency_ms']})}\n\n"
-                elif event["type"] == "error":
-                    yield f"data: {json.dumps({'type': 'error', 'content': event['content']})}\n\n"
-            yield "data: [DONE]\n\n"
+            )
+            async for chunk in _serialize_answer_stream(events):
+                yield chunk
 
         headers = {
             "X-Search-Budget": f"{max_searches}/{max_searches}",

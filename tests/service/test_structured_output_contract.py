@@ -68,6 +68,7 @@ def test_supported_json_schema_constructs(schema, value):
         ({"oneOf": [{"const": "x"}, {"type": "array", "maxItems": 1}]}, "[1,2]"),
         ({"type": "object", "properties": {"x": {"type": "mystery"}}}, '{"x":1}'),
         ({"type": "object", "properties": []}, "{}"),
+        ({"$ref": "#/definitions/missing"}, "{}"),
         ("not-a-schema", "{}"),
     ],
 )

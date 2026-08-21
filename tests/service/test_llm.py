@@ -199,6 +199,20 @@ class TestLLMClientGenerate:
                 await llm.generate(system_prompt="x", user_prompt="y")
 
     @pytest.mark.asyncio
+    async def test_non_object_message_raises_typed_error(self, llm):
+        from agent.exceptions import ProviderOutputError
+
+        with patch.object(
+            llm._client,
+            "post",
+            return_value=_make_response(
+                json_data={"choices": [{"message": None, "finish_reason": "stop"}]}
+            ),
+        ):
+            with pytest.raises(ProviderOutputError):
+                await llm.generate(system_prompt="x", user_prompt="y")
+
+    @pytest.mark.asyncio
     async def test_handles_network_error(self, llm):
         import httpx
         from agent.exceptions import ProviderOutputError
@@ -354,6 +368,27 @@ class TestLLMClientGenerateStream:
             assert len(tokens) == 1
             assert tokens[0]["type"] == "error"
             assert tokens[0]["classification"] == "malformed"
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_object_sse_choice(self, llm):
+        mock_client_cls, _ = self._setup_stream_mock(
+            ['data: {"choices":[null]}', "data: [DONE]"]
+        )
+
+        with patch("httpx.AsyncClient", mock_client_cls):
+            events = [
+                event
+                async for event in llm.generate_stream(
+                    system_prompt="x", user_prompt="y"
+                )
+            ]
+        assert events == [
+            {
+                "type": "error",
+                "classification": "malformed",
+                "content": "LLM provider returned malformed SSE",
+            }
+        ]
 
     @pytest.mark.asyncio
     async def test_includes_context(self, llm):

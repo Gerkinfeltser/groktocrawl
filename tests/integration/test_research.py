@@ -24,9 +24,12 @@ class TestValidateJsonIfSchema:
     def test_invalid_json_logs_warning(self, caplog):
         import logging
 
+        from agent.exceptions import StructuredOutputError
+
         caplog.set_level(logging.WARNING)
-        self.func("not json", {"type": "object"})
-        assert "not valid JSON" in caplog.text
+        with pytest.raises(StructuredOutputError):
+            self.func("not json", {"type": "object"})
+        assert "failed structured-output validation" in caplog.text
 
 
 class TestIsVideoPlatformUrl:
