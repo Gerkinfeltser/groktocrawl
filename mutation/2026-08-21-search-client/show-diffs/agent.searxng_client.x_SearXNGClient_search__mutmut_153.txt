@@ -1,11 +1,10 @@
 --- agent/searxng_client.py
 +++ agent/searxng_client.py
-@@ -131,7 +131,7 @@
-     except RateLimitedError:
-         raise
-     except httpx.TimeoutException:
--        outcome = "timeout"
-+        outcome = "TIMEOUT"
-         logger.warning("SearXNG search timed out")
-         return [], SearchHealth(detail="SearXNG request timed out")
-     except Exception as e:
+@@ -117,7 +117,7 @@
+                     "url": item.get("url", ""),
+                     "title": item.get("title", ""),
+                     "description": item.get("content", ""),
+-                    "engine": item.get("engine", ""),
++                    "engine": item.get("engine", None),
+                 }
+             )

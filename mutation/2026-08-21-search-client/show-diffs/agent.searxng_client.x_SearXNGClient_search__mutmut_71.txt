@@ -1,11 +1,11 @@
 --- agent/searxng_client.py
 +++ agent/searxng_client.py
-@@ -87,7 +87,7 @@
+@@ -83,7 +83,7 @@
+                 retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
+                 logger.warning(
+                     "SearXNG rate limited (429) — retry_after=%s",
+-                    retry_after if retry_after is not None else "unknown",
++                    None,
                  )
                  raise RetryableRateLimitError(
                      detail=(
--                        "Downstream search capacity is temporarily exhausted "
-+                        "downstream search capacity is temporarily exhausted "
-                         "(SearXNG returned HTTP 429)"
-                     ),
-                     retry_after_seconds=retry_after,

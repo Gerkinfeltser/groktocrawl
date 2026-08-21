@@ -198,6 +198,33 @@ def run_pilot(max_children: int, outdir: Path, qa_path: str) -> tuple[str, dict]
     return raw, stats
 
 
+def count_slice_tests(qa_path: str) -> int:
+    """Count the collected tests in the pilot's search-client slice.
+
+    The committed test file changes over time (the pilot hardened and extended it),
+    so run-config.json must record the actual number of tests present at run time
+    rather than a hardcoded value. ``--collect-only -q`` prints one line per test,
+    which we count by node id.
+    """
+    env = dict(PROXY_ENV)
+    env["QA_OUTCOME_PATH"] = qa_path
+    argv = [
+        *RUN_WITH_MUTMUT,
+        "pytest",
+        "--collect-only",
+        "-q",
+        "tests/service/test_searxng_client.py",
+        "-o",
+        "addopts=",
+        "-p",
+        "no:cacheprovider",
+    ]
+    proc = _run(argv, AGENT_SVC, extra_env=env)
+    if proc.returncode != 0:
+        return 0
+    return sum(1 for line in proc.stdout.splitlines() if "::" in line)
+
+
 def capture_results(outdir: Path, qa_path: str) -> None:
     env = dict(PROXY_ENV)
     env["QA_OUTCOME_PATH"] = qa_path
@@ -217,6 +244,9 @@ def build_classification_and_diffs(outdir: Path, qa_path: str) -> None:
     """Generate show-diffs for non-killed mutants and the classification rows."""
     env = dict(PROXY_ENV)
     env["QA_OUTCOME_PATH"] = qa_path
+    show_dir = outdir / "show-diffs"
+    if show_dir.exists():
+        shutil.rmtree(show_dir)  # clear stale captures before regenerating
     results_file = outdir / "mutmut-results.txt"
     script = "import re\n" + _DIFF_SCRIPT
     proc = _run(
@@ -271,7 +301,7 @@ def write_classification(outdir: Path, rows: list[dict]) -> None:
 
 
 def write_run_config(
-    outdir: Path, max_children: int, qa_path: str, counts: dict
+    outdir: Path, max_children: int, qa_path: str, counts: dict, test_count: int
 ) -> None:
     cfg = {
         "pilot": "search-client decision slice bounded mutation-testing pilot (issue #572)",
@@ -312,7 +342,7 @@ def write_run_config(
         },
         "test": {
             "suite": "tests/service/test_searxng_client.py",
-            "count": "25",
+            "count": str(test_count),
             "command": "QA_OUTCOME_PATH=<scratch> uv run --no-sync pytest tests/service/test_searxng_client.py -o 'addopts=' -p no:cacheprovider",
             "selection": {
                 "per_mutant": {
@@ -426,7 +456,8 @@ def main() -> int:
 
         capture_results(outdir, qa_path)
         build_classification_and_diffs(outdir, qa_path)
-        write_run_config(outdir, args.max_children, qa_path, stats)
+        test_count = count_slice_tests(qa_path)
+        write_run_config(outdir, args.max_children, qa_path, stats, test_count)
 
         print("== pilot complete")
         print(

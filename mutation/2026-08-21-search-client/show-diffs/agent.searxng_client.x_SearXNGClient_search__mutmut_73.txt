@@ -1,11 +1,12 @@
 --- agent/searxng_client.py
 +++ agent/searxng_client.py
-@@ -92,7 +92,7 @@
-                     ),
-                     retry_after_seconds=retry_after,
-                 )
--            outcome = "degraded"
-+            outcome = None
-             logger.warning(
-                 "SearXNG rate limited (429) — returning empty results "
-                 "(caller did not opt into retryable classification)"
+@@ -83,8 +83,7 @@
+                 retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
+                 logger.warning(
+                     "SearXNG rate limited (429) — retry_after=%s",
+-                    retry_after if retry_after is not None else "unknown",
+-                )
++                    )
+                 raise RetryableRateLimitError(
+                     detail=(
+                         "Downstream search capacity is temporarily exhausted "

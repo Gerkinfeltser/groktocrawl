@@ -1,11 +1,11 @@
 --- agent/searxng_client.py
 +++ agent/searxng_client.py
-@@ -83,7 +83,7 @@
+@@ -79,7 +79,7 @@
+             if raise_on_rate_limit:
+                 from .exceptions import RetryableRateLimitError
+
+-                outcome = "rate_limited"
++                outcome = "RATE_LIMITED"
                  retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
                  logger.warning(
                      "SearXNG rate limited (429) — retry_after=%s",
--                    retry_after if retry_after is not None else "unknown",
-+                    retry_after if retry_after is None else "unknown",
-                 )
-                 raise RetryableRateLimitError(
-                     detail=(

@@ -1,11 +1,11 @@
 --- agent/searxng_client.py
 +++ agent/searxng_client.py
-@@ -116,7 +116,7 @@
+@@ -114,7 +114,7 @@
+         for item in data.get("results", []):
+             results.append(
                  {
-                     "url": item.get("url", ""),
+-                    "url": item.get("url", ""),
++                    "url": item.get("url", "XXXX"),
                      "title": item.get("title", ""),
--                    "description": item.get("content", ""),
-+                    "description": item.get(""),
+                     "description": item.get("content", ""),
                      "engine": item.get("engine", ""),
-                 }
-             )

@@ -49,21 +49,21 @@
   },
   "results": {
     "cicd_stats": "mutmut-cicd-stats.json",
-    "killed": 145,
+    "killed": 157,
     "no_coverage": 0,
     "raw_report": "raw-mutation-report.txt",
     "results_list": "mutmut-results.txt",
     "segfault": 0,
     "show_diffs_dir": "show-diffs/",
-    "survived": 171,
+    "survived": 173,
     "suspicious": 0,
     "timeout": 0,
-    "total": 316
+    "total": 330
   },
   "run_dir": "mutation/2026-08-21-search-client",
   "scope": {
     "bounds": "single source file; full-file run (no wildcard args) bounded by --max-children (a concurrency bound, not a mutant budget)",
-    "mutant_count": 316,
+    "mutant_count": 330,
     "only_mutate": [
       "agent/searxng_client.py"
     ],
@@ -71,7 +71,7 @@
   },
   "test": {
     "command": "QA_OUTCOME_PATH=<scratch> uv run --no-sync pytest tests/service/test_searxng_client.py -o 'addopts=' -p no:cacheprovider",
-    "count": "25",
+    "count": "30",
     "selection": {
       "note": "mutmut runs pytest_add_cli_args_test_selection per mutant plus a clean-suite baseline and forced-fail sanity pass; every pytest invocation uses -o addopts= and -p no:cacheprovider with a scratch QA_OUTCOME_PATH",
       "per_mutant": {

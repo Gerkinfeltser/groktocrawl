@@ -1,9 +1,0 @@
---- agent/searxng_client.py
-+++ agent/searxng_client.py
-@@ -8,5 +8,5 @@
-             "X-Forwarded-For": "127.0.0.1",
-         },
-     )
--    self._search_count = 0
-+    self._search_count = 1
-     self._max_searches = max_searches

@@ -1,11 +1,13 @@
 --- agent/searxng_client.py
 +++ agent/searxng_client.py
-@@ -50,7 +50,7 @@
+@@ -43,10 +43,7 @@
+                 detail=(
+                     f"Search budget exceeded: {self._search_count}/{self._max_searches}"
+                 ),
+-                details={
+-                    "budget_used": self._search_count,
+-                    "budget_max": self._max_searches,
+-                },
++                details=None,
              )
          self._search_count += 1
-
--        effective_categories = self._translate(sources, categories)
-+        effective_categories = self._translate(None, categories)
-         params = {
-             "q": query,
-             "format": "json",

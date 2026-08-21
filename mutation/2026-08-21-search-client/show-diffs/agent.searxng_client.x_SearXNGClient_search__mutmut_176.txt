@@ -1,11 +1,11 @@
 --- agent/searxng_client.py
 +++ agent/searxng_client.py
-@@ -137,7 +137,7 @@
+@@ -135,7 +135,7 @@
+         logger.warning("SearXNG search timed out")
+         return [], SearchHealth(detail="SearXNG request timed out")
      except Exception as e:
-         outcome = "error"
+-        outcome = "error"
++        outcome = None
          logger.error("SearXNG search failed: %s", type(e).__name__)
--        return [], SearchHealth(detail="SearXNG search failed")
-+        return [], SearchHealth(detail="SEARXNG SEARCH FAILED")
+         return [], SearchHealth(detail="SearXNG search failed")
      finally:
-         observe_elapsed(
-             _SEARCH_QUERY_SECONDS,

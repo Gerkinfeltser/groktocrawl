@@ -1,11 +1,11 @@
 --- agent/searxng_client.py
 +++ agent/searxng_client.py
-@@ -103,7 +103,7 @@
-         if resp.status_code != 200:
-             outcome = "error"
+@@ -94,7 +94,7 @@
+                 )
+             outcome = "degraded"
              logger.warning(
--                "SearXNG returned %d: %s", resp.status_code, resp.text[:200]
-+                "SearXNG returned %d: %s", resp.status_code, None
+-                "SearXNG rate limited (429) — returning empty results "
++                "XXSearXNG rate limited (429) — returning empty results XX"
+                 "(caller did not opt into retryable classification)"
              )
              return [], SearchHealth(
-                 detail=f"SearXNG returned HTTP {resp.status_code}"

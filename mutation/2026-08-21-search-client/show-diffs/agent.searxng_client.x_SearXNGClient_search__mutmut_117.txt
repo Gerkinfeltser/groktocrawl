@@ -1,11 +1,11 @@
 --- agent/searxng_client.py
 +++ agent/searxng_client.py
-@@ -114,7 +114,7 @@
-         for item in data.get("results", []):
+@@ -111,7 +111,7 @@
+
+         data = resp.json()
+         results = []
+-        for item in data.get("results", []):
++        for item in data.get("results", None):
              results.append(
                  {
--                    "url": item.get("url", ""),
-+                    "url": item.get("url", "XXXX"),
-                     "title": item.get("title", ""),
-                     "description": item.get("content", ""),
-                     "engine": item.get("engine", ""),
+                     "url": item.get("url", ""),

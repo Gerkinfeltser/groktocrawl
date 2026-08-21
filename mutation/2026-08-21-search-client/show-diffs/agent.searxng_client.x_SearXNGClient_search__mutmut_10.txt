@@ -1,11 +1,11 @@
 --- agent/searxng_client.py
 +++ agent/searxng_client.py
-@@ -48,7 +48,7 @@
-                     "budget_max": self._max_searches,
-                 },
-             )
--        self._search_count += 1
-+        self._search_count += 2
-
-         effective_categories = self._translate(sources, categories)
-         params = {
+@@ -38,7 +38,7 @@
+     try:
+         # ── Per-request search budget check ────────────────────
+         if self._search_count >= self._max_searches:
+-            outcome = "rate_limited"
++            outcome = "RATE_LIMITED"
+             raise RateLimitedError(
+                 detail=(
+                     f"Search budget exceeded: {self._search_count}/{self._max_searches}"

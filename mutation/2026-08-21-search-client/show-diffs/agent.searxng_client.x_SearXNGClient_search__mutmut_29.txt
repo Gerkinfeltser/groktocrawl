@@ -1,11 +1,11 @@
 --- agent/searxng_client.py
 +++ agent/searxng_client.py
-@@ -55,7 +55,7 @@
-             "q": query,
+@@ -52,7 +52,7 @@
+
+         effective_categories = self._translate(sources, categories)
+         params = {
+-            "q": query,
++            "Q": query,
              "format": "json",
              "language": "en",
--            "pageno": 1,
-+            "pageno": 2,
-         }
-         params["categories"] = ",".join(effective_categories)
-         run_id = os.getenv("TWIN_RUN_ID")
+             "pageno": 1,

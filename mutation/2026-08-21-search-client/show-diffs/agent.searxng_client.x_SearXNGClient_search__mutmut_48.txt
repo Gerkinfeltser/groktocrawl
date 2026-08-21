@@ -1,11 +1,11 @@
 --- agent/searxng_client.py
 +++ agent/searxng_client.py
-@@ -79,7 +79,7 @@
-             if raise_on_rate_limit:
-                 from .exceptions import RetryableRateLimitError
-
--                outcome = "rate_limited"
-+                outcome = "XXrate_limitedXX"
-                 retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
-                 logger.warning(
-                     "SearXNG rate limited (429) — retry_after=%s",
+@@ -58,7 +58,7 @@
+             "pageno": 1,
+         }
+         params["categories"] = ",".join(effective_categories)
+-        run_id = os.getenv("TWIN_RUN_ID")
++        run_id = os.getenv("XXTWIN_RUN_IDXX")
+         if run_id:
+             params["run_id"] = run_id
+         if scenario is not None:

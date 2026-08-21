@@ -1,11 +1,11 @@
 --- agent/searxng_client.py
 +++ agent/searxng_client.py
-@@ -58,7 +58,7 @@
+@@ -54,7 +54,7 @@
+         params = {
+             "q": query,
+             "format": "json",
+-            "language": "en",
++            "language": "EN",
              "pageno": 1,
          }
          params["categories"] = ",".join(effective_categories)
--        run_id = os.getenv("TWIN_RUN_ID")
-+        run_id = os.getenv("XXTWIN_RUN_IDXX")
-         if run_id:
-             params["run_id"] = run_id
-         if scenario is not None:
