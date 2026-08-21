@@ -6,7 +6,6 @@ import os
 import socket
 
 import pytest
-from pytest_socket import SocketConnectBlockedError
 
 
 def test_hosted_socket_guard_blocks_non_loopback():
@@ -14,5 +13,7 @@ def test_hosted_socket_guard_blocks_non_loopback():
         return
     with socket.socket() as sock:
         sock.settimeout(0.01)
-        with pytest.raises(SocketConnectBlockedError):
+        with pytest.raises(RuntimeError) as raised:
             sock.connect(("192.0.2.1", 9))
+    assert type(raised.value).__module__ == "pytest_socket"
+    assert type(raised.value).__name__ == "SocketConnectBlockedError"
