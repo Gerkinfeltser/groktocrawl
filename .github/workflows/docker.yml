@@ -663,6 +663,7 @@ jobs:
             --ignore=/app/tests/service/test_twin_contract.py \
             --ignore=/app/tests/service/test_twin_network_isolation.py \
             --ignore=/app/tests/service/test_workflow_contract.py \
+            --ignore=/app/tests/service/test_answer_evals.py \
               --cov=/app/agent \
               --cov=/app/scraper-svc/scraper \
               --cov=/app/parse-svc/parse_svc \
@@ -771,7 +772,7 @@ jobs:
           TWIN_RECORD_IMAGES: "1"
           TWIN_BUILT_FROM_CHECKOUT: llm-svc,slopsearx-fixture,agent-svc-fixture,test-site,tier3-fixture
           TWIN_TESTS: '["tests/integration/test_stack.py::test_cross_endpoint_compact_citations_resolvable","tests/integration/test_stack.py::test_cross_plan_agent_structured_output_val_cross_005","tests/integration/test_critical_journey.py","tests/integration/","tests/service/","tests/integration/test_twin_failure_injection.py","mcp-svc/tests/test_integration.py::TestHostHeaderTransportSecurity"]'
-          TWIN_EXCLUDED_TESTS: '["tests/service/test_twin_contract.py","tests/service/test_twin_network_isolation.py","tests/service/test_workflow_contract.py"]'
+          TWIN_EXCLUDED_TESTS: '["tests/service/test_twin_contract.py","tests/service/test_twin_network_isolation.py","tests/service/test_workflow_contract.py","tests/service/test_answer_evals.py"]'
           TWIN_CHECKS: scenario-version-precheck,manifest-validation
         run: |
           uv run --no-sync python scripts/twin_provenance.py --output twin-compose-out --changed-paths-json "$TWIN_CHANGED_PATHS_JSON"

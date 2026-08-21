@@ -20,7 +20,7 @@
         "twin": {"enum": ["search", "llm", "all", "none"]},
         "runtime": {"type": "string"},
         "tests": {"type": "array", "items": {"enum": ["tests/service/test_twin_contract.py", "tests/service/test_twin_network_isolation.py", "tests/service/test_workflow_contract.py", "tests/integration/test_twin_failure_injection.py", "tests/service/test_slopsearx_fixture.py", "tests/service/test_searxng_client.py", "tests/service/test_llm_fixture_contract.py", "tests/service/test_llm.py", "tests/service/test_research_adapter_parity.py", "tests/integration/test_stack.py::test_cross_endpoint_compact_citations_resolvable", "tests/integration/test_stack.py::test_cross_plan_agent_structured_output_val_cross_005", "tests/integration/test_stack.py", "tests/integration/test_critical_journey.py", "tests/integration/", "tests/service/", "mcp-svc/tests/test_integration.py::TestHostHeaderTransportSecurity", "scripts/live_calibration.py"]}},
-        "excluded_tests": {"type": "array", "uniqueItems": true, "items": {"enum": ["tests/service/test_twin_contract.py", "tests/service/test_twin_network_isolation.py", "tests/service/test_workflow_contract.py"]}},
+        "excluded_tests": {"type": "array", "uniqueItems": true, "items": {"enum": ["tests/service/test_twin_contract.py", "tests/service/test_twin_network_isolation.py", "tests/service/test_workflow_contract.py", "tests/service/test_answer_evals.py"]}},
         "checks": {"type": "array", "items": {"enum": ["scenario-version-precheck", "manifest-validation", "fixture-immutability-check"]}}
       }
     },

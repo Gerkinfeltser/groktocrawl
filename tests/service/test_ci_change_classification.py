@@ -694,6 +694,12 @@ class FastTestsWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("tests/integration", self.workflow)
         self.assertNotIn("docker", self.workflow.lower())
 
+    def test_fast_tests_pythonpath_includes_answer_eval_fixture_package(self) -> None:
+        self.assertIn(
+            "agent-svc:scraper-svc:llm-svc:slopsearx-fixture:parse-svc",
+            self.workflow,
+        )
+
     def test_changed_line_gate_skips_ref_creation_without_base_sha(self) -> None:
         zero_sha = "0" * 40
         guard = f'if [ "$COVERAGE_BASE_SHA" = "{zero_sha}" ]; then'

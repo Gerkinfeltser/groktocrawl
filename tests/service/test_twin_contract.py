@@ -193,6 +193,7 @@ def test_compose_exact_images_validate_as_success(tmp_path, monkeypatch):
                 "tests/service/test_twin_contract.py",
                 "tests/service/test_twin_network_isolation.py",
                 "tests/service/test_workflow_contract.py",
+                "tests/service/test_answer_evals.py",
             ]
         ),
     )

@@ -172,3 +172,7 @@ def test_compose_run_id_and_failure_provenance_are_unambiguous():
         assert f"--ignore=/app/{host_only}" in workflow
         assert host_only in compose_evidence
         assert host_only in repr(docker["jobs"]["twin-contracts"])
+    answer_eval = "tests/service/test_answer_evals.py"
+    assert f"--ignore=/app/{answer_eval}" in workflow
+    assert answer_eval in compose_evidence
+    assert "scripts/run_answer_evals.py --selection narrow" in workflow
