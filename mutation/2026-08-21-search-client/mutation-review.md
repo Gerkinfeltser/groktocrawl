@@ -107,7 +107,15 @@ Checks:
 
 A follow-up hardening commit closed three deferred decision areas (search-budget
 enforcement, scenario forwarding, sources→category routing) with three more behavior-level
-tests; all four are now killed in this run.
+tests. Verified by applying each retained mutant's `show-diffs` diff in a scratch worktree
+against the corresponding test, the budget test KILLS only search `mutmut_7` (the per-request
+budget check `>=` → `>`); the outcome-literal survivors `mutmut_8/9/10` (`outcome =
+"rate_limited"` → `None` / `"XX…"` / `"RATE_LIMITED"`), `mutmut_12` (the budget `details={…}`
+field → `None`), and `mutmut_39` (`"pageno"` → `"PAGENO"`) all SURVIVE the budget/scenario
+tests (the budget test passes under 8/9/10/12; the scenario test passes under 39). The
+scenario and sources-routing tests add behavior-level coverage of those decision areas but do
+NOT kill these cosmetic survivors, which remain correctly triaged as survived
+(invalid/equivalent) in `classification.md` / `triage.md`.
 
 ## Independent Verification
 
