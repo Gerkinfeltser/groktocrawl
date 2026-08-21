@@ -105,6 +105,7 @@ def test_compose_run_id_and_failure_provenance_are_unambiguous():
     root = Path(__file__).parents[2]
     compose = (root / "docker-compose.yml").read_text()
     workflow = (root / ".github/workflows/docker.yml").read_text()
+    docker = yaml.safe_load(workflow)
     assert "${LLM_BASE_URL:-http://llm-svc:8011/v1?run_id=${" not in compose
     assert "LLM_BASE_URL=${LLM_BASE_URL:-http://llm-svc:8011/v1}" in compose
     assert "LLM_BASE_URL=http://llm-svc:8011/v1?run_id=${TWIN_RUN_ID:-}" in compose
@@ -127,3 +128,11 @@ def test_compose_run_id_and_failure_provenance_are_unambiguous():
     )
     assert "tests/integration/test_twin_failure_injection.py" in compose_evidence
     assert "tests/service/test_twin_failure_injection.py" not in compose_evidence
+    for host_only in (
+        "tests/service/test_twin_contract.py",
+        "tests/service/test_twin_network_isolation.py",
+        "tests/service/test_workflow_contract.py",
+    ):
+        assert f"--ignore=/app/{host_only}" in workflow
+        assert host_only in compose_evidence
+        assert host_only in repr(docker["jobs"]["twin-contracts"])

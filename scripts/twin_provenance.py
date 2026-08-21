@@ -43,6 +43,7 @@ REQUIRED_CHECKOUT_IMAGES = {
 ALLOWED_TESTS = {
     "tests/service/test_twin_contract.py",
     "tests/service/test_twin_network_isolation.py",
+    "tests/service/test_workflow_contract.py",
     "tests/service/test_slopsearx_fixture.py",
     "tests/service/test_searxng_client.py",
     "tests/service/test_llm_fixture_contract.py",
@@ -282,6 +283,7 @@ def _selected_tests(selection: str) -> list[str]:
                 *selected,
                 "tests/service/test_twin_contract.py",
                 "tests/service/test_twin_network_isolation.py",
+                "tests/service/test_workflow_contract.py",
             ]
         )
     )
@@ -292,6 +294,19 @@ def _selected_checks() -> list[str]:
     return list(dict.fromkeys(item for item in raw.split(",") if item))
 
 
+def _excluded_tests() -> list[str]:
+    raw = os.environ.get("TWIN_EXCLUDED_TESTS", "[]")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return ["invalid"]
+    if not isinstance(parsed, list) or not all(
+        isinstance(item, str) for item in parsed
+    ):
+        return ["invalid"]
+    return list(dict.fromkeys(parsed))
+
+
 def _expected_hosted_tests(selection: str) -> list[str]:
     return list(
         dict.fromkeys(
@@ -299,22 +314,31 @@ def _expected_hosted_tests(selection: str) -> list[str]:
                 *TEST_SELECTIONS.get(selection, []),
                 "tests/service/test_twin_contract.py",
                 "tests/service/test_twin_network_isolation.py",
+                "tests/service/test_workflow_contract.py",
             ]
         )
     )
 
 
 def _selection_error(
-    mode: str, selection: str, tests: list[str], checks: list[str]
+    mode: str,
+    selection: str,
+    tests: list[str],
+    excluded_tests: list[str],
+    checks: list[str],
 ) -> str | None:
     if selection not in TEST_SELECTIONS:
         return "unknown twin selection"
     if any(test not in ALLOWED_TESTS for test in tests):
         return "unknown selected test"
+    if any(test not in ALLOWED_TESTS for test in excluded_tests):
+        return "unknown excluded test"
     if any(check not in ALLOWED_CHECKS for check in checks):
         return "unknown selected check"
     if mode == "hosted" and tests != _expected_hosted_tests(selection):
         return "hosted test selection does not match classifier selection"
+    if mode in {"hosted", "live"} and excluded_tests:
+        return f"{mode} test selection cannot exclude tests"
     if mode == "compose":
         required = {
             "tests/integration/test_stack.py::test_cross_endpoint_compact_citations_resolvable",
@@ -327,6 +351,13 @@ def _selection_error(
         }
         if not required.issubset(tests):
             return "compose test selection is incomplete"
+        expected_exclusions = {
+            "tests/service/test_twin_contract.py",
+            "tests/service/test_twin_network_isolation.py",
+            "tests/service/test_workflow_contract.py",
+        }
+        if set(excluded_tests) != expected_exclusions:
+            return "compose host-only exclusions are incomplete"
     if mode == "live" and tests != ["scripts/live_calibration.py"]:
         return "live test selection is not the calibration harness"
     required_checks = {"scenario-version-precheck", "manifest-validation"}
@@ -372,11 +403,13 @@ def build_manifest(output: Path, inputs: list[str] | None = None) -> dict[str, o
         source = "none"
     mode = _execution_mode()
     selected_tests = _selected_tests(os.environ.get("TWIN_SELECTION", "all"))
+    excluded_tests = _excluded_tests()
     selected_checks = _selected_checks()
     selection_error = _selection_error(
         mode,
         os.environ.get("TWIN_SELECTION", "all"),
         selected_tests,
+        excluded_tests,
         selected_checks,
     )
     if selection_error:
@@ -395,6 +428,7 @@ def build_manifest(output: Path, inputs: list[str] | None = None) -> dict[str, o
             "twin": os.environ.get("TWIN_SELECTION", "all"),
             "runtime": os.environ.get("RUNTIME_SELECTION", "unknown"),
             "tests": selected_tests,
+            "excluded_tests": excluded_tests,
             "checks": selected_checks,
         },
         "corpus": {

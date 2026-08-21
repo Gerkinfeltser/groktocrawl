@@ -20,6 +20,7 @@ def _isolate_twin_environment(monkeypatch):
         "TWIN_CALIBRATION_ARTIFACT",
         "TWIN_CHECKS",
         "TWIN_EXECUTION_MODE",
+        "TWIN_EXCLUDED_TESTS",
         "TWIN_FAILURE_DETAIL",
         "TWIN_FAILURE_SOURCE",
         "TWIN_RECORD_IMAGES",
@@ -182,6 +183,16 @@ def test_compose_exact_images_validate_as_success(tmp_path, monkeypatch):
                 "tests/service/",
                 "tests/integration/test_twin_failure_injection.py",
                 "mcp-svc/tests/test_integration.py::TestHostHeaderTransportSecurity",
+            ]
+        ),
+    )
+    monkeypatch.setenv(
+        "TWIN_EXCLUDED_TESTS",
+        json.dumps(
+            [
+                "tests/service/test_twin_contract.py",
+                "tests/service/test_twin_network_isolation.py",
+                "tests/service/test_workflow_contract.py",
             ]
         ),
     )

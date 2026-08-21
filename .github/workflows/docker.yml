@@ -117,7 +117,7 @@ jobs:
           if [ -n "$tests" ]; then
              uv run --no-sync python -m pytest $tests -q --no-cov -o addopts= --disable-socket --allow-hosts=127.0.0.1,localhost,::1 --junitxml=twin-out/twin-tests.xml
           fi
-           uv run --no-sync python -m pytest tests/service/test_twin_contract.py tests/service/test_twin_network_isolation.py -q --no-cov -o addopts= --disable-socket --allow-hosts=127.0.0.1,localhost,::1 --junitxml=twin-out/twin-contract-tests.xml
+           uv run --no-sync python -m pytest tests/service/test_twin_contract.py tests/service/test_twin_network_isolation.py tests/service/test_workflow_contract.py -q --no-cov -o addopts= --disable-socket --allow-hosts=127.0.0.1,localhost,::1 --junitxml=twin-out/twin-contract-tests.xml
       - name: Validate twin provenance
         if: always()
         env:
@@ -634,6 +634,9 @@ jobs:
             TIER3_FIXTURE_BASE_URL=http://tier3-fixture:8000 \
             SEMANTIC_BASE_URL=http://semantic-svc:8003 \
             python3 -m pytest /app/tests/integration/ /app/tests/service/ --timeout=120 --ignore-glob='*observability*' --ignore=/app/tests/integration/test_critical_journey.py -m 'not external' \
+            --ignore=/app/tests/service/test_twin_contract.py \
+            --ignore=/app/tests/service/test_twin_network_isolation.py \
+            --ignore=/app/tests/service/test_workflow_contract.py \
               --cov=/app/agent \
               --cov=/app/scraper-svc/scraper \
               --cov=/app/parse-svc/parse_svc \
@@ -741,7 +744,8 @@ jobs:
           TWIN_REQUIRE_IMAGES: "1"
           TWIN_RECORD_IMAGES: "1"
           TWIN_BUILT_FROM_CHECKOUT: llm-svc,slopsearx-fixture,agent-svc-fixture,test-site,tier3-fixture
-          TWIN_TESTS: '["tests/integration/test_stack.py::test_cross_endpoint_compact_citations_resolvable","tests/integration/test_stack.py::test_cross_plan_agent_structured_output_val_cross_005","tests/integration/test_critical_journey.py","tests/integration/","tests/service/","tests/integration/test_twin_failure_injection.py","mcp-svc/tests/test_integration.py::TestHostHeaderTransportSecurity","tests/service/test_twin_contract.py","tests/service/test_twin_network_isolation.py"]'
+          TWIN_TESTS: '["tests/integration/test_stack.py::test_cross_endpoint_compact_citations_resolvable","tests/integration/test_stack.py::test_cross_plan_agent_structured_output_val_cross_005","tests/integration/test_critical_journey.py","tests/integration/","tests/service/","tests/integration/test_twin_failure_injection.py","mcp-svc/tests/test_integration.py::TestHostHeaderTransportSecurity"]'
+          TWIN_EXCLUDED_TESTS: '["tests/service/test_twin_contract.py","tests/service/test_twin_network_isolation.py","tests/service/test_workflow_contract.py"]'
           TWIN_CHECKS: scenario-version-precheck,manifest-validation
         run: |
           uv run --no-sync python scripts/twin_provenance.py --output twin-compose-out --changed-paths-json "$TWIN_CHANGED_PATHS_JSON"

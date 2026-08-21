@@ -11,7 +11,7 @@ from agent.llm import LLMClient
 from agent.searxng_client import SearXNGClient
 
 RUN_ID = os.environ.get("TWIN_RUN_ID", "compose-failure-injection")
-SEARCH_URL = os.environ.get("SEARCH_BASE_URL", "http://slopsearx-fixture:8080")
+SEARCH_URL = os.environ.get("SEARCH_FIXTURE_BASE_URL", "http://slopsearx-fixture:8080")
 LLM_URL = os.environ.get("LLM_BASE_URL", "http://llm-svc:8011/v1")
 
 
