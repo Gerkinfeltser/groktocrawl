@@ -48,8 +48,7 @@ def _dummy_value(prop_schema: dict) -> object:
     if t == "object":
         obj = {}
         for key, subschema in prop_schema.get("properties", {}).items():
-            if key in prop_schema.get("required", []):
-                obj[key] = _dummy_value(subschema)
+            obj[key] = _dummy_value(subschema)
         return obj
     if t in ("integer", "number"):
         return 42
@@ -72,8 +71,7 @@ def _generate_schema_response(system_text: str) -> str:
 
     response: dict = {}
     for key, prop in schema.get("properties", {}).items():
-        if key in schema.get("required", []):
-            response[key] = _dummy_value(prop)
+        response[key] = _dummy_value(prop)
 
     return json.dumps(response)
 
@@ -165,7 +163,14 @@ def create_app() -> FastAPI:
             else:
                 content = _generate_schema_response(system_text)
         else:
-            content = "Synthesized answer from provided context."
+            citation_requested = (
+                "cite sources" in (system_text + "\n" + user_text).lower()
+            )
+            content = (
+                "Synthesized answer from provided context. [1]"
+                if citation_requested
+                else "Synthesized answer from provided context."
+            )
         return {
             "id": "chatcmpl-fixture",
             "object": "chat.completion",
