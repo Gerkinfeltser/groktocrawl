@@ -430,6 +430,30 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
             "docker compose --profile fixture up -d --force-recreate llm-svc tier3-fixture test-site slopsearx-fixture agent-svc-fixture",
             self.integration_tests,
         )
+        self.assertIn(
+            "Verify LLM fixture contract and agent routing", self.integration_tests
+        )
+        self.assertIn("agent LLM routing verified", self.integration_tests)
+        self.assertIn(
+            "endpoint = 'http://llm-svc:8011/v1/chat/completions'",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "LLM fixture citation and schema contracts verified",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "Run targeted source-backed agent contracts", self.integration_tests
+        )
+        probe_index = self.integration_tests.index(
+            "Verify LLM fixture contract and agent routing"
+        )
+        targeted_index = self.integration_tests.index(
+            "Run targeted source-backed agent contracts"
+        )
+        critical_index = self.integration_tests.index("Critical journey smoke")
+        self.assertLess(probe_index, targeted_index)
+        self.assertLess(targeted_index, critical_index)
         self.assertNotIn(
             "SEARXNG_URL=http://slopsearx-fixture:8080 docker compose --profile indexing up -d",
             self.integration_tests,
