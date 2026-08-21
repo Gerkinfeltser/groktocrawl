@@ -331,7 +331,7 @@ def create_app() -> FastAPI:
                 "cite sources" in (system_text + "\n" + user_text).lower()
             )
             content = (
-                "Synthesized answer from provided context. [1]"
+                "Synthesized answer from the provided source context. [1]"
                 if citation_requested
                 else "Synthesized answer from provided context."
             )

@@ -35,6 +35,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "python-multipart" },
     { name = "redis" },
+    { name = "referencing" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -47,6 +48,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "python-multipart", specifier = ">=0.0.20" },
     { name = "redis", specifier = ">=5.2.0" },
+    { name = "referencing", specifier = ">=0.28.4" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
 ]
 
