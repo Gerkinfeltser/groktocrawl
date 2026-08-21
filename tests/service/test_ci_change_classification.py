@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
 import textwrap
 import unittest
 from pathlib import Path
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 CLASSIFIER = ROOT / "scripts" / "classify_ci_changes.py"
@@ -221,9 +224,17 @@ class CiChangeClassificationTests(unittest.TestCase):
 
     def test_embedded_llm_probe_python_compiles_and_run_id_is_propagated(self) -> None:
         workflow = WORKFLOW.read_text()
-        marker = 'docker compose exec -T agent-svc python3 -c "\n'
-        probe = workflow.split(marker, 1)[1].split('\n           "', 1)[0]
-        compile(textwrap.dedent(probe), "docker.yml LLM probe", "exec")
+        parsed = yaml.safe_load(workflow)
+        integration = parsed["jobs"]["integration-tests"]["steps"]
+        run = next(
+            step["run"]
+            for step in integration
+            if step.get("name") == "Verify LLM fixture contract and agent routing"
+        )
+        probes = re.findall(r'python3 -c "\n(.*?)\n"', run, flags=re.DOTALL)
+        self.assertEqual(len(probes), 2)
+        for index, probe in enumerate(probes):
+            compile(probe, f"docker.yml LLM probe {index}", "exec")
         compose = (ROOT / "docker-compose.yml").read_text()
         self.assertGreaterEqual(compose.count("TWIN_RUN_ID=${TWIN_RUN_ID:-}"), 2)
         self.assertIn("run_id=${TWIN_RUN_ID:-}", compose)
