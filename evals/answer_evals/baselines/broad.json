@@ -1,0 +1,149 @@
+{
+  "suite_version": "answer-evals-v1",
+  "selection": "broad",
+
+  "cases": [
+    {
+      "case_id": "positive-001-answer-grounded",
+      "outcome": "pass",
+      "graders": {
+        "check_protocol": true,
+        "check_sources_present": true,
+        "check_citation_shape": true,
+        "check_citation_support": true,
+        "check_required_claims": true,
+        "check_prohibited_claims": true,
+        "check_abstention": true,
+        "check_citation_integrity": true
+      }
+    },
+    {
+      "case_id": "positive-002-answer-claims",
+      "outcome": "pass",
+      "graders": {
+        "check_protocol": true,
+        "check_sources_present": true,
+        "check_citation_shape": true,
+        "check_citation_support": true,
+        "check_required_claims": true,
+        "check_prohibited_claims": true,
+        "check_abstention": true,
+        "check_citation_integrity": true
+      }
+    },
+    {
+      "case_id": "positive-003-research-grounded",
+      "outcome": "pass",
+      "graders": {
+        "check_protocol": true,
+        "check_sources_present": true,
+        "check_citation_shape": true,
+        "check_citation_support": true,
+        "check_required_claims": true,
+        "check_prohibited_claims": true,
+        "check_abstention": true,
+        "check_citation_integrity": true
+      }
+    },
+    {
+      "case_id": "boundary-004-answer-compact",
+      "outcome": "pass",
+      "graders": {
+        "check_protocol": true,
+        "check_sources_present": true,
+        "check_citation_shape": true,
+        "check_citation_support": true,
+        "check_required_claims": true,
+        "check_prohibited_claims": true,
+        "check_abstention": true,
+        "check_citation_integrity": true
+      }
+    },
+    {
+      "case_id": "negative-005-answer-miscited",
+      "outcome": "fail",
+      "graders": {
+        "check_protocol": true,
+        "check_sources_present": true,
+        "check_citation_shape": true,
+        "check_citation_support": false,
+        "check_required_claims": true,
+        "check_prohibited_claims": true,
+        "check_abstention": true,
+        "check_citation_integrity": true
+      }
+    },
+    {
+      "case_id": "negative-006-answer-empty-search",
+      "outcome": "pass",
+      "graders": {
+        "check_protocol": true,
+        "check_abstention": true,
+        "check_required_claims": true,
+        "check_prohibited_claims": true
+      }
+    },
+    {
+      "case_id": "negative-007-answer-contradictory",
+      "outcome": "pass",
+      "graders": {
+        "check_protocol": true,
+        "check_abstention": true,
+        "check_required_claims": true,
+        "check_prohibited_claims": true
+      }
+    },
+    {
+      "case_id": "negative-008-research-contradictory",
+      "outcome": "pass",
+      "graders": {
+        "check_protocol": true,
+        "check_abstention": true,
+        "check_required_claims": true,
+        "check_prohibited_claims": true
+      }
+    },
+    {
+      "case_id": "boundary-009-answer-server-error",
+      "outcome": "pass",
+      "graders": {
+        "check_protocol": true
+      }
+    },
+    {
+      "case_id": "boundary-010-answer-rate-limit",
+      "outcome": "pass",
+      "graders": {
+        "check_protocol": true
+      }
+    },
+    {
+      "case_id": "positive-011-research-claims",
+      "outcome": "pass",
+      "graders": {
+        "check_protocol": true,
+        "check_sources_present": true,
+        "check_citation_shape": true,
+        "check_citation_support": true,
+        "check_required_claims": true,
+        "check_prohibited_claims": true,
+        "check_abstention": true,
+        "check_citation_integrity": true
+      }
+    },
+    {
+      "case_id": "boundary-012-research-multi-source",
+      "outcome": "pass",
+      "graders": {
+        "check_protocol": true,
+        "check_sources_present": true,
+        "check_citation_shape": true,
+        "check_citation_support": true,
+        "check_required_claims": true,
+        "check_prohibited_claims": true,
+        "check_abstention": true,
+        "check_citation_integrity": true
+      }
+    }
+  ]
+}

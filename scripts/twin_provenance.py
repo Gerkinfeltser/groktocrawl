@@ -44,6 +44,7 @@ ALLOWED_TESTS = {
     "tests/service/test_twin_contract.py",
     "tests/service/test_twin_network_isolation.py",
     "tests/service/test_workflow_contract.py",
+    "tests/service/test_answer_evals.py",
     "tests/service/test_slopsearx_fixture.py",
     "tests/service/test_searxng_client.py",
     "tests/service/test_llm_fixture_contract.py",
@@ -355,6 +356,7 @@ def _selection_error(
             "tests/service/test_twin_contract.py",
             "tests/service/test_twin_network_isolation.py",
             "tests/service/test_workflow_contract.py",
+            "tests/service/test_answer_evals.py",
         }
         if set(excluded_tests) != expected_exclusions:
             return "compose host-only exclusions are incomplete"

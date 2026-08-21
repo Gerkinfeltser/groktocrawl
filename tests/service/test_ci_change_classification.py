@@ -200,6 +200,31 @@ class CiChangeClassificationTests(unittest.TestCase):
                 self.assertEqual(MODULE.requires_twin_contracts(paths), expected_bool)
                 self.assertEqual(MODULE.twin_test_selection(paths), expected_selection)
 
+    def test_answer_evals_paths_require_runtime_and_twin_contracts(self) -> None:
+        # Issue #570: eval harness and fixture scenario changes are runtime +
+        # twin-relevant (never docs-only), so the narrow pre-merge eval step runs.
+        for path in (
+            "evals/answer_evals/harness.py",
+            "evals/answer_evals/grading.py",
+            "evals/answer_evals/routing.py",
+            "evals/answer_evals/manifest.json",
+            "evals/answer_evals/cases/positive-001-answer-grounded.json",
+            "scripts/run_answer_evals.py",
+            "llm-svc/llm_svc/app.py",
+            "slopsearx-fixture/slopsearx_fixture/app.py",
+            "test-site/test_site/app.py",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(MODULE.requires_full_runtime([path]))
+                self.assertTrue(MODULE.requires_twin_contracts([path]))
+                if path.startswith(("evals/", "scripts/", "test-site/")):
+                    expected_selection = "all"
+                elif path.startswith("llm-svc/"):
+                    expected_selection = "llm"
+                else:
+                    expected_selection = "search"
+                self.assertEqual(MODULE.twin_test_selection([path]), expected_selection)
+
     def test_changed_path_shell_block_is_valid_and_keeps_zero_sha_else(self) -> None:
         workflow = WORKFLOW.read_text()
         block = workflow.split('if [ "${{ github.event_name }}"', 1)[1]
@@ -569,6 +594,35 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
         )
         self.assertNotIn("comparison may have been skipped", self.integration_tests)
 
+    def test_narrow_answer_evals_step_is_bounded_twin_gated_and_uploads_provenance(
+        self,
+    ) -> None:
+        # Issue #570: the pre-merge narrow eval step runs in-process against the
+        # twins plus one real-route HTTP /v2/answer smoke over agent-svc-fixture.
+        self.assertIn(
+            "Run narrow grounded-answer eval (in-process + HTTP smoke)",
+            self.integration_tests,
+        )
+        self.assertIn("--selection narrow", self.integration_tests)
+        self.assertIn("--http-smoke http://127.0.0.1:8084", self.integration_tests)
+        self.assertIn("timeout-minutes: 5", self.integration_tests)
+        eval_block = self.integration_tests.split(
+            "Run narrow grounded-answer eval (in-process + HTTP smoke)", 1
+        )[1].split("\n      - name:", 1)[0]
+        self.assertIn("requires_twin_contracts == 'true'", eval_block)
+        self.assertIn("requires_full_runtime == 'true'", eval_block)
+        self.assertIn("scripts/run_answer_evals.py", eval_block)
+        self.assertIn("Upload answer-evals provenance", self.integration_tests)
+        self.assertIn("answer-evals-provenance", self.integration_tests)
+        self.assertIn("path: eval-out/", self.integration_tests)
+        # The eval step runs after the fixtures are up (agent-svc-fixture smoke).
+        self.assertLess(
+            self.integration_tests.index("Wait for agent-svc-fixture"),
+            self.integration_tests.index(
+                "Run narrow grounded-answer eval (in-process + HTTP smoke)"
+            ),
+        )
+
     def test_runtime_gate_only_bypasses_docs_only_pull_requests(self) -> None:
         self.assertIn("if: always()", self.runtime_gate)
         self.assertIn(
@@ -639,6 +693,12 @@ class FastTestsWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("--no-cov", self.workflow)
         self.assertNotIn("tests/integration", self.workflow)
         self.assertNotIn("docker", self.workflow.lower())
+
+    def test_fast_tests_pythonpath_includes_answer_eval_fixture_package(self) -> None:
+        self.assertIn(
+            "agent-svc:scraper-svc:llm-svc:slopsearx-fixture:parse-svc",
+            self.workflow,
+        )
 
     def test_changed_line_gate_skips_ref_creation_without_base_sha(self) -> None:
         zero_sha = "0" * 40

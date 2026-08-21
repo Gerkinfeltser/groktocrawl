@@ -252,7 +252,7 @@ async def test_ledger_is_versioned_run_scoped_and_resettable():
     await direct.get("/search", params={"q": "private", "run_id": "run-a"})
     await direct.get("/search", params={"q": "other", "run_id": "run-b"})
     ledger = (await direct.get("/ledger", params={"run_id": "run-a"})).json()
-    assert ledger["fixture_version"] == "v1"
+    assert ledger["fixture_version"] == "v2"
     assert {entry["run_id"] for entry in ledger["entries"]} == {"run-a"}
     assert "private" not in json.dumps(ledger)
     assert (await direct.post("/ledger/reset", params={"run_id": "run-a"})).json() == {

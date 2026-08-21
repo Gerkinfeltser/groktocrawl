@@ -101,6 +101,40 @@ def test_workflows_have_structured_trusted_and_hosted_contracts():
     assert "twin-out" in twin_run and "junitxml" in twin_run
 
 
+def test_answer_evals_workflow_is_advisory_and_not_pr_gated():
+    root = Path(__file__).parents[2]
+    workflow = (root / ".github/workflows/answer-evals.yml").read_text()
+    parsed = yaml.safe_load(workflow)
+    assert "schedule" in parsed.get("on", parsed.get(True))
+    assert "workflow_dispatch" in parsed.get("on", parsed.get(True))
+    assert "pull_request" not in workflow
+    assert "pull_request_target" not in workflow
+    assert parsed["jobs"]["answer-evals"]["runs-on"] == [
+        "self-hosted",
+        "groktopus",
+        "docker",
+    ]
+    assert parsed["jobs"]["answer-evals"]["if"] == (
+        "github.repository == 'groktopus/groktocrawl' && github.ref == 'refs/heads/main'"
+    )
+    assert "timeout-minutes: 30" in workflow
+    assert "--selection broad" in workflow
+    assert "--http-smoke http://127.0.0.1:8084" in workflow
+    assert "scripts/run_answer_evals.py" in workflow
+    assert "Upload eval provenance artifact" in workflow
+    assert "actions/upload-artifact" in workflow
+    assert "if: always()" in workflow
+    assert "Tear down eval fixture stack" in workflow
+    assert "docker compose down --remove-orphans" in workflow
+    # The eval is advisory — it must not be wired as a required PR check.
+    assert "required" not in parsed
+    docker = (root / ".github/workflows/docker.yml").read_text()
+    assert "answer-evals.yml" not in docker
+    runtime_gate = docker.split("name: Runtime Gate", 1)[1]
+    assert "answer-evals" not in runtime_gate
+    assert "needs: [changes, twin-contracts, integration-tests]" in runtime_gate
+
+
 def test_compose_run_id_and_failure_provenance_are_unambiguous():
     root = Path(__file__).parents[2]
     compose = (root / "docker-compose.yml").read_text()
@@ -138,3 +172,7 @@ def test_compose_run_id_and_failure_provenance_are_unambiguous():
         assert f"--ignore=/app/{host_only}" in workflow
         assert host_only in compose_evidence
         assert host_only in repr(docker["jobs"]["twin-contracts"])
+    answer_eval = "tests/service/test_answer_evals.py"
+    assert f"--ignore=/app/{answer_eval}" in workflow
+    assert answer_eval in compose_evidence
+    assert "scripts/run_answer_evals.py --selection narrow" in workflow

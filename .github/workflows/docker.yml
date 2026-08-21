@@ -579,6 +579,32 @@ jobs:
               --no-cov -o 'addopts=' -p no:cacheprovider -q
         timeout-minutes: 5
 
+      - name: Run narrow grounded-answer eval (in-process + HTTP smoke)
+        # Bounded, hermetic pre-merge eval (issue #570): the narrow selection runs
+        # the real answer/research pipeline in-process against the deterministic
+        # twins (no live egress; endpoint-host allowlist enforced by the harness),
+        # then one default-scenario /v2/answer smoke runs over the real route on
+        # agent-svc-fixture. Gated by the runtime/twin classifier; forks are
+        # already excluded by the job-level fork guard.
+        if: >-
+          needs.changes.outputs.requires_twin_contracts == 'true' ||
+          needs.changes.outputs.requires_full_runtime == 'true'
+        env:
+          PYTHONPATH: agent-svc:scraper-svc:llm-svc:slopsearx-fixture:parse-svc:portal-svc:browser-svc:semantic-svc:.
+        run: |
+          uv run --no-sync python3 scripts/run_answer_evals.py --selection narrow \
+            --output-dir eval-out/narrow \
+            --http-smoke http://127.0.0.1:8084
+        timeout-minutes: 5
+
+      - name: Upload answer-evals provenance
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: answer-evals-provenance
+          path: eval-out/
+          if-no-files-found: warn
+
       - name: Critical journey smoke
         run: |
           docker compose exec -T agent-svc mkdir -p /app/coverage
@@ -637,6 +663,7 @@ jobs:
             --ignore=/app/tests/service/test_twin_contract.py \
             --ignore=/app/tests/service/test_twin_network_isolation.py \
             --ignore=/app/tests/service/test_workflow_contract.py \
+            --ignore=/app/tests/service/test_answer_evals.py \
               --cov=/app/agent \
               --cov=/app/scraper-svc/scraper \
               --cov=/app/parse-svc/parse_svc \
@@ -745,7 +772,7 @@ jobs:
           TWIN_RECORD_IMAGES: "1"
           TWIN_BUILT_FROM_CHECKOUT: llm-svc,slopsearx-fixture,agent-svc-fixture,test-site,tier3-fixture
           TWIN_TESTS: '["tests/integration/test_stack.py::test_cross_endpoint_compact_citations_resolvable","tests/integration/test_stack.py::test_cross_plan_agent_structured_output_val_cross_005","tests/integration/test_critical_journey.py","tests/integration/","tests/service/","tests/integration/test_twin_failure_injection.py","mcp-svc/tests/test_integration.py::TestHostHeaderTransportSecurity"]'
-          TWIN_EXCLUDED_TESTS: '["tests/service/test_twin_contract.py","tests/service/test_twin_network_isolation.py","tests/service/test_workflow_contract.py"]'
+          TWIN_EXCLUDED_TESTS: '["tests/service/test_twin_contract.py","tests/service/test_twin_network_isolation.py","tests/service/test_workflow_contract.py","tests/service/test_answer_evals.py"]'
           TWIN_CHECKS: scenario-version-precheck,manifest-validation
         run: |
           uv run --no-sync python scripts/twin_provenance.py --output twin-compose-out --changed-paths-json "$TWIN_CHANGED_PATHS_JSON"

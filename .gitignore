@@ -17,6 +17,10 @@ ofelia/config.local.ini
 # Local skill directories (prevent environment leaks)
 skills/
 
+# Eval harness run artifacts (issue #570) — only baselines/candidate and pinned
+# baselines are checked in; per-run artifacts and provenance stay local.
+eval-out/
+
 # OS files
 .DS_Store
 Thumbs.db

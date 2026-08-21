@@ -73,6 +73,33 @@ async def pricing(request: Request):
     )
 
 
+@app.api_route("/pricing-v2", methods=["GET", "HEAD"])
+async def pricing_v2(request: Request):
+    """A second pricing page whose Pro price genuinely conflicts with /pricing.
+
+    The grounded-answer eval harness (issue #570) uses the pair
+    ``/pricing`` ("Pro: $10") and ``/pricing-v2`` ("Pro: $99") to exercise
+    the contradictory-evidence abstention path over real scraped content.
+    """
+    accept = request.headers.get("accept", "")
+    if ENABLE_MARKDOWN and "text/markdown" in accept:
+        return PlainTextResponse(
+            f"# {SITE_NAME} Pricing V2\n\n- Pro: $99\n- Business: $25\n",
+            media_type="text/markdown",
+        )
+    return HTMLResponse(
+        f"""
+        <html>
+          <body>
+            <h1>{SITE_NAME} Pricing V2</h1>
+            <p>Pro: $99</p>
+            <p>Business: $25</p>
+          </body>
+        </html>
+        """
+    )
+
+
 @app.get("/")
 async def root():
     return HTMLResponse(
@@ -81,6 +108,7 @@ async def root():
           <body>
             <h1>{SITE_NAME}</h1>
             <a href="/pricing">Pricing</a>
+            <a href="/pricing-v2">Pricing V2</a>
             <a href="/about">About</a>
             <a href="/dynamic">Dynamic</a>
             <a href="/llms.txt">llms</a>
@@ -269,6 +297,7 @@ def _build_sitemap_xml() -> str:
     pages = [
         {"loc": "/", "priority": "1.0", "changefreq": "daily"},
         {"loc": "/pricing", "priority": "0.8", "changefreq": "weekly"},
+        {"loc": "/pricing-v2", "priority": "0.8", "changefreq": "weekly"},
         {"loc": "/about", "priority": "0.6", "changefreq": "monthly"},
         {"loc": "/dynamic", "priority": "0.5", "changefreq": "weekly"},
         {"loc": "/llms.txt", "priority": "0.3", "changefreq": "monthly"},
