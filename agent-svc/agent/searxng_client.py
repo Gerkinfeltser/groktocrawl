@@ -287,12 +287,12 @@ class SearXNGClient:
             raise
         except httpx.TimeoutException:
             outcome = "timeout"
-            logger.warning("SearXNG search timed out for query: %s", query)
+            logger.warning("SearXNG search timed out")
             return [], SearchHealth(detail="SearXNG request timed out")
         except Exception as e:
             outcome = "error"
-            logger.error("SearXNG search failed: %s", e)
-            return [], SearchHealth(detail=f"SearXNG search failed: {e}")
+            logger.error("SearXNG search failed: %s", type(e).__name__)
+            return [], SearchHealth(detail="SearXNG search failed")
         finally:
             observe_elapsed(
                 _SEARCH_QUERY_SECONDS,

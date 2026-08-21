@@ -94,6 +94,26 @@ services:
       - ENABLE_DYNAMIC=1
       - SITE_NAME=Fixture Site
 
+  slopsearx-fixture:
+    build:
+      context: .
+      dockerfile: slopsearx-fixture/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8083:8080"
+    profiles:
+      - fixture
+    environment:
+      - FIXTURE_SITE_BASE_URL=http://test-site:8000
+    depends_on:
+      test-site:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json, urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3); assert json.load(response)['status'] == 'ok'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   tier3-fixture:
     build:
       context: ./test-site
@@ -229,6 +249,38 @@ services:
       - SEARXNG_URL=${SEARXNG_URL:-http://slopsearx:8080}
       - SCRAPER_URL=${SCRAPER_URL:-http://scraper-svc:8001}
       - SEMANTIC_URL=${SEMANTIC_URL:-http://semantic-svc:8003}
+      - HOST=0.0.0.0
+      - PORT=8080
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  agent-svc-fixture:
+    build:
+      context: .
+      dockerfile: agent-svc/Dockerfile
+    image: ghcr.io/groktopus/groktocrawl-agent
+    restart: unless-stopped
+    profiles:
+      - fixture
+    ports:
+      - "8084:8080"
+    env_file:
+      - .env
+    depends_on:
+      valkey:
+        condition: service_healthy
+      slopsearx-fixture:
+        condition: service_healthy
+      scraper-svc:
+        condition: service_started
+    environment:
+      - VALKEY_URL=redis://valkey:6379/1
+      - SEARXNG_URL=http://slopsearx-fixture:8080
+      - SCRAPER_URL=http://scraper-svc:8001
+      - SEMANTIC_URL=http://semantic-svc:8003
       - HOST=0.0.0.0
       - PORT=8080
     healthcheck:

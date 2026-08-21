@@ -407,7 +407,60 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
             self.integration_tests,
         )
         self.assertIn(
-            "for pkg in scraper-svc/scraper parse-svc/parse_svc portal-svc/portal browser-svc/browser_svc llm-svc/llm_svc common; do",
+            "for pkg in scraper-svc/scraper parse-svc/parse_svc portal-svc/portal browser-svc/browser_svc llm-svc/llm_svc slopsearx-fixture/slopsearx_fixture common; do",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "SEARCH_BASE_URL=http://slopsearx:8080",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "AGENT_BASE_URL=http://agent-svc-fixture:8080",
+            self.integration_tests,
+        )
+        self.assertIn("Wait for slopsearx-fixture", self.integration_tests)
+        self.assertIn("Timed out waiting for slopsearx-fixture", self.integration_tests)
+        self.assertIn("Wait for agent-svc-fixture", self.integration_tests)
+        self.assertIn("Timed out waiting for agent-svc-fixture", self.integration_tests)
+        self.assertIn(
+            "docker compose --profile fixture build test-site tier3-fixture slopsearx-fixture agent-svc-fixture",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "docker compose --profile fixture up -d --force-recreate llm-svc tier3-fixture test-site slopsearx-fixture agent-svc-fixture",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "Verify LLM fixture contract and agent routing", self.integration_tests
+        )
+        self.assertIn("agent LLM routing verified", self.integration_tests)
+        self.assertIn(
+            "endpoint = 'http://llm-svc:8011/v1/chat/completions'",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "LLM fixture citation and schema contracts verified",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "Run targeted source-backed agent contracts", self.integration_tests
+        )
+        self.assertIn("Reset isolated test state", self.integration_tests)
+        self.assertIn("valkey-cli -n 0 FLUSHDB", self.integration_tests)
+        self.assertIn("valkey-cli -n 1 FLUSHDB", self.integration_tests)
+        reset_index = self.integration_tests.index("Reset isolated test state")
+        probe_index = self.integration_tests.index(
+            "Verify LLM fixture contract and agent routing"
+        )
+        targeted_index = self.integration_tests.index(
+            "Run targeted source-backed agent contracts"
+        )
+        critical_index = self.integration_tests.index("Critical journey smoke")
+        self.assertLess(reset_index, probe_index)
+        self.assertLess(probe_index, targeted_index)
+        self.assertLess(targeted_index, critical_index)
+        self.assertNotIn(
+            "SEARXNG_URL=http://slopsearx-fixture:8080 docker compose --profile indexing up -d",
             self.integration_tests,
         )
         self.assertIn("--cov=/app/agent", self.integration_tests)

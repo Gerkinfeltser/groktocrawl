@@ -19,7 +19,7 @@ An Architecture Decision Record captures an important architectural decision mad
 
 **Status legend:** accepted ADRs describe decisions used by the current implementation. Proposed ADRs are design work, not promises of current behavior. Superseded ADRs are historical context only; use their successor when documenting current behavior.
 
-**Current accepted decisions:** ADR-0001–0012, 0014–0022, 0026, 0029–0035, 0038, 0039, 0043, 0044, 0045, 0046, 0047, 0048, 0049, 0050, 0051, 0052, and 0053.
+**Current accepted decisions:** ADR-0001–0012, 0014–0022, 0026, 0029–0035, 0038, 0039, 0043, 0044, 0045, 0046, 0047, 0048, 0049, 0050, 0051, 0052, 0053, and 0054.
 
 **Proposed work:** ADR-0023–0025, 0027, 0028, 0036, 0037, and 0040–0042.
 
@@ -78,4 +78,5 @@ An Architecture Decision Record captures an important architectural decision mad
 | 0051 | [Global Admission Control and End-to-End Cancellation](0051-global-admission-control-and-cancellation.md) | accepted |
 | 0052 | [Concurrent Cache-Assisted Hybrid Retrieval Planner](0052-hybrid-retrieval-planner.md) | accepted |
 | 0053 | [Retryable Rate-Limit Contract](0053-retryable-rate-limit-contract.md) | accepted |
+| 0054 | [Deterministic SlopSearX Contract Fixture](0054-deterministic-slopsearx-contract-fixture.md) | accepted |
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full ADR workflow: when to write an ADR, how to number it, and how to get it reviewed in a PR.
