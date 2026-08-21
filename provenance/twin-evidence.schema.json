@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://groktocrawl.dev/schemas/twin-evidence-v1.json",
+  "title": "GroktoCrawl twin evidence manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "execution_mode", "commit", "selection", "corpus", "versions", "identity", "images", "bounds", "outcome"],
+  "properties": {
+    "schema_version": {"const": "twin-evidence-v1"},
+    "execution_mode": {"enum": ["hosted", "compose", "live"]},
+    "started_at": {"type": "string"},
+    "commit": {
+      "type": "object", "additionalProperties": false, "required": ["sha", "event", "ref"],
+      "properties": {"sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"}, "event": {"type": "string", "minLength": 1}, "ref": {"type": "string", "minLength": 1}}
+    },
+    "selection": {
+       "type": "object", "additionalProperties": false, "required": ["inputs", "twin", "runtime", "tests", "excluded_tests", "checks"],
+      "properties": {
+        "inputs": {"type": "array", "items": {"type": "string"}},
+        "twin": {"enum": ["search", "llm", "all", "none"]},
+        "runtime": {"type": "string"},
+        "tests": {"type": "array", "items": {"enum": ["tests/service/test_twin_contract.py", "tests/service/test_twin_network_isolation.py", "tests/service/test_workflow_contract.py", "tests/integration/test_twin_failure_injection.py", "tests/service/test_slopsearx_fixture.py", "tests/service/test_searxng_client.py", "tests/service/test_llm_fixture_contract.py", "tests/service/test_llm.py", "tests/service/test_research_adapter_parity.py", "tests/integration/test_stack.py::test_cross_endpoint_compact_citations_resolvable", "tests/integration/test_stack.py::test_cross_plan_agent_structured_output_val_cross_005", "tests/integration/test_stack.py", "tests/integration/test_critical_journey.py", "tests/integration/", "tests/service/", "mcp-svc/tests/test_integration.py::TestHostHeaderTransportSecurity", "scripts/live_calibration.py"]}},
+        "excluded_tests": {"type": "array", "uniqueItems": true, "items": {"enum": ["tests/service/test_twin_contract.py", "tests/service/test_twin_network_isolation.py", "tests/service/test_workflow_contract.py"]}},
+        "checks": {"type": "array", "items": {"enum": ["scenario-version-precheck", "manifest-validation", "fixture-immutability-check"]}}
+      }
+    },
+    "corpus": {
+      "type": "object", "additionalProperties": false, "required": ["id", "digest"],
+      "properties": {"id": {"type": "string", "minLength": 1}, "digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}
+    },
+    "versions": {
+      "type": "object", "additionalProperties": false, "required": ["scenario", "search_schema", "search_fixture", "llm_schema", "llm_fixture"],
+      "properties": {"scenario": {"type": "string", "pattern": "^v[0-9]+$"}, "search_schema": {"type": "string", "pattern": "^v[0-9]+$"}, "search_fixture": {"type": "string", "pattern": "^v[0-9]+$"}, "llm_schema": {"type": "string", "pattern": "^v[0-9]+$"}, "llm_fixture": {"type": "string", "pattern": "^v[0-9]+$"}}
+    },
+    "identity": {
+      "type": "object", "additionalProperties": false, "required": ["requested", "observed"],
+      "properties": {
+        "requested": {"type": "object", "additionalProperties": false, "required": ["provider", "model"], "properties": {"provider": {"type": "string"}, "model": {"type": "string"}}},
+        "observed": {"type": "object", "additionalProperties": false, "required": ["provider", "model"], "properties": {"provider": {"type": "string"}, "model": {"type": "string"}}}
+      }
+    },
+    "images": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["name", "reference", "id", "repo_digest", "source_sha", "built_from_checkout"], "properties": {"name": {"type": "string"}, "reference": {"type": "string"}, "id": {"type": "string", "pattern": "^(unavailable|sha256:[a-f0-9]{64})$"}, "repo_digest": {"type": ["string", "null"], "pattern": "^.+@sha256:[a-f0-9]{64}$"}, "source_sha": {"type": ["string", "null"], "pattern": "^[a-f0-9]{40}$"}, "built_from_checkout": {"type": "boolean"}}}},
+    "bounds": {"type": "object", "additionalProperties": false, "required": ["timeout_seconds", "max_calls", "max_tokens", "cost_ceiling_usd"], "properties": {"timeout_seconds": {"type": "number"}, "max_calls": {"type": "number"}, "max_tokens": {"type": "number"}, "cost_ceiling_usd": {"type": "number"}}},
+    "outcome": {
+      "type": "object", "additionalProperties": false, "required": ["result", "failure_source", "started_at", "finished_at", "test_outcome", "failure_detail"],
+      "properties": {
+        "result": {"enum": ["success", "failure", "advisory_success"]},
+        "failure_source": {"enum": ["none", "authentication", "quota", "twin", "infrastructure", "harness", "provider_drift", "implementation"]},
+        "test_outcome": {"type": "string"}, "failure_detail": {"type": "string"}, "started_at": {"type": "string"}, "finished_at": {"type": "string"}
+      }
+    },
+    "calibration": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "outcome", "failure_source", "corpus", "identity", "bounds", "records"],
+      "properties": {
+        "schema_version": {"const": "live-calibration-v2"},
+        "outcome": {"enum": ["success", "failure", "advisory_success"]},
+        "failure_source": {"enum": ["none", "authentication", "quota", "twin", "infrastructure", "harness", "provider_drift"]},
+        "corpus": {
+          "type": "object", "additionalProperties": false, "required": ["id", "digest"],
+          "properties": {"id": {"type": "string", "minLength": 1}, "digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}
+        },
+        "identity": {
+          "type": "object", "additionalProperties": false, "required": ["requested", "observed"],
+          "properties": {
+            "requested": {"type": "object", "additionalProperties": false, "required": ["provider", "model"], "properties": {"provider": {"type": "string"}, "model": {"type": "string"}}},
+            "observed": {"type": "object", "additionalProperties": false, "required": ["search_provider", "llm_provider", "model"], "properties": {"search_provider": {"type": "string"}, "llm_provider": {"type": "string"}, "model": {"type": "string"}}}
+          }
+        },
+        "bounds": {
+          "type": "object", "additionalProperties": false,
+          "required": ["estimated_max_cost_usd", "estimated_live_provider_cost_usd", "cost_ceiling_usd", "expected_calls"],
+          "properties": {"estimated_max_cost_usd": {"type": "number"}, "estimated_live_provider_cost_usd": {"type": "number"}, "cost_ceiling_usd": {"type": "number"}, "expected_calls": {"type": "integer"}}
+        },
+        "records": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["case_id", "kind", "result", "classification"],
+            "properties": {
+              "case_id": {"type": "string"}, "kind": {"enum": ["search", "llm"]},
+              "result": {"enum": ["match", "provider_drift", "authentication", "quota", "twin", "infrastructure", "harness"]},
+              "classification": {"enum": ["match", "provider_drift", "authentication", "quota", "twin", "infrastructure", "harness"]},
+              "provider_fingerprint": {"type": "string", "pattern": "^(unavailable|[a-f0-9]{64})$"},
+              "twin_fingerprint": {"type": "string", "pattern": "^(unavailable|[a-f0-9]{64})$"},
+              "provider_latency_band": {"enum": ["fast", "normal", "slow"]},
+              "twin_latency_band": {"enum": ["fast", "normal", "slow"]}
+            }
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {"if": {"properties": {"execution_mode": {"const": "compose"}}}, "then": {"properties": {"images": {"minItems": 15}}, "required": ["images"], "allOf": [{"if": {"properties": {"outcome": {"properties": {"result": {"const": "failure"}}}}}, "then": {}, "else": {"properties": {"images": {"items": {"not": {"properties": {"id": {"const": "unavailable"}}}}}}}}]}},
+    {"if": {"properties": {"execution_mode": {"enum": ["hosted", "live"]}}}, "then": {"properties": {"images": {"items": {"not": {"properties": {"id": {"const": "unavailable"}}}}}}}}
+  ]
+}

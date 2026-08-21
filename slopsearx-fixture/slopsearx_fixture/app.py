@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -14,7 +15,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 SCHEMA_VERSION: Literal["v1"] = "v1"
 MAX_DELAY_MS = 2_000
+MAX_LEDGER = 200
 FIXTURE_SITE_BASE_URL = os.getenv("FIXTURE_SITE_BASE_URL", "http://test-site:8000")
+FIXTURE_VERSION = "v1"
+RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 SCENARIOS = {
     "healthy",
     "zero-results",
@@ -64,14 +68,20 @@ class FixtureState:
     default_scenario: str = "healthy"
     ledger: list[dict[str, object]] = field(default_factory=list)
     request_number: int = 0
-    scenario_requests: dict[tuple[str, str], int] = field(default_factory=dict)
+    scenario_requests: dict[tuple[str, str, str | None], int] = field(
+        default_factory=dict
+    )
 
-    def next_scenario_request(self, scenario: str, query: str) -> int:
+    def next_scenario_request(
+        self, scenario: str, query: str, run_id: str | None
+    ) -> int:
         """Return the ordinal for a non-sensitive scenario/query partition."""
         partition = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
-        key = (scenario, partition)
-        ordinal = self.scenario_requests.get(key, 0) + 1
+        key = (scenario, partition, run_id)
+        ordinal = self.scenario_requests.pop(key, 0) + 1
         self.scenario_requests[key] = ordinal
+        while len(self.scenario_requests) > MAX_LEDGER:
+            del self.scenario_requests[next(iter(self.scenario_requests))]
         return ordinal
 
     def record(
@@ -83,6 +93,7 @@ class FixtureState:
         categories: str,
         page: int,
         result_count: int,
+        run_id: str | None,
     ) -> None:
         self.request_number += 1
         self.ledger.append(
@@ -95,8 +106,11 @@ class FixtureState:
                 "categories": categories,
                 "page": page,
                 "result_count": result_count,
+                "fixture_version": FIXTURE_VERSION,
+                "run_id": run_id,
             }
         )
+        del self.ledger[:-MAX_LEDGER]
 
 
 def _result(index: int, engine: str = "brave") -> SearchResult:
@@ -123,8 +137,37 @@ def create_app(*, default_scenario: str = "healthy") -> FastAPI:
         }
 
     @app.get("/ledger")
-    async def ledger() -> dict[str, object]:
-        return {"schema_version": SCHEMA_VERSION, "entries": state.ledger}
+    async def ledger(run_id: str | None = Query(default=None)) -> dict[str, object]:
+        if run_id is not None and not RUN_ID_PATTERN.fullmatch(run_id):
+            raise HTTPException(status_code=400, detail="invalid run_id")
+        entries = (
+            state.ledger
+            if run_id is None
+            else [entry for entry in state.ledger if entry.get("run_id") == run_id]
+        )
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "fixture_version": FIXTURE_VERSION,
+            "entries": entries,
+        }
+
+    @app.post("/ledger/reset")
+    async def reset_ledger(run_id: str | None = Query(default=None)) -> dict[str, str]:
+        if run_id is not None and not RUN_ID_PATTERN.fullmatch(run_id):
+            raise HTTPException(status_code=400, detail="invalid run_id")
+        if run_id is None:
+            state.ledger.clear()
+            state.scenario_requests.clear()
+        else:
+            state.ledger[:] = [
+                entry for entry in state.ledger if entry.get("run_id") != run_id
+            ]
+            state.scenario_requests = {
+                key: value
+                for key, value in state.scenario_requests.items()
+                if key[2] != run_id
+            }
+        return {"status": "ok"}
 
     @app.get("/search")
     async def search(
@@ -138,6 +181,7 @@ def create_app(*, default_scenario: str = "healthy") -> FastAPI:
         scenario_version: str = Query(default=SCHEMA_VERSION),
         limit: int = Query(default=10, ge=0, le=50),
         delay_ms: int = Query(default=0, ge=0, le=MAX_DELAY_MS),
+        run_id: str | None = Query(default=None, pattern=r"^[A-Za-z0-9._-]{1,64}$"),
     ) -> Response:
         del request, format, language
         if scenario_version != SCHEMA_VERSION:
@@ -148,7 +192,7 @@ def create_app(*, default_scenario: str = "healthy") -> FastAPI:
         selected = scenario or state.default_scenario
         if selected not in SCENARIOS:
             raise HTTPException(status_code=400, detail=f"Unknown scenario: {selected}")
-        scenario_request = state.next_scenario_request(selected, q)
+        scenario_request = state.next_scenario_request(selected, q, run_id)
         effective_delay = (
             delay_ms
             if selected not in {"delayed", "timeout"}
@@ -240,6 +284,7 @@ def create_app(*, default_scenario: str = "healthy") -> FastAPI:
             categories=categories,
             page=pageno,
             result_count=result_count,
+            run_id=run_id,
         )
         return payload
 

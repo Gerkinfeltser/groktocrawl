@@ -1,0 +1,7 @@
+{
+  "id": "live-calibration-v2",
+  "cases": [
+    {"id": "search-fixed-1", "kind": "search", "input": "python asyncio"},
+    {"id": "llm-fixed-1", "kind": "llm", "input": "Explain HTTP caching."}
+  ]
+}

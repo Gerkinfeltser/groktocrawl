@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
+import textwrap
 import unittest
 from pathlib import Path
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 CLASSIFIER = ROOT / "scripts" / "classify_ci_changes.py"
@@ -179,6 +183,65 @@ class CiChangeClassificationTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.stdout, "false\n")
+
+    def test_twin_selection_table(self) -> None:
+        cases = [
+            (["llm-svc/llm_svc/app.py"], True, "llm"),
+            (["slopsearx-fixture/slopsearx_fixture/app.py"], True, "search"),
+            (["agent-svc/agent/searxng_client.py"], True, "search"),
+            (["docs/ci.md"], False, "none"),
+            (["docs/ci.md", "docker-compose.yml"], True, "all"),
+            (["unknown/path"], True, "all"),
+            ([], True, "all"),
+            ([""], True, "all"),
+        ]
+        for paths, expected_bool, expected_selection in cases:
+            with self.subTest(paths=paths):
+                self.assertEqual(MODULE.requires_twin_contracts(paths), expected_bool)
+                self.assertEqual(MODULE.twin_test_selection(paths), expected_selection)
+
+    def test_changed_path_shell_block_is_valid_and_keeps_zero_sha_else(self) -> None:
+        workflow = WORKFLOW.read_text()
+        block = workflow.split('if [ "${{ github.event_name }}"', 1)[1]
+        block = (
+            'if [ "${{ github.event_name }}"'
+            + block.split("\n\n  twin-contracts:", 1)[0]
+        )
+        block = textwrap.dedent(block).replace("${{", "${PLACEHOLDER_")
+        block = block.replace("}}", "}")
+        result = subprocess.run(
+            ["bash", "-n"], input=block, text=True, capture_output=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("git diff-tree --root", block)
+        self.assertIn(
+            'if [ "$base" = "0000000000000000000000000000000000000000" ]; then', block
+        )
+        self.assertIn(
+            'else\n              changed_paths=$(git diff --name-only "$base" "$head")',
+            block,
+        )
+
+    def test_embedded_llm_probe_python_compiles_and_run_id_is_propagated(self) -> None:
+        workflow = WORKFLOW.read_text()
+        parsed = yaml.safe_load(workflow)
+        integration = parsed["jobs"]["integration-tests"]["steps"]
+        run = next(
+            step["run"]
+            for step in integration
+            if step.get("name") == "Verify LLM fixture contract and agent routing"
+        )
+        probes = re.findall(r'python3 -c "\n(.*?)\n"', run, flags=re.DOTALL)
+        self.assertEqual(len(probes), 2)
+        for index, probe in enumerate(probes):
+            compile(probe, f"docker.yml LLM probe {index}", "exec")
+        compose = (ROOT / "docker-compose.yml").read_text()
+        self.assertIn("TWIN_RUN_ID=${TWIN_RUN_ID:-local}", compose)
+        self.assertIn("run_id=${TWIN_RUN_ID:-local}", compose)
+        self.assertNotIn(
+            "LLM_BASE_URL=http://llm-svc:8011/v1?run_id=${TWIN_RUN_ID:-}", compose
+        )
+        self.assertIn("run_id=${{ github.run_id }}-${{ github.run_attempt }}", workflow)
 
 
 class RuntimeGateWorkflowContractTests(unittest.TestCase):
@@ -548,7 +611,7 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
             "- name: Fail when required runtime validation fails", self.runtime_gate
         )
         self.assertIn("needs.integration-tests.result != 'success'", self.runtime_gate)
-        self.assertEqual(self.runtime_gate.count("exit 1"), 2)
+        self.assertEqual(self.runtime_gate.count("exit 1"), 3)
 
 
 class FastTestsWorkflowContractTests(unittest.TestCase):

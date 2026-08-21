@@ -1,6 +1,6 @@
 # Three-Layer Testing Strategy
 
-* Status: accepted
+* Status: superseded by ADR-0056
 * Deciders: magnus, jasper
 * Date: 2025-06-05
 * Updated: 2025-07-05 — test directory structure reorganized per this ADR

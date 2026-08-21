@@ -2,6 +2,7 @@
 
 import logging
 import math
+import os
 import time
 from dataclasses import dataclass
 
@@ -167,6 +168,7 @@ class SearXNGClient:
         sources: list[str] | None = None,
         *,
         raise_on_rate_limit: bool = False,
+        scenario: str | None = None,
     ) -> tuple[list[dict], SearchHealth]:
         """Search the web and return structured results with health info.
 
@@ -218,6 +220,11 @@ class SearXNGClient:
                 "pageno": 1,
             }
             params["categories"] = ",".join(effective_categories)
+            run_id = os.getenv("TWIN_RUN_ID")
+            if run_id:
+                params["run_id"] = run_id
+            if scenario is not None:
+                params["scenario"] = scenario
 
             resp = await self._client.get(
                 f"{self.base_url}/search",

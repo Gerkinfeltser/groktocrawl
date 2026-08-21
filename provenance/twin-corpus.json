@@ -1,0 +1,1 @@
+{"id":"dependency-twins-v1","cases":[{"id":"healthy-search","kind":"search","input":"calibration search"},{"id":"healthy-llm","kind":"llm","input":"calibration prompt"}]}

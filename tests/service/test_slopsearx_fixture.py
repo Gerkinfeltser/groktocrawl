@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 import sys
 from pathlib import Path
@@ -15,10 +16,25 @@ import uvicorn
 sys.path.insert(0, str(Path(__file__).parents[2] / "slopsearx-fixture"))
 
 from slopsearx_fixture.app import (
+    MAX_LEDGER,
     SCHEMA_VERSION,
+    FixtureState,
     SearchResponse,
     create_app,
 )
+
+
+def test_scenario_request_partitions_are_hard_bounded():
+    state = FixtureState()
+    for index in range(MAX_LEDGER + 5):
+        state.next_scenario_request("healthy", f"query-{index}", "run-a")
+    assert len(state.scenario_requests) == MAX_LEDGER
+    newest_key = next(reversed(state.scenario_requests))
+    assert newest_key[2] == "run-a"
+    assert (
+        state.next_scenario_request("healthy", f"query-{MAX_LEDGER + 4}", "run-a") == 2
+    )
+    assert len(state.scenario_requests) == MAX_LEDGER
 
 
 @pytest_asyncio.fixture
@@ -224,6 +240,82 @@ async def test_pagination_delay_and_category_ledger_are_bounded_and_private(
         await timeout_client.close()
     finally:
         await _stop_tcp_fixture(base_url, server_task, server)
+
+
+@pytest.mark.asyncio
+async def test_ledger_is_versioned_run_scoped_and_resettable():
+    from httpx import ASGITransport, AsyncClient
+
+    direct = AsyncClient(
+        transport=ASGITransport(app=create_app()), base_url="http://fixture"
+    )
+    await direct.get("/search", params={"q": "private", "run_id": "run-a"})
+    await direct.get("/search", params={"q": "other", "run_id": "run-b"})
+    ledger = (await direct.get("/ledger", params={"run_id": "run-a"})).json()
+    assert ledger["fixture_version"] == "v1"
+    assert {entry["run_id"] for entry in ledger["entries"]} == {"run-a"}
+    assert "private" not in json.dumps(ledger)
+    assert (await direct.post("/ledger/reset", params={"run_id": "run-a"})).json() == {
+        "status": "ok"
+    }
+    assert (await direct.get("/ledger", params={"run_id": "run-a"})).json()[
+        "entries"
+    ] == []
+    await direct.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ledger_is_hard_bounded_and_run_reset_removes_quota_state():
+    from httpx import ASGITransport, AsyncClient
+
+    direct = AsyncClient(
+        transport=ASGITransport(app=create_app()), base_url="http://fixture"
+    )
+    for index in range(205):
+        response = await direct.get(
+            "/search", params={"q": f"query-{index}", "run_id": "run-a"}
+        )
+        assert response.status_code == 200
+    entries = (await direct.get("/ledger")).json()["entries"]
+    assert len(entries) == 200
+    assert entries[0]["request_id"] == 6
+    await direct.get(
+        "/search",
+        params={"scenario": "quota-exhaustion", "q": "same", "run_id": "run-a"},
+    )
+    assert (
+        await direct.get(
+            "/search",
+            params={"scenario": "quota-exhaustion", "q": "same", "run_id": "run-b"},
+        )
+    ).status_code == 200
+    await direct.post("/ledger/reset", params={"run_id": "run-a"})
+    assert (await direct.get("/ledger", params={"run_id": "run-a"})).json()[
+        "entries"
+    ] == []
+    assert (
+        await direct.get(
+            "/search",
+            params={"scenario": "quota-exhaustion", "q": "same", "run_id": "run-a"},
+        )
+    ).status_code == 200
+    await direct.aclose()
+
+
+@pytest.mark.asyncio
+async def test_run_reset_isolates_quota_counters_and_ledger():
+    from httpx import ASGITransport, AsyncClient
+
+    direct = AsyncClient(
+        transport=ASGITransport(app=create_app()), base_url="http://fixture"
+    )
+    params = {"scenario": "quota-exhaustion", "q": "same", "run_id": "run-a"}
+    assert (await direct.get("/search", params=params)).status_code == 200
+    assert (await direct.get("/search", params=params)).status_code == 429
+    await direct.post("/ledger/reset", params={"run_id": "run-a"})
+    assert (await direct.get("/search", params=params)).status_code == 200
+    assert (await direct.get("/ledger", params={"run_id": "run-a"})).json()["entries"]
+    await direct.aclose()
 
 
 @pytest.mark.asyncio

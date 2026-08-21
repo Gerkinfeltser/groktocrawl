@@ -11,7 +11,7 @@ services:
       retries: 20
 
   slopsearx:
-    image: ghcr.io/magnus919/slopsearx:latest
+    image: ghcr.io/magnus919/slopsearx@sha256:c7fd83077bf5f189a0125b6377b367740068d012e9caeb48318401a23437711d
     restart: unless-stopped
     ports:
       - "8081:8080"
@@ -26,7 +26,7 @@ services:
       retries: 3
 
   slopsearx-mcp:
-    image: ghcr.io/magnus919/slopsearx:latest
+    image: ghcr.io/magnus919/slopsearx@sha256:c7fd83077bf5f189a0125b6377b367740068d012e9caeb48318401a23437711d
     # The MCP companion must never run unauthenticated, but a required-token
     # guard using the Compose `:?` operator would abort a no-config
     # `docker compose up` at load time (Compose interpolates the whole file
@@ -105,6 +105,7 @@ services:
       - fixture
     environment:
       - FIXTURE_SITE_BASE_URL=http://test-site:8000
+      - TWIN_RUN_ID=${TWIN_RUN_ID:-}
     depends_on:
       test-site:
         condition: service_started
@@ -249,6 +250,7 @@ services:
       - SEARXNG_URL=${SEARXNG_URL:-http://slopsearx:8080}
       - SCRAPER_URL=${SCRAPER_URL:-http://scraper-svc:8001}
       - SEMANTIC_URL=${SEMANTIC_URL:-http://semantic-svc:8003}
+      - LLM_BASE_URL=${LLM_BASE_URL:-http://llm-svc:8011/v1}
       - HOST=0.0.0.0
       - PORT=8080
     healthcheck:
@@ -278,6 +280,8 @@ services:
         condition: service_started
     environment:
       - VALKEY_URL=redis://valkey:6379/1
+      - TWIN_RUN_ID=${TWIN_RUN_ID:-local}
+      - LLM_BASE_URL=http://llm-svc:8011/v1?run_id=${TWIN_RUN_ID:-local}
       - SEARXNG_URL=http://slopsearx-fixture:8080
       - SCRAPER_URL=http://scraper-svc:8001
       - SEMANTIC_URL=http://semantic-svc:8003
