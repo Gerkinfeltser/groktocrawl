@@ -25,10 +25,14 @@ CI/CD stats: `mutmut-cicd-stats.json`
 - **test gap** — a genuine decision-logic mutant the oracle should catch but currently
   cannot because the relevant input/boundary is untested. **None remains:** the confirmed
   oracle gaps hardened in STAGE 2 (the two `_parse_retry_after` boundary mutants, by
-  operator `seconds < 0` → `seconds <= 0` and `seconds < 0` → `seconds < 1`) and the three
-  deferred gaps closed by the follow-up hardening (search-budget enforcement, scenario
-  forwarding, sources→category routing) are all **killed** in this run. No survivor in this
-  run maps to a genuine, currently-untested decision-logic gap.
+  operator `seconds < 0` → `seconds <= 0` and `seconds < 0` → `seconds < 1`) are genuinely
+  killed by the boundary tests. Of the three deferred gaps closed by the follow-up
+  hardening, only search `mutmut_7` (search-budget `>=` → `>`) is killed by
+  `test_search_budget_exhausted_raises_rate_limited`; the scenario and sources-routing
+  tests add behavior-level coverage of those decision areas but do not kill the cosmetic
+  survivors (`mutmut_8/9/10/39` invalid, `mutmut_12` equivalent), which remain correctly
+  disposed as survived in the rows below. No survivor in this run maps to a genuine,
+  currently-untested decision-logic gap.
 - **equivalent behavior** — observably identical to the original under the pilot's unit
   oracle for all covered inputs (header-name case-folding, unexercised defaults/`.get()`
   defaults/boundaries, rstrip equivalences, substring-preserving detail strings, unset-env
