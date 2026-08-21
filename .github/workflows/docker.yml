@@ -597,6 +597,24 @@ jobs:
         if: always()
         run: cat qa-outcomes-*.md >> "$GITHUB_STEP_SUMMARY" || true
 
+      - name: Capture sanitized LLM fixture diagnostics
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          import urllib.request
+          allowed = {"request_id", "schema_version", "fixture_version", "scenario", "scenario_version", "run_id", "status", "classification", "model", "stream"}
+          try:
+              with urllib.request.urlopen("http://localhost:8011/diagnostics", timeout=5) as response:
+                  payload = json.load(response)
+              entries = [{key: value for key, value in entry.items() if key in allowed} for entry in payload.get("entries", [])]
+              output = {"schema_version": payload.get("schema_version"), "fixture_version": payload.get("fixture_version"), "entries": entries}
+          except Exception as exc:
+              output = {"error": "diagnostics unavailable", "classification": type(exc).__name__}
+          with open("llm-fixture-diagnostics.json", "w") as file:
+              json.dump(output, file, indent=2)
+          PY
+
       - name: Publish coverage summary
         if: always()
         run: |
@@ -618,6 +636,14 @@ jobs:
         with:
           name: integration-test-outcomes
           path: qa-outcomes-*
+          if-no-files-found: warn
+
+      - name: Upload LLM fixture diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: llm-fixture-diagnostics
+          path: llm-fixture-diagnostics.json
           if-no-files-found: warn
 
       - name: Upload coverage reports

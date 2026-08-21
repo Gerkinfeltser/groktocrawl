@@ -7,8 +7,10 @@ Ollama, llama.cpp, vLLM, etc.
 import asyncio
 import json
 import logging
+import math
 import time
 from collections.abc import AsyncGenerator
+from typing import Any
 
 import httpx
 
@@ -16,6 +18,7 @@ from common.stage_metrics import inc_counter, observe_elapsed
 
 from .admission import AdmissionRejectedError, get_admission
 from .cancel import JobCancelledError, raise_if_cancelled
+from .exceptions import ProviderOutputError, RetryableRateLimitError
 from .settings import load_settings
 
 logger = logging.getLogger(__name__)
@@ -24,6 +27,42 @@ _LLM_CALL_SECONDS = "groktocrawl_llm_call_seconds"
 _LLM_CALL_SECONDS_HELP = "LLM call latency by research stage"
 _LLM_CALLS_TOTAL = "groktocrawl_llm_calls_total"
 _LLM_CALLS_TOTAL_HELP = "Total LLM calls by research stage and outcome"
+_MAX_RETRY_AFTER_SECONDS = 60
+
+
+def _completion_content(result: object) -> str:
+    """Extract only a complete, non-refusal provider completion."""
+    if not isinstance(result, dict):
+        raise ProviderOutputError(detail="LLM provider returned an invalid response")
+    try:
+        choice = result["choices"][0]
+        message = choice["message"]
+        finish_reason = choice.get("finish_reason")
+        if message.get("refusal") or finish_reason == "length":
+            raise ProviderOutputError(
+                detail="LLM provider returned an unusable response"
+            )
+        content = message.get("content")
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ProviderOutputError(
+            detail="LLM provider returned an invalid response"
+        ) from exc
+    if not isinstance(content, str) or not content.strip():
+        raise ProviderOutputError(detail="LLM provider returned an invalid response")
+    return content
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """Parse and bound numeric upstream Retry-After metadata."""
+    if not value:
+        return None
+    try:
+        seconds = float(value.strip())
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return max(1.0, min(seconds, _MAX_RETRY_AFTER_SECONDS))
 
 
 class LLMClient:
@@ -46,6 +85,12 @@ class LLMClient:
         self._admission = admission if admission is not None else get_admission()
         self._client = httpx.AsyncClient(timeout=120)
 
+    def _completion_url(self) -> str:
+        """Append the endpoint while preserving optional fixture query params."""
+        url = httpx.URL(self.base_url)
+        path = url.path.rstrip("/") + "/chat/completions"
+        return str(url.copy_with(path=path))
+
     async def generate_stream(
         self,
         system_prompt: str,
@@ -53,7 +98,7 @@ class LLMClient:
         context: str | None = None,
         schema: dict | None = None,
         stage: str = "other",
-    ) -> AsyncGenerator[dict[str, str], None]:
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """Generate a streaming response from the LLM (SSE).
 
         When ``schema`` is provided, delegates to :meth:`generate` for a
@@ -79,15 +124,27 @@ class LLMClient:
         """
         # Schema mode: delegate to generate() non-streaming
         if schema:
-            content = await self.generate(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                context=context,
-                schema=schema,
-                stage=stage,
-            )
-            if content.startswith("Error:"):
-                yield {"type": "error", "content": content}
+            try:
+                content = await self.generate(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    context=context,
+                    schema=schema,
+                    stage=stage,
+                )
+            except RetryableRateLimitError as exc:
+                yield {
+                    "type": "error",
+                    "classification": "retryable",
+                    "retry_after_seconds": exc.retry_after_seconds,
+                    "content": exc.detail,
+                }
+            except ProviderOutputError as exc:
+                yield {
+                    "type": "error",
+                    "classification": "non_retryable",
+                    "content": exc.detail,
+                }
             else:
                 yield {"type": "done", "full_content": content}
             return
@@ -139,13 +196,14 @@ class LLMClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         full_content = ""
+        saw_done = False
         outcome = "success"
         started = time.monotonic()
         try:
             async with httpx.AsyncClient(timeout=120) as client:
                 async with client.stream(
                     "POST",
-                    f"{self.base_url}/chat/completions",
+                    self._completion_url(),
                     headers=headers,
                     json=body,
                 ) as resp:
@@ -155,9 +213,22 @@ class LLMClient:
                         logger.error(
                             "LLM API error %d: %s", resp.status_code, error_text[:500]
                         )
+                        if resp.status_code == 429:
+                            outcome = "rate_limited"
+                            yield {
+                                "type": "error",
+                                "classification": "retryable",
+                                "retry_after_seconds": _parse_retry_after(
+                                    resp.headers.get("Retry-After")
+                                ),
+                                "content": "LLM provider rate limit exceeded",
+                            }
+                            return
+                        outcome = "provider_error"
                         yield {
                             "type": "error",
-                            "content": f"LLM API returned {resp.status_code}",
+                            "classification": "non_retryable",
+                            "content": f"LLM provider returned HTTP {resp.status_code}",
                         }
                         return
 
@@ -166,9 +237,12 @@ class LLMClient:
                             continue
                         data_str = line[6:].strip()
                         if data_str == "[DONE]":
+                            saw_done = True
                             break
                         try:
                             chunk = json.loads(data_str)
+                            if not isinstance(chunk, dict):
+                                raise ValueError("SSE payload is not an object")
                             choices = chunk.get("choices", [{}])
                             if not choices:
                                 continue
@@ -177,9 +251,23 @@ class LLMClient:
                             if token:
                                 full_content += token
                                 yield {"type": "token", "content": token}
-                        except json.JSONDecodeError:
-                            continue
+                        except (json.JSONDecodeError, ValueError, TypeError, KeyError):
+                            outcome = "malformed"
+                            yield {
+                                "type": "error",
+                                "classification": "malformed",
+                                "content": "LLM provider returned malformed SSE",
+                            }
+                            return
 
+            if not saw_done:
+                outcome = "truncated"
+                yield {
+                    "type": "error",
+                    "classification": "truncated",
+                    "content": "LLM provider stream ended before [DONE]",
+                }
+                return
             yield {"type": "done", "full_content": full_content}
 
         except asyncio.CancelledError:
@@ -190,10 +278,17 @@ class LLMClient:
             raise
         except JobCancelledError:
             raise
+        except RetryableRateLimitError:
+            outcome = "rate_limited"
+            raise
         except Exception as e:
             outcome = "error"
             logger.error("LLM stream call failed: %s", e)
-            yield {"type": "error", "content": f"LLM call failed: {e}"}
+            yield {
+                "type": "error",
+                "classification": "non_retryable",
+                "content": "LLM provider stream failed",
+            }
         finally:
             observe_elapsed(
                 _LLM_CALL_SECONDS, _LLM_CALL_SECONDS_HELP, {"stage": stage}, started
@@ -285,21 +380,44 @@ class LLMClient:
 
         try:
             resp = await self._client.post(
-                f"{self.base_url}/chat/completions",
+                self._completion_url(),
                 headers=headers,
                 json=body,
             )
             if resp.status_code != 200:
                 outcome = "error"
                 logger.error("LLM API error %d: %s", resp.status_code, resp.text[:500])
-                return f"Error: LLM API returned {resp.status_code}"
+                if resp.status_code == 429:
+                    raise RetryableRateLimitError(
+                        detail="LLM provider rate limit exceeded",
+                        retry_after_seconds=_parse_retry_after(
+                            resp.headers.get("Retry-After")
+                        ),
+                    )
+                raise ProviderOutputError(
+                    detail=f"LLM provider returned HTTP {resp.status_code}"
+                )
 
-            result = resp.json()
-            content = result["choices"][0]["message"]["content"]
-            return content  # type: ignore[no-any-return]
+            try:
+                result = resp.json()
+            except (ValueError, json.JSONDecodeError) as exc:
+                raise ProviderOutputError(
+                    detail="LLM provider returned malformed JSON"
+                ) from exc
+            return _completion_content(result)
 
         except JobCancelledError:
             raise
+        except RetryableRateLimitError:
+            outcome = "rate_limited"
+            raise
+        except ProviderOutputError:
+            outcome = "provider_error"
+            raise
+        except httpx.HTTPError as exc:
+            outcome = "provider_error"
+            logger.error("LLM transport failed: %s", type(exc).__name__)
+            raise ProviderOutputError(detail="LLM provider transport failed") from exc
         except Exception as e:
             outcome = "error"
             logger.error("LLM call failed: %s", e)
@@ -334,7 +452,7 @@ class LLMClient:
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 resp = await client.post(
-                    f"{self.base_url}/chat/completions",
+                    self._completion_url(),
                     headers=headers,
                     json=body,
                 )

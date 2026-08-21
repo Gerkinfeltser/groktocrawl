@@ -9,6 +9,7 @@ from typing import Any
 
 from common.stage_metrics import StreamTiming, observe_elapsed
 
+from ..exceptions import StructuredOutputError
 from ..llm import LLMClient
 from ..models import CitationStyle
 from ..scraper_client import ScraperClient
@@ -30,6 +31,21 @@ from .sources import SourceArtifact, artifacts_to_documents_and_details
 from .utils import _validate_json_if_schema
 
 logger = logging.getLogger(__name__)
+
+
+def _research_error_event(event: dict[str, Any]) -> ResearchEvent:
+    """Preserve bounded LLM error metadata in the research event contract."""
+    result: ResearchEvent = {
+        "type": "error",
+        "content": str(event.get("content", "LLM provider failed")),
+    }
+    classification = event.get("classification")
+    if isinstance(classification, str):
+        result["classification"] = classification
+    retry_after = event.get("retry_after_seconds")
+    if isinstance(retry_after, int | float) and not isinstance(retry_after, bool):
+        result["retry_after_seconds"] = float(retry_after)
+    return result
 
 
 async def _run_research_events(
@@ -195,7 +211,17 @@ async def _run_research_events(
                     schema=schema,
                     stage="synthesis",
                 )
-                _validate_json_if_schema(answer, schema)
+                try:
+                    _validate_json_if_schema(answer, schema)
+                except StructuredOutputError as exc:
+                    if stream_tokens:
+                        yield {
+                            "type": "error",
+                            "classification": "non_retryable",
+                            "content": exc.detail,
+                        }
+                        return
+                    raise
                 if not schema and not stream_tokens:
                     yield {
                         "type": "sources",
@@ -217,7 +243,7 @@ async def _run_research_events(
                         answer += event["content"]
                         yield {"type": "token", "content": event["content"]}
                     elif event["type"] == "error":
-                        yield {"type": "error", "content": event["content"]}
+                        yield _research_error_event(event)
                         return
                     elif event["type"] == "done":
                         answer = event["full_content"]
@@ -465,6 +491,7 @@ async def run_answer(
                 schema=output_schema,
                 stage="answer",
             )
+            _validate_json_if_schema(answer, output_schema)
         else:
             user_prompt = _build_answer_user_prompt(query, cs)
             answer = await llm.generate(
@@ -622,6 +649,15 @@ async def run_answer_stream(
                 schema=output_schema,
                 stage="answer",
             )
+            try:
+                _validate_json_if_schema(full_answer, output_schema)
+            except StructuredOutputError as exc:
+                yield {
+                    "type": "error",
+                    "classification": "non_retryable",
+                    "content": exc.detail,
+                }
+                return
         else:
             user_prompt = _build_answer_user_prompt(query, cs)
             full_answer = ""
@@ -636,7 +672,7 @@ async def run_answer_stream(
                     full_answer += event["content"]
                     yield {"type": "token", "content": event["content"]}
                 elif event["type"] == "error":
-                    yield {"type": "error", "content": event["content"]}
+                    yield dict(_research_error_event(event))
                     return
                 elif event["type"] == "done":
                     full_answer = event["full_content"]

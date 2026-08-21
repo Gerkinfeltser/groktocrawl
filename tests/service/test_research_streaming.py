@@ -128,3 +128,45 @@ class TestLiveResearchStreamingAdmission:
 
         assert any('"type": "done"' in chunk for chunk in chunks)
         assert chunks[-1] == "data: [DONE]\n\n"
+
+    @pytest.mark.asyncio
+    async def test_error_preserves_classification_and_has_no_done_marker(self):
+        from agent.models import CitationStyle
+        from agent.research.streaming import stream_research_live
+
+        async def error_events(*args, **kwargs):
+            yield {"type": "status", "state": "synthesizing"}
+            yield {
+                "type": "error",
+                "content": "LLM provider rate limit exceeded",
+                "classification": "retryable",
+                "retry_after_seconds": 2.0,
+            }
+
+        with patch("agent.research.streaming.run_research_stream", error_events):
+            chunks = [
+                chunk
+                async for chunk in stream_research_live(
+                    prompt="Question",
+                    urls=None,
+                    schema=None,
+                    searxng_url="http://searxng",
+                    scraper_url="http://scraper",
+                    llm_base_url="http://llm",
+                    llm_api_key="key",
+                    llm_model="test-model",
+                    requested_model=None,
+                    max_searches_per_request=5,
+                    include_images=False,
+                    citation_style=CitationStyle.inline,
+                )
+            ]
+
+        error = json.loads(chunks[-1].removeprefix("data: "))
+        assert error == {
+            "type": "error",
+            "content": "LLM provider rate limit exceeded",
+            "classification": "retryable",
+            "retry_after_seconds": 2.0,
+        }
+        assert "data: [DONE]\n\n" not in chunks

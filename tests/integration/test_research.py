@@ -343,7 +343,7 @@ class TestRunResearch:
         with (
             patch("agent.research.loop.SearXNGClient", return_value=searxng),
             patch("agent.research.loop.ScraperClient", return_value=scraper),
-            patch("agent.research.loop.LLMClient", return_value=llm),
+            patch("agent.research.loop.LLMClient", return_value=llm) as llm_client,
         ):
             result = await run_research(
                 prompt="test",
@@ -353,9 +353,8 @@ class TestRunResearch:
             )
 
         assert result["result"] == "ok"
-        # LLMClient should have been constructed with model="gpt-4o"
-        llm_call = llm.generate.call_args[1]
-        assert "system_prompt" in llm_call
+        llm_client.assert_called_once_with("https://api.openai.com/v1", "", "gpt-4o")
+        assert "system_prompt" in llm.generate.call_args.kwargs
 
     @pytest.mark.asyncio
     async def test_sources_uses_filtered_list(self, mocks):

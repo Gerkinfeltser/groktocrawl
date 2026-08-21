@@ -9,6 +9,7 @@ dependencies = [
     "redis>=5.2.0",
     "httpx>=0.28.0",
     "pydantic>=2.10.0",
+    "jsonschema>=4.23.0",
     "beautifulsoup4>=4.13.0",
     "python-multipart>=0.0.20",
 ]
