@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -48,7 +48,7 @@
+                     "budget_max": self._max_searches,
+                 },
+             )
+-        self._search_count += 1
++        self._search_count += 2
+
+         effective_categories = self._translate(sources, categories)
+         params = {

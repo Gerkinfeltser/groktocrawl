@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -116,7 +116,7 @@
+                 {
+                     "url": item.get("url", ""),
+                     "title": item.get("title", ""),
+-                    "description": item.get("content", ""),
++                    "description": item.get("XXcontentXX", ""),
+                     "engine": item.get("engine", ""),
+                 }
+             )

@@ -1,0 +1,636 @@
+
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+⠦ Generating mutants
+⠧ Generating mutants
+⠇ Generating mutants
+⠏ Generating mutants
+⠋ Generating mutants
+⠙ Generating mutants
+⠹ Generating mutants
+⠸ Generating mutants
+⠼ Generating mutants
+⠴ Generating mutants
+    done in 2391ms (1 files mutated, 76 ignored, 0 unmodified)
+
+⠹ Running stats
+⠸ Running stats
+⠼ Running stats
+⠴ Running stats
+⠦ Running stats
+⠧ Running stats
+⠇ Running stats
+⠏ Running stats
+⠋ Running stats
+⠙ Running stats
+⠹ Running stats
+⠸ Running stats
+⠼ Running stats
+⠴ Running stats
+⠦ Running stats
+⠧ Running stats
+⠇ Running stats
+⠏ Running stats
+⠋ Running stats
+⠙ Running stats
+⠹ Running stats
+⠸ Running stats
+⠼ Running stats
+⠴ Running stats
+⠦ Running stats
+⠧ Running stats
+⠇ Running stats
+⠏ Running stats
+⠋ Running stats
+⠙ Running stats
+⠹ Running stats
+⠸ Running stats
+    done
+
+⠼ Running clean tests
+⠴ Running clean tests
+⠦ Running clean tests
+⠧ Running clean tests
+⠇ Running clean tests
+⠏ Running clean tests
+⠋ Running clean tests
+⠙ Running clean tests
+⠹ Running clean tests
+⠸ Running clean tests
+⠼ Running clean tests
+⠴ Running clean tests
+⠦ Running clean tests
+⠧ Running clean tests
+⠇ Running clean tests
+⠏ Running clean tests
+⠋ Running clean tests
+⠙ Running clean tests
+⠹ Running clean tests
+⠸ Running clean tests
+⠼ Running clean tests
+⠴ Running clean tests
+⠦ Running clean tests
+⠧ Running clean tests
+⠇ Running clean tests
+⠏ Running clean tests
+⠋ Running clean tests
+⠙ Running clean tests
+⠹ Running clean tests
+⠸ Running clean tests
+⠼ Running clean tests
+⠴ Running clean tests
+    done
+
+⠦ Running forced fail test
+⠧ Running forced fail test
+⠇ Running forced fail test
+⠏ Running forced fail test
+⠋ Running forced fail test
+⠙ Running forced fail test
+⠹ Running forced fail test
+⠸ Running forced fail test
+⠼ Running forced fail test
+⠴ Running forced fail test
+⠦ Running forced fail test
+⠧ Running forced fail test
+⠇ Running forced fail test
+⠏ Running forced fail test
+⠋ Running forced fail test
+⠙ Running forced fail test
+⠹ Running forced fail test
+⠸ Running forced fail test
+    done
+Running mutation testing
+
+⠼ 0/316  🎉 0 🫥 0  ⏰ 0  🤔 0  🙁 0  🔇 0  🧙 0
+⠴ 1/316  🎉 1 🫥 0  ⏰ 0  🤔 0  🙁 0  🔇 0  🧙 0
+⠦ 2/316  🎉 2 🫥 0  ⏰ 0  🤔 0  🙁 0  🔇 0  🧙 0
+⠧ 3/316  🎉 3 🫥 0  ⏰ 0  🤔 0  🙁 0  🔇 0  🧙 0
+⠇ 4/316  🎉 4 🫥 0  ⏰ 0  🤔 0  🙁 0  🔇 0  🧙 0
+⠏ 5/316  🎉 5 🫥 0  ⏰ 0  🤔 0  🙁 0  🔇 0  🧙 0
+⠋ 6/316  🎉 6 🫥 0  ⏰ 0  🤔 0  🙁 0  🔇 0  🧙 0
+⠙ 7/316  🎉 6 🫥 0  ⏰ 0  🤔 0  🙁 1  🔇 0  🧙 0
+⠹ 8/316  🎉 6 🫥 0  ⏰ 0  🤔 0  🙁 2  🔇 0  🧙 0
+⠸ 9/316  🎉 7 🫥 0  ⏰ 0  🤔 0  🙁 2  🔇 0  🧙 0
+⠼ 10/316  🎉 8 🫥 0  ⏰ 0  🤔 0  🙁 2  🔇 0  🧙 0
+⠴ 11/316  🎉 8 🫥 0  ⏰ 0  🤔 0  🙁 3  🔇 0  🧙 0
+⠦ 12/316  🎉 9 🫥 0  ⏰ 0  🤔 0  🙁 3  🔇 0  🧙 0
+⠧ 13/316  🎉 9 🫥 0  ⏰ 0  🤔 0  🙁 4  🔇 0  🧙 0
+⠇ 14/316  🎉 10 🫥 0  ⏰ 0  🤔 0  🙁 4  🔇 0  🧙 0
+⠏ 15/316  🎉 11 🫥 0  ⏰ 0  🤔 0  🙁 4  🔇 0  🧙 0
+⠋ 16/316  🎉 12 🫥 0  ⏰ 0  🤔 0  🙁 4  🔇 0  🧙 0
+⠙ 17/316  🎉 13 🫥 0  ⏰ 0  🤔 0  🙁 4  🔇 0  🧙 0
+⠹ 18/316  🎉 14 🫥 0  ⏰ 0  🤔 0  🙁 4  🔇 0  🧙 0
+⠸ 19/316  🎉 15 🫥 0  ⏰ 0  🤔 0  🙁 4  🔇 0  🧙 0
+⠼ 20/316  🎉 16 🫥 0  ⏰ 0  🤔 0  🙁 4  🔇 0  🧙 0
+⠴ 21/316  🎉 16 🫥 0  ⏰ 0  🤔 0  🙁 5  🔇 0  🧙 0
+⠦ 22/316  🎉 17 🫥 0  ⏰ 0  🤔 0  🙁 5  🔇 0  🧙 0
+⠧ 23/316  🎉 17 🫥 0  ⏰ 0  🤔 0  🙁 6  🔇 0  🧙 0
+⠇ 24/316  🎉 18 🫥 0  ⏰ 0  🤔 0  🙁 6  🔇 0  🧙 0
+⠏ 25/316  🎉 19 🫥 0  ⏰ 0  🤔 0  🙁 6  🔇 0  🧙 0
+⠋ 26/316  🎉 19 🫥 0  ⏰ 0  🤔 0  🙁 7  🔇 0  🧙 0
+⠙ 27/316  🎉 20 🫥 0  ⏰ 0  🤔 0  🙁 7  🔇 0  🧙 0
+⠹ 28/316  🎉 21 🫥 0  ⏰ 0  🤔 0  🙁 7  🔇 0  🧙 0
+⠸ 29/316  🎉 22 🫥 0  ⏰ 0  🤔 0  🙁 7  🔇 0  🧙 0
+⠼ 30/316  🎉 23 🫥 0  ⏰ 0  🤔 0  🙁 7  🔇 0  🧙 0
+⠴ 31/316  🎉 24 🫥 0  ⏰ 0  🤔 0  🙁 7  🔇 0  🧙 0
+⠦ 32/316  🎉 25 🫥 0  ⏰ 0  🤔 0  🙁 7  🔇 0  🧙 0
+⠧ 33/316  🎉 26 🫥 0  ⏰ 0  🤔 0  🙁 7  🔇 0  🧙 0
+⠇ 34/316  🎉 27 🫥 0  ⏰ 0  🤔 0  🙁 7  🔇 0  🧙 0
+⠏ 35/316  🎉 28 🫥 0  ⏰ 0  🤔 0  🙁 7  🔇 0  🧙 0
+⠋ 36/316  🎉 29 🫥 0  ⏰ 0  🤔 0  🙁 7  🔇 0  🧙 0
+⠙ 37/316  🎉 30 🫥 0  ⏰ 0  🤔 0  🙁 7  🔇 0  🧙 0
+⠹ 38/316  🎉 31 🫥 0  ⏰ 0  🤔 0  🙁 7  🔇 0  🧙 0
+⠸ 39/316  🎉 32 🫥 0  ⏰ 0  🤔 0  🙁 7  🔇 0  🧙 0
+⠼ 40/316  🎉 33 🫥 0  ⏰ 0  🤔 0  🙁 7  🔇 0  🧙 0
+⠴ 41/316  🎉 34 🫥 0  ⏰ 0  🤔 0  🙁 7  🔇 0  🧙 0
+⠦ 42/316  🎉 34 🫥 0  ⏰ 0  🤔 0  🙁 8  🔇 0  🧙 0
+⠧ 43/316  🎉 34 🫥 0  ⏰ 0  🤔 0  🙁 9  🔇 0  🧙 0
+⠇ 44/316  🎉 34 🫥 0  ⏰ 0  🤔 0  🙁 10  🔇 0  🧙 0
+⠏ 45/316  🎉 35 🫥 0  ⏰ 0  🤔 0  🙁 10  🔇 0  🧙 0
+⠋ 46/316  🎉 36 🫥 0  ⏰ 0  🤔 0  🙁 10  🔇 0  🧙 0
+⠙ 47/316  🎉 37 🫥 0  ⏰ 0  🤔 0  🙁 10  🔇 0  🧙 0
+⠹ 48/316  🎉 38 🫥 0  ⏰ 0  🤔 0  🙁 10  🔇 0  🧙 0
+⠸ 49/316  🎉 39 🫥 0  ⏰ 0  🤔 0  🙁 10  🔇 0  🧙 0
+⠼ 50/316  🎉 39 🫥 0  ⏰ 0  🤔 0  🙁 11  🔇 0  🧙 0
+⠴ 51/316  🎉 40 🫥 0  ⏰ 0  🤔 0  🙁 11  🔇 0  🧙 0
+⠦ 52/316  🎉 41 🫥 0  ⏰ 0  🤔 0  🙁 11  🔇 0  🧙 0
+⠧ 53/316  🎉 42 🫥 0  ⏰ 0  🤔 0  🙁 11  🔇 0  🧙 0
+⠇ 54/316  🎉 43 🫥 0  ⏰ 0  🤔 0  🙁 11  🔇 0  🧙 0
+⠏ 55/316  🎉 44 🫥 0  ⏰ 0  🤔 0  🙁 11  🔇 0  🧙 0
+⠋ 56/316  🎉 45 🫥 0  ⏰ 0  🤔 0  🙁 11  🔇 0  🧙 0
+⠙ 57/316  🎉 46 🫥 0  ⏰ 0  🤔 0  🙁 11  🔇 0  🧙 0
+⠹ 58/316  🎉 47 🫥 0  ⏰ 0  🤔 0  🙁 11  🔇 0  🧙 0
+⠸ 59/316  🎉 48 🫥 0  ⏰ 0  🤔 0  🙁 11  🔇 0  🧙 0
+⠼ 60/316  🎉 49 🫥 0  ⏰ 0  🤔 0  🙁 11  🔇 0  🧙 0
+⠴ 61/316  🎉 50 🫥 0  ⏰ 0  🤔 0  🙁 11  🔇 0  🧙 0
+⠦ 62/316  🎉 51 🫥 0  ⏰ 0  🤔 0  🙁 11  🔇 0  🧙 0
+⠧ 63/316  🎉 52 🫥 0  ⏰ 0  🤔 0  🙁 11  🔇 0  🧙 0
+⠇ 64/316  🎉 53 🫥 0  ⏰ 0  🤔 0  🙁 11  🔇 0  🧙 0
+⠏ 65/316  🎉 54 🫥 0  ⏰ 0  🤔 0  🙁 11  🔇 0  🧙 0
+⠋ 66/316  🎉 54 🫥 0  ⏰ 0  🤔 0  🙁 12  🔇 0  🧙 0
+⠙ 67/316  🎉 55 🫥 0  ⏰ 0  🤔 0  🙁 12  🔇 0  🧙 0
+⠹ 68/316  🎉 56 🫥 0  ⏰ 0  🤔 0  🙁 12  🔇 0  🧙 0
+⠸ 69/316  🎉 56 🫥 0  ⏰ 0  🤔 0  🙁 13  🔇 0  🧙 0
+⠼ 70/316  🎉 56 🫥 0  ⏰ 0  🤔 0  🙁 14  🔇 0  🧙 0
+⠴ 71/316  🎉 56 🫥 0  ⏰ 0  🤔 0  🙁 15  🔇 0  🧙 0
+⠦ 72/316  🎉 56 🫥 0  ⏰ 0  🤔 0  🙁 16  🔇 0  🧙 0
+⠧ 73/316  🎉 56 🫥 0  ⏰ 0  🤔 0  🙁 17  🔇 0  🧙 0
+⠇ 74/316  🎉 56 🫥 0  ⏰ 0  🤔 0  🙁 18  🔇 0  🧙 0
+⠏ 75/316  🎉 56 🫥 0  ⏰ 0  🤔 0  🙁 19  🔇 0  🧙 0
+⠋ 76/316  🎉 57 🫥 0  ⏰ 0  🤔 0  🙁 19  🔇 0  🧙 0
+⠙ 77/316  🎉 57 🫥 0  ⏰ 0  🤔 0  🙁 20  🔇 0  🧙 0
+⠹ 78/316  🎉 58 🫥 0  ⏰ 0  🤔 0  🙁 20  🔇 0  🧙 0
+⠸ 79/316  🎉 59 🫥 0  ⏰ 0  🤔 0  🙁 20  🔇 0  🧙 0
+⠼ 80/316  🎉 60 🫥 0  ⏰ 0  🤔 0  🙁 20  🔇 0  🧙 0
+⠴ 81/316  🎉 61 🫥 0  ⏰ 0  🤔 0  🙁 20  🔇 0  🧙 0
+⠦ 82/316  🎉 61 🫥 0  ⏰ 0  🤔 0  🙁 21  🔇 0  🧙 0
+⠧ 83/316  🎉 61 🫥 0  ⏰ 0  🤔 0  🙁 22  🔇 0  🧙 0
+⠇ 84/316  🎉 61 🫥 0  ⏰ 0  🤔 0  🙁 23  🔇 0  🧙 0
+⠏ 85/316  🎉 61 🫥 0  ⏰ 0  🤔 0  🙁 24  🔇 0  🧙 0
+⠋ 86/316  🎉 61 🫥 0  ⏰ 0  🤔 0  🙁 25  🔇 0  🧙 0
+⠙ 87/316  🎉 61 🫥 0  ⏰ 0  🤔 0  🙁 26  🔇 0  🧙 0
+⠹ 88/316  🎉 61 🫥 0  ⏰ 0  🤔 0  🙁 27  🔇 0  🧙 0
+⠸ 89/316  🎉 61 🫥 0  ⏰ 0  🤔 0  🙁 28  🔇 0  🧙 0
+⠼ 90/316  🎉 61 🫥 0  ⏰ 0  🤔 0  🙁 29  🔇 0  🧙 0
+⠴ 91/316  🎉 61 🫥 0  ⏰ 0  🤔 0  🙁 30  🔇 0  🧙 0
+⠦ 92/316  🎉 61 🫥 0  ⏰ 0  🤔 0  🙁 31  🔇 0  🧙 0
+⠧ 93/316  🎉 61 🫥 0  ⏰ 0  🤔 0  🙁 32  🔇 0  🧙 0
+⠇ 94/316  🎉 61 🫥 0  ⏰ 0  🤔 0  🙁 33  🔇 0  🧙 0
+⠏ 95/316  🎉 62 🫥 0  ⏰ 0  🤔 0  🙁 33  🔇 0  🧙 0
+⠋ 96/316  🎉 63 🫥 0  ⏰ 0  🤔 0  🙁 33  🔇 0  🧙 0
+⠙ 97/316  🎉 64 🫥 0  ⏰ 0  🤔 0  🙁 33  🔇 0  🧙 0
+⠹ 98/316  🎉 65 🫥 0  ⏰ 0  🤔 0  🙁 33  🔇 0  🧙 0
+⠸ 99/316  🎉 66 🫥 0  ⏰ 0  🤔 0  🙁 33  🔇 0  🧙 0
+⠼ 100/316  🎉 66 🫥 0  ⏰ 0  🤔 0  🙁 34  🔇 0  🧙 0
+⠴ 101/316  🎉 67 🫥 0  ⏰ 0  🤔 0  🙁 34  🔇 0  🧙 0
+⠦ 102/316  🎉 67 🫥 0  ⏰ 0  🤔 0  🙁 35  🔇 0  🧙 0
+⠧ 103/316  🎉 67 🫥 0  ⏰ 0  🤔 0  🙁 36  🔇 0  🧙 0
+⠇ 104/316  🎉 67 🫥 0  ⏰ 0  🤔 0  🙁 37  🔇 0  🧙 0
+⠏ 105/316  🎉 68 🫥 0  ⏰ 0  🤔 0  🙁 37  🔇 0  🧙 0
+⠋ 106/316  🎉 68 🫥 0  ⏰ 0  🤔 0  🙁 38  🔇 0  🧙 0
+⠙ 107/316  🎉 69 🫥 0  ⏰ 0  🤔 0  🙁 38  🔇 0  🧙 0
+⠹ 108/316  🎉 70 🫥 0  ⏰ 0  🤔 0  🙁 38  🔇 0  🧙 0
+⠸ 109/316  🎉 71 🫥 0  ⏰ 0  🤔 0  🙁 38  🔇 0  🧙 0
+⠼ 110/316  🎉 72 🫥 0  ⏰ 0  🤔 0  🙁 38  🔇 0  🧙 0
+⠴ 111/316  🎉 73 🫥 0  ⏰ 0  🤔 0  🙁 38  🔇 0  🧙 0
+⠦ 112/316  🎉 73 🫥 0  ⏰ 0  🤔 0  🙁 39  🔇 0  🧙 0
+⠧ 113/316  🎉 73 🫥 0  ⏰ 0  🤔 0  🙁 40  🔇 0  🧙 0
+⠇ 114/316  🎉 73 🫥 0  ⏰ 0  🤔 0  🙁 41  🔇 0  🧙 0
+⠏ 115/316  🎉 74 🫥 0  ⏰ 0  🤔 0  🙁 41  🔇 0  🧙 0
+⠋ 116/316  🎉 75 🫥 0  ⏰ 0  🤔 0  🙁 41  🔇 0  🧙 0
+⠙ 117/316  🎉 76 🫥 0  ⏰ 0  🤔 0  🙁 41  🔇 0  🧙 0
+⠹ 118/316  🎉 77 🫥 0  ⏰ 0  🤔 0  🙁 41  🔇 0  🧙 0
+⠸ 119/316  🎉 78 🫥 0  ⏰ 0  🤔 0  🙁 41  🔇 0  🧙 0
+⠼ 120/316  🎉 79 🫥 0  ⏰ 0  🤔 0  🙁 41  🔇 0  🧙 0
+⠴ 121/316  🎉 80 🫥 0  ⏰ 0  🤔 0  🙁 41  🔇 0  🧙 0
+⠦ 122/316  🎉 80 🫥 0  ⏰ 0  🤔 0  🙁 42  🔇 0  🧙 0
+⠧ 123/316  🎉 80 🫥 0  ⏰ 0  🤔 0  🙁 43  🔇 0  🧙 0
+⠇ 124/316  🎉 80 🫥 0  ⏰ 0  🤔 0  🙁 44  🔇 0  🧙 0
+⠏ 125/316  🎉 80 🫥 0  ⏰ 0  🤔 0  🙁 45  🔇 0  🧙 0
+⠋ 126/316  🎉 80 🫥 0  ⏰ 0  🤔 0  🙁 46  🔇 0  🧙 0
+⠙ 127/316  🎉 81 🫥 0  ⏰ 0  🤔 0  🙁 46  🔇 0  🧙 0
+⠹ 128/316  🎉 81 🫥 0  ⏰ 0  🤔 0  🙁 47  🔇 0  🧙 0
+⠸ 129/316  🎉 81 🫥 0  ⏰ 0  🤔 0  🙁 48  🔇 0  🧙 0
+⠼ 130/316  🎉 81 🫥 0  ⏰ 0  🤔 0  🙁 49  🔇 0  🧙 0
+⠴ 131/316  🎉 81 🫥 0  ⏰ 0  🤔 0  🙁 50  🔇 0  🧙 0
+⠦ 132/316  🎉 82 🫥 0  ⏰ 0  🤔 0  🙁 50  🔇 0  🧙 0
+⠧ 133/316  🎉 82 🫥 0  ⏰ 0  🤔 0  🙁 51  🔇 0  🧙 0
+⠇ 134/316  🎉 83 🫥 0  ⏰ 0  🤔 0  🙁 51  🔇 0  🧙 0
+⠏ 135/316  🎉 83 🫥 0  ⏰ 0  🤔 0  🙁 52  🔇 0  🧙 0
+⠋ 136/316  🎉 83 🫥 0  ⏰ 0  🤔 0  🙁 53  🔇 0  🧙 0
+⠙ 137/316  🎉 83 🫥 0  ⏰ 0  🤔 0  🙁 54  🔇 0  🧙 0
+⠹ 138/316  🎉 83 🫥 0  ⏰ 0  🤔 0  🙁 55  🔇 0  🧙 0
+⠸ 139/316  🎉 83 🫥 0  ⏰ 0  🤔 0  🙁 56  🔇 0  🧙 0
+⠼ 140/316  🎉 83 🫥 0  ⏰ 0  🤔 0  🙁 57  🔇 0  🧙 0
+⠴ 141/316  🎉 83 🫥 0  ⏰ 0  🤔 0  🙁 58  🔇 0  🧙 0
+⠦ 142/316  🎉 83 🫥 0  ⏰ 0  🤔 0  🙁 59  🔇 0  🧙 0
+⠧ 143/316  🎉 83 🫥 0  ⏰ 0  🤔 0  🙁 60  🔇 0  🧙 0
+⠇ 144/316  🎉 83 🫥 0  ⏰ 0  🤔 0  🙁 61  🔇 0  🧙 0
+⠏ 145/316  🎉 84 🫥 0  ⏰ 0  🤔 0  🙁 61  🔇 0  🧙 0
+⠋ 146/316  🎉 84 🫥 0  ⏰ 0  🤔 0  🙁 62  🔇 0  🧙 0
+⠙ 147/316  🎉 84 🫥 0  ⏰ 0  🤔 0  🙁 63  🔇 0  🧙 0
+⠹ 148/316  🎉 84 🫥 0  ⏰ 0  🤔 0  🙁 64  🔇 0  🧙 0
+⠸ 149/316  🎉 85 🫥 0  ⏰ 0  🤔 0  🙁 64  🔇 0  🧙 0
+⠼ 150/316  🎉 86 🫥 0  ⏰ 0  🤔 0  🙁 64  🔇 0  🧙 0
+⠴ 151/316  🎉 86 🫥 0  ⏰ 0  🤔 0  🙁 65  🔇 0  🧙 0
+⠦ 152/316  🎉 86 🫥 0  ⏰ 0  🤔 0  🙁 66  🔇 0  🧙 0
+⠧ 153/316  🎉 86 🫥 0  ⏰ 0  🤔 0  🙁 67  🔇 0  🧙 0
+⠇ 154/316  🎉 87 🫥 0  ⏰ 0  🤔 0  🙁 67  🔇 0  🧙 0
+⠏ 155/316  🎉 88 🫥 0  ⏰ 0  🤔 0  🙁 67  🔇 0  🧙 0
+⠋ 156/316  🎉 88 🫥 0  ⏰ 0  🤔 0  🙁 68  🔇 0  🧙 0
+⠙ 157/316  🎉 89 🫥 0  ⏰ 0  🤔 0  🙁 68  🔇 0  🧙 0
+⠹ 158/316  🎉 90 🫥 0  ⏰ 0  🤔 0  🙁 68  🔇 0  🧙 0
+⠸ 159/316  🎉 91 🫥 0  ⏰ 0  🤔 0  🙁 68  🔇 0  🧙 0
+⠼ 160/316  🎉 91 🫥 0  ⏰ 0  🤔 0  🙁 69  🔇 0  🧙 0
+⠴ 161/316  🎉 91 🫥 0  ⏰ 0  🤔 0  🙁 70  🔇 0  🧙 0
+⠦ 162/316  🎉 92 🫥 0  ⏰ 0  🤔 0  🙁 70  🔇 0  🧙 0
+⠧ 163/316  🎉 92 🫥 0  ⏰ 0  🤔 0  🙁 71  🔇 0  🧙 0
+⠇ 164/316  🎉 93 🫥 0  ⏰ 0  🤔 0  🙁 71  🔇 0  🧙 0
+⠏ 165/316  🎉 94 🫥 0  ⏰ 0  🤔 0  🙁 71  🔇 0  🧙 0
+⠋ 166/316  🎉 95 🫥 0  ⏰ 0  🤔 0  🙁 71  🔇 0  🧙 0
+⠙ 167/316  🎉 96 🫥 0  ⏰ 0  🤔 0  🙁 71  🔇 0  🧙 0
+⠹ 168/316  🎉 96 🫥 0  ⏰ 0  🤔 0  🙁 72  🔇 0  🧙 0
+⠸ 169/316  🎉 97 🫥 0  ⏰ 0  🤔 0  🙁 72  🔇 0  🧙 0
+⠼ 170/316  🎉 97 🫥 0  ⏰ 0  🤔 0  🙁 73  🔇 0  🧙 0
+⠴ 171/316  🎉 98 🫥 0  ⏰ 0  🤔 0  🙁 73  🔇 0  🧙 0
+⠦ 172/316  🎉 99 🫥 0  ⏰ 0  🤔 0  🙁 73  🔇 0  🧙 0
+⠧ 173/316  🎉 100 🫥 0  ⏰ 0  🤔 0  🙁 73  🔇 0  🧙 0
+⠇ 174/316  🎉 101 🫥 0  ⏰ 0  🤔 0  🙁 73  🔇 0  🧙 0
+⠏ 175/316  🎉 102 🫥 0  ⏰ 0  🤔 0  🙁 73  🔇 0  🧙 0
+⠋ 176/316  🎉 103 🫥 0  ⏰ 0  🤔 0  🙁 73  🔇 0  🧙 0
+⠙ 177/316  🎉 103 🫥 0  ⏰ 0  🤔 0  🙁 74  🔇 0  🧙 0
+⠹ 178/316  🎉 104 🫥 0  ⏰ 0  🤔 0  🙁 74  🔇 0  🧙 0
+⠸ 179/316  🎉 104 🫥 0  ⏰ 0  🤔 0  🙁 75  🔇 0  🧙 0
+⠼ 180/316  🎉 105 🫥 0  ⏰ 0  🤔 0  🙁 75  🔇 0  🧙 0
+⠴ 181/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 75  🔇 0  🧙 0
+⠦ 182/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 76  🔇 0  🧙 0
+⠧ 183/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 77  🔇 0  🧙 0
+⠇ 184/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 78  🔇 0  🧙 0
+⠏ 185/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 79  🔇 0  🧙 0
+⠋ 186/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 80  🔇 0  🧙 0
+⠙ 187/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 81  🔇 0  🧙 0
+⠹ 188/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 82  🔇 0  🧙 0
+⠸ 189/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 83  🔇 0  🧙 0
+⠼ 190/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 84  🔇 0  🧙 0
+⠴ 191/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 85  🔇 0  🧙 0
+⠦ 192/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 86  🔇 0  🧙 0
+⠧ 193/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 87  🔇 0  🧙 0
+⠇ 194/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 88  🔇 0  🧙 0
+⠏ 195/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 89  🔇 0  🧙 0
+⠋ 196/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 90  🔇 0  🧙 0
+⠙ 197/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 91  🔇 0  🧙 0
+⠹ 198/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 92  🔇 0  🧙 0
+⠸ 199/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 93  🔇 0  🧙 0
+⠼ 200/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 94  🔇 0  🧙 0
+⠴ 201/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 95  🔇 0  🧙 0
+⠦ 202/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 96  🔇 0  🧙 0
+⠧ 203/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 97  🔇 0  🧙 0
+⠇ 204/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 98  🔇 0  🧙 0
+⠏ 205/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 99  🔇 0  🧙 0
+⠋ 206/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 100  🔇 0  🧙 0
+⠙ 207/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 101  🔇 0  🧙 0
+⠹ 208/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 102  🔇 0  🧙 0
+⠸ 209/316  🎉 106 🫥 0  ⏰ 0  🤔 0  🙁 103  🔇 0  🧙 0
+⠼ 210/316  🎉 107 🫥 0  ⏰ 0  🤔 0  🙁 103  🔇 0  🧙 0
+⠴ 211/316  🎉 108 🫥 0  ⏰ 0  🤔 0  🙁 103  🔇 0  🧙 0
+⠦ 212/316  🎉 109 🫥 0  ⏰ 0  🤔 0  🙁 103  🔇 0  🧙 0
+⠧ 213/316  🎉 110 🫥 0  ⏰ 0  🤔 0  🙁 103  🔇 0  🧙 0
+⠇ 214/316  🎉 111 🫥 0  ⏰ 0  🤔 0  🙁 103  🔇 0  🧙 0
+⠏ 215/316  🎉 112 🫥 0  ⏰ 0  🤔 0  🙁 103  🔇 0  🧙 0
+⠋ 216/316  🎉 112 🫥 0  ⏰ 0  🤔 0  🙁 104  🔇 0  🧙 0
+⠙ 217/316  🎉 112 🫥 0  ⏰ 0  🤔 0  🙁 105  🔇 0  🧙 0
+⠹ 218/316  🎉 112 🫥 0  ⏰ 0  🤔 0  🙁 106  🔇 0  🧙 0
+⠸ 219/316  🎉 112 🫥 0  ⏰ 0  🤔 0  🙁 107  🔇 0  🧙 0
+⠼ 220/316  🎉 112 🫥 0  ⏰ 0  🤔 0  🙁 108  🔇 0  🧙 0
+⠴ 221/316  🎉 112 🫥 0  ⏰ 0  🤔 0  🙁 109  🔇 0  🧙 0
+⠦ 222/316  🎉 112 🫥 0  ⏰ 0  🤔 0  🙁 110  🔇 0  🧙 0
+⠧ 223/316  🎉 113 🫥 0  ⏰ 0  🤔 0  🙁 110  🔇 0  🧙 0
+⠇ 224/316  🎉 113 🫥 0  ⏰ 0  🤔 0  🙁 111  🔇 0  🧙 0
+⠏ 225/316  🎉 113 🫥 0  ⏰ 0  🤔 0  🙁 112  🔇 0  🧙 0
+⠋ 226/316  🎉 113 🫥 0  ⏰ 0  🤔 0  🙁 113  🔇 0  🧙 0
+⠙ 227/316  🎉 113 🫥 0  ⏰ 0  🤔 0  🙁 114  🔇 0  🧙 0
+⠹ 228/316  🎉 113 🫥 0  ⏰ 0  🤔 0  🙁 115  🔇 0  🧙 0
+⠸ 229/316  🎉 113 🫥 0  ⏰ 0  🤔 0  🙁 116  🔇 0  🧙 0
+⠼ 230/316  🎉 114 🫥 0  ⏰ 0  🤔 0  🙁 116  🔇 0  🧙 0
+⠴ 231/316  🎉 114 🫥 0  ⏰ 0  🤔 0  🙁 117  🔇 0  🧙 0
+⠦ 232/316  🎉 114 🫥 0  ⏰ 0  🤔 0  🙁 118  🔇 0  🧙 0
+⠧ 233/316  🎉 114 🫥 0  ⏰ 0  🤔 0  🙁 119  🔇 0  🧙 0
+⠇ 234/316  🎉 114 🫥 0  ⏰ 0  🤔 0  🙁 120  🔇 0  🧙 0
+⠏ 235/316  🎉 114 🫥 0  ⏰ 0  🤔 0  🙁 121  🔇 0  🧙 0
+⠋ 236/316  🎉 115 🫥 0  ⏰ 0  🤔 0  🙁 121  🔇 0  🧙 0
+⠙ 237/316  🎉 115 🫥 0  ⏰ 0  🤔 0  🙁 122  🔇 0  🧙 0
+⠹ 238/316  🎉 116 🫥 0  ⏰ 0  🤔 0  🙁 122  🔇 0  🧙 0
+⠸ 239/316  🎉 116 🫥 0  ⏰ 0  🤔 0  🙁 123  🔇 0  🧙 0
+⠼ 240/316  🎉 116 🫥 0  ⏰ 0  🤔 0  🙁 124  🔇 0  🧙 0
+⠴ 241/316  🎉 116 🫥 0  ⏰ 0  🤔 0  🙁 125  🔇 0  🧙 0
+⠦ 242/316  🎉 116 🫥 0  ⏰ 0  🤔 0  🙁 126  🔇 0  🧙 0
+⠧ 243/316  🎉 116 🫥 0  ⏰ 0  🤔 0  🙁 127  🔇 0  🧙 0
+⠇ 244/316  🎉 117 🫥 0  ⏰ 0  🤔 0  🙁 127  🔇 0  🧙 0
+⠏ 245/316  🎉 118 🫥 0  ⏰ 0  🤔 0  🙁 127  🔇 0  🧙 0
+⠋ 246/316  🎉 119 🫥 0  ⏰ 0  🤔 0  🙁 127  🔇 0  🧙 0
+⠙ 247/316  🎉 120 🫥 0  ⏰ 0  🤔 0  🙁 127  🔇 0  🧙 0
+⠹ 248/316  🎉 121 🫥 0  ⏰ 0  🤔 0  🙁 127  🔇 0  🧙 0
+⠸ 249/316  🎉 122 🫥 0  ⏰ 0  🤔 0  🙁 127  🔇 0  🧙 0
+⠼ 250/316  🎉 122 🫥 0  ⏰ 0  🤔 0  🙁 128  🔇 0  🧙 0
+⠴ 251/316  🎉 122 🫥 0  ⏰ 0  🤔 0  🙁 129  🔇 0  🧙 0
+⠦ 252/316  🎉 122 🫥 0  ⏰ 0  🤔 0  🙁 130  🔇 0  🧙 0
+⠧ 253/316  🎉 122 🫥 0  ⏰ 0  🤔 0  🙁 131  🔇 0  🧙 0
+⠇ 254/316  🎉 122 🫥 0  ⏰ 0  🤔 0  🙁 132  🔇 0  🧙 0
+⠏ 255/316  🎉 122 🫥 0  ⏰ 0  🤔 0  🙁 133  🔇 0  🧙 0
+⠋ 256/316  🎉 123 🫥 0  ⏰ 0  🤔 0  🙁 133  🔇 0  🧙 0
+⠙ 257/316  🎉 124 🫥 0  ⏰ 0  🤔 0  🙁 133  🔇 0  🧙 0
+⠹ 258/316  🎉 125 🫥 0  ⏰ 0  🤔 0  🙁 133  🔇 0  🧙 0
+⠸ 259/316  🎉 126 🫥 0  ⏰ 0  🤔 0  🙁 133  🔇 0  🧙 0
+⠼ 260/316  🎉 126 🫥 0  ⏰ 0  🤔 0  🙁 134  🔇 0  🧙 0
+⠴ 261/316  🎉 126 🫥 0  ⏰ 0  🤔 0  🙁 135  🔇 0  🧙 0
+⠦ 262/316  🎉 126 🫥 0  ⏰ 0  🤔 0  🙁 136  🔇 0  🧙 0
+⠧ 263/316  🎉 126 🫥 0  ⏰ 0  🤔 0  🙁 137  🔇 0  🧙 0
+⠇ 264/316  🎉 126 🫥 0  ⏰ 0  🤔 0  🙁 138  🔇 0  🧙 0
+⠏ 265/316  🎉 126 🫥 0  ⏰ 0  🤔 0  🙁 139  🔇 0  🧙 0
+⠋ 266/316  🎉 126 🫥 0  ⏰ 0  🤔 0  🙁 140  🔇 0  🧙 0
+⠙ 267/316  🎉 126 🫥 0  ⏰ 0  🤔 0  🙁 141  🔇 0  🧙 0
+⠹ 268/316  🎉 126 🫥 0  ⏰ 0  🤔 0  🙁 142  🔇 0  🧙 0
+⠸ 269/316  🎉 126 🫥 0  ⏰ 0  🤔 0  🙁 143  🔇 0  🧙 0
+⠼ 270/316  🎉 126 🫥 0  ⏰ 0  🤔 0  🙁 144  🔇 0  🧙 0
+⠴ 271/316  🎉 126 🫥 0  ⏰ 0  🤔 0  🙁 145  🔇 0  🧙 0
+⠦ 272/316  🎉 126 🫥 0  ⏰ 0  🤔 0  🙁 146  🔇 0  🧙 0
+⠧ 273/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 146  🔇 0  🧙 0
+⠇ 274/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 147  🔇 0  🧙 0
+⠏ 275/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 148  🔇 0  🧙 0
+⠋ 276/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 149  🔇 0  🧙 0
+⠙ 277/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 150  🔇 0  🧙 0
+⠹ 278/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 151  🔇 0  🧙 0
+⠸ 279/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 152  🔇 0  🧙 0
+⠼ 280/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 153  🔇 0  🧙 0
+⠴ 281/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 154  🔇 0  🧙 0
+⠦ 282/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 155  🔇 0  🧙 0
+⠧ 283/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 156  🔇 0  🧙 0
+⠇ 284/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 157  🔇 0  🧙 0
+⠏ 285/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 158  🔇 0  🧙 0
+⠋ 286/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 159  🔇 0  🧙 0
+⠙ 287/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 160  🔇 0  🧙 0
+⠹ 288/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 161  🔇 0  🧙 0
+⠸ 289/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 162  🔇 0  🧙 0
+⠼ 290/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 163  🔇 0  🧙 0
+⠴ 291/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 164  🔇 0  🧙 0
+⠦ 292/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 165  🔇 0  🧙 0
+⠧ 293/316  🎉 127 🫥 0  ⏰ 0  🤔 0  🙁 166  🔇 0  🧙 0
+⠇ 294/316  🎉 128 🫥 0  ⏰ 0  🤔 0  🙁 166  🔇 0  🧙 0
+⠏ 295/316  🎉 128 🫥 0  ⏰ 0  🤔 0  🙁 167  🔇 0  🧙 0
+⠋ 296/316  🎉 129 🫥 0  ⏰ 0  🤔 0  🙁 167  🔇 0  🧙 0
+⠙ 297/316  🎉 130 🫥 0  ⏰ 0  🤔 0  🙁 167  🔇 0  🧙 0
+⠹ 298/316  🎉 131 🫥 0  ⏰ 0  🤔 0  🙁 167  🔇 0  🧙 0
+⠸ 299/316  🎉 132 🫥 0  ⏰ 0  🤔 0  🙁 167  🔇 0  🧙 0
+⠼ 300/316  🎉 133 🫥 0  ⏰ 0  🤔 0  🙁 167  🔇 0  🧙 0
+⠴ 301/316  🎉 134 🫥 0  ⏰ 0  🤔 0  🙁 167  🔇 0  🧙 0
+⠦ 302/316  🎉 135 🫥 0  ⏰ 0  🤔 0  🙁 167  🔇 0  🧙 0
+⠧ 303/316  🎉 135 🫥 0  ⏰ 0  🤔 0  🙁 168  🔇 0  🧙 0
+⠇ 304/316  🎉 136 🫥 0  ⏰ 0  🤔 0  🙁 168  🔇 0  🧙 0
+⠏ 305/316  🎉 137 🫥 0  ⏰ 0  🤔 0  🙁 168  🔇 0  🧙 0
+⠋ 306/316  🎉 138 🫥 0  ⏰ 0  🤔 0  🙁 168  🔇 0  🧙 0
+⠙ 307/316  🎉 139 🫥 0  ⏰ 0  🤔 0  🙁 168  🔇 0  🧙 0
+⠹ 308/316  🎉 139 🫥 0  ⏰ 0  🤔 0  🙁 169  🔇 0  🧙 0
+⠸ 309/316  🎉 139 🫥 0  ⏰ 0  🤔 0  🙁 170  🔇 0  🧙 0
+⠼ 310/316  🎉 139 🫥 0  ⏰ 0  🤔 0  🙁 171  🔇 0  🧙 0
+⠴ 311/316  🎉 140 🫥 0  ⏰ 0  🤔 0  🙁 171  🔇 0  🧙 0
+⠦ 312/316  🎉 141 🫥 0  ⏰ 0  🤔 0  🙁 171  🔇 0  🧙 0
+⠧ 313/316  🎉 142 🫥 0  ⏰ 0  🤔 0  🙁 171  🔇 0  🧙 0
+⠇ 314/316  🎉 143 🫥 0  ⏰ 0  🤔 0  🙁 171  🔇 0  🧙 0
+⠏ 315/316  🎉 144 🫥 0  ⏰ 0  🤔 0  🙁 171  🔇 0  🧙 0
+⠋ 316/316  🎉 145 🫥 0  ⏰ 0  🤔 0  🙁 171  🔇 0  🧙 0
+9.82 mutations/second

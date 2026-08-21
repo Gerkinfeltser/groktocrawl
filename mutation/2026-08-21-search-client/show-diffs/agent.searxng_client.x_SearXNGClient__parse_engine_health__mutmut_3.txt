@@ -1,0 +1,10 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -6,7 +6,7 @@
+         determine how many engines were queried and how many returned
+         results, building a ``SearchHealth`` summary.
+         """
+-    engines = data.get("engines", [])
++    engines = data.get("engines", None)
+     engines_total = len(engines)
+     engines_responding = sum(1 for e in engines if e.get("results", 0) > 0)

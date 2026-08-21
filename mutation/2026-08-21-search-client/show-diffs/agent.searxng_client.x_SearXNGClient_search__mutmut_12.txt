@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -50,7 +50,7 @@
+             )
+         self._search_count += 1
+
+-        effective_categories = self._translate(sources, categories)
++        effective_categories = self._translate(None, categories)
+         params = {
+             "q": query,
+             "format": "json",

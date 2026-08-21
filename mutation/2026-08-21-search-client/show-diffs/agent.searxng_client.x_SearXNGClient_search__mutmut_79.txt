@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -94,7 +94,7 @@
+                 )
+             outcome = "degraded"
+             logger.warning(
+-                "SearXNG rate limited (429) — returning empty results "
++                "SEARXNG RATE LIMITED (429) — RETURNING EMPTY RESULTS "
+                 "(caller did not opt into retryable classification)"
+             )
+             return [], SearchHealth(

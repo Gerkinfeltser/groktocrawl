@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -61,7 +61,7 @@
+         run_id = os.getenv("TWIN_RUN_ID")
+         if run_id:
+             params["run_id"] = run_id
+-        if scenario is not None:
++        if scenario is None:
+             params["scenario"] = scenario
+
+         resp = await self._client.get(
