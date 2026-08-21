@@ -1,0 +1,83 @@
+{
+  "suite_version": "answer-evals-v1",
+  "case_schema_version": "answer-case-v1",
+  "provenance_schema_version": "answer-evals-provenance-v1",
+  "negative_ratio_rule": {
+    "min_negative_or_abstention_fraction": 0.2,
+    "boundary_kind_counts_non_negative": true
+  },
+  "selections": {
+    "narrow": [
+      "positive-001-answer-grounded",
+      "positive-003-research-grounded",
+      "negative-006-answer-empty-search"
+    ],
+    "broad": "all"
+  },
+  "case_rules": {
+    "max_retries": 0,
+    "default_timeout_seconds": 60,
+    "overall_selection_deadline_seconds": 900
+  },
+  "provenance": {
+    "allowlisted_keys": [
+      "schema_version",
+      "suite_version",
+      "run_id",
+      "timestamp",
+      "commit_sha",
+      "selection",
+      "target",
+      "record_baseline",
+      "cases",
+      "case_id",
+      "case_path",
+      "request_hash",
+      "search_fixture",
+      "llm_fixture",
+      "service",
+      "scenario",
+      "scenario_version",
+      "fixture_version",
+      "model",
+      "llm_base_url_host",
+      "graders",
+      "id",
+      "version",
+      "verdicts",
+      "grader",
+      "pass",
+      "message",
+      "outcome",
+      "artifact_path"
+    ],
+    "forbidden_keys": [
+      "query",
+      "prompt",
+      "answer",
+      "context",
+      "source_content",
+      "headers",
+      "authorization",
+      "api_key",
+      "apikey",
+      "token",
+      "secret",
+      "password",
+      "cookie",
+      "set_cookie",
+      "payload",
+      "body",
+      "messages",
+      "environment",
+      "env"
+    ],
+    "volatile_fields": [
+      "timestamp",
+      "run_id",
+      "latency_ms",
+      "artifact_path",
+      "recorded_at"
+    ]
+  }
+}

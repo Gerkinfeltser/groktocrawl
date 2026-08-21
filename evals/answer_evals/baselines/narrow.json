@@ -1,0 +1,45 @@
+{
+  "suite_version": "answer-evals-v1",
+  "selection": "narrow",
+
+  "cases": [
+    {
+      "case_id": "positive-001-answer-grounded",
+      "outcome": "pass",
+      "graders": {
+        "check_protocol": true,
+        "check_sources_present": true,
+        "check_citation_shape": true,
+        "check_citation_support": true,
+        "check_required_claims": true,
+        "check_prohibited_claims": true,
+        "check_abstention": true,
+        "check_citation_integrity": true
+      }
+    },
+    {
+      "case_id": "positive-003-research-grounded",
+      "outcome": "pass",
+      "graders": {
+        "check_protocol": true,
+        "check_sources_present": true,
+        "check_citation_shape": true,
+        "check_citation_support": true,
+        "check_required_claims": true,
+        "check_prohibited_claims": true,
+        "check_abstention": true,
+        "check_citation_integrity": true
+      }
+    },
+    {
+      "case_id": "negative-006-answer-empty-search",
+      "outcome": "pass",
+      "graders": {
+        "check_protocol": true,
+        "check_abstention": true,
+        "check_required_claims": true,
+        "check_prohibited_claims": true
+      }
+    }
+  ]
+}

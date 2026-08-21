@@ -1,0 +1,38 @@
+{
+  "citation_style": "inline",
+  "content_hash": "sha256:cef86afebcf769afe8f78c12d116142227cdc19aba5cb79f3f23d2afd70a0d96",
+  "expected": {
+    "abstain_expected": true,
+    "abstain_qualifier": "insufficient",
+    "allowable_source_urls": [],
+    "citations": [],
+    "prohibited_claims": [],
+    "protocol": {
+      "status": 200,
+      "success": true
+    },
+    "required_claims": []
+  },
+  "id": "negative-006-answer-empty-search",
+  "kind": "negative",
+  "llm_fixture": {
+    "fixture_version": "v2",
+    "scenario": "grounded-answer",
+    "scenario_version": "v1",
+    "service": "llm-svc"
+  },
+  "max_retries": 0,
+  "num_sources": 5,
+  "query": "What does the Fixture Site Pro plan cost?",
+  "retrieval_mode": "keyword",
+  "search_fixture": {
+    "fixture_version": "v2",
+    "scenario": "zero-results",
+    "scenario_version": "v1",
+    "service": "slopsearx-fixture"
+  },
+  "source_content": {},
+  "suite_version": "answer-evals-v1",
+  "target": "answer",
+  "timeout_seconds": 60
+}

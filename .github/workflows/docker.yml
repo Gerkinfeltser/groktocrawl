@@ -579,6 +579,32 @@ jobs:
               --no-cov -o 'addopts=' -p no:cacheprovider -q
         timeout-minutes: 5
 
+      - name: Run narrow grounded-answer eval (in-process + HTTP smoke)
+        # Bounded, hermetic pre-merge eval (issue #570): the narrow selection runs
+        # the real answer/research pipeline in-process against the deterministic
+        # twins (no live egress; endpoint-host allowlist enforced by the harness),
+        # then one default-scenario /v2/answer smoke runs over the real route on
+        # agent-svc-fixture. Gated by the runtime/twin classifier; forks are
+        # already excluded by the job-level fork guard.
+        if: >-
+          needs.changes.outputs.requires_twin_contracts == 'true' ||
+          needs.changes.outputs.requires_full_runtime == 'true'
+        env:
+          PYTHONPATH: agent-svc:scraper-svc:llm-svc:slopsearx-fixture:parse-svc:portal-svc:browser-svc:semantic-svc:.
+        run: |
+          uv run --no-sync python3 scripts/run_answer_evals.py --selection narrow \
+            --output-dir eval-out/narrow \
+            --http-smoke http://127.0.0.1:8084
+        timeout-minutes: 5
+
+      - name: Upload answer-evals provenance
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: answer-evals-provenance
+          path: eval-out/
+          if-no-files-found: warn
+
       - name: Critical journey smoke
         run: |
           docker compose exec -T agent-svc mkdir -p /app/coverage

@@ -17,7 +17,7 @@ SCHEMA_VERSION: Literal["v1"] = "v1"
 MAX_DELAY_MS = 2_000
 MAX_LEDGER = 200
 FIXTURE_SITE_BASE_URL = os.getenv("FIXTURE_SITE_BASE_URL", "http://test-site:8000")
-FIXTURE_VERSION = "v1"
+FIXTURE_VERSION = "v2"
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 SCENARIOS = {
     "healthy",
@@ -34,6 +34,7 @@ SCENARIOS = {
     "malformed-json",
     "variant-fields",
     "pagination",
+    "contradictory-sources",
 }
 
 
@@ -120,6 +121,32 @@ def _result(index: int, engine: str = "brave") -> SearchResult:
         title=f"Fixture {page.title()}",
         content=f"Deterministic fixture result {index}.",
         engine=engine,
+    )
+
+
+def _contradictory_results() -> tuple[list[SearchResult], list[Engine]]:
+    """Two deterministic fixture pages with genuinely conflicting claims.
+
+    ``/pricing`` states Pro costs $10 while ``/pricing-v2`` states Pro costs
+    $99. The grounded-answer eval harness uses this to exercise the real
+    contradictory-evidence abstention path (issue #570).
+    """
+    return (
+        [
+            SearchResult(
+                url=f"{FIXTURE_SITE_BASE_URL}/pricing",
+                title="Fixture Pricing",
+                content="Fixture pricing page: Free: $0, Pro: $10, Business: $25.",
+                engine="brave",
+            ),
+            SearchResult(
+                url=f"{FIXTURE_SITE_BASE_URL}/pricing-v2",
+                title="Fixture Pricing V2",
+                content="Fixture pricing-v2 page: Pro: $99.",
+                engine="google",
+            ),
+        ],
+        [Engine(engine="brave", results=1), Engine(engine="google", results=1)],
     )
 
 
@@ -258,6 +285,8 @@ def create_app(*, default_scenario: str = "healthy") -> FastAPI:
                     ],
                 )
                 classification = "degraded"
+            elif selected == "contradictory-sources":
+                results, engines = _contradictory_results()
             else:
                 start = (pageno - 1) * limit if selected == "pagination" else 0
                 results = [

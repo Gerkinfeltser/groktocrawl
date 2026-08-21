@@ -1,0 +1,46 @@
+{
+  "citation_style": "inline",
+  "content_hash": "sha256:7684f5ddb8fbb3c0de4bd3f19ec89c4848a734a7d56e8ac5fcb91792c931775f",
+  "expected": {
+    "abstain_expected": false,
+    "abstain_qualifier": null,
+    "allowable_source_urls": [
+      "http://test-site:8000/pricing"
+    ],
+    "citations": [],
+    "prohibited_claims": [
+      "Pro: $99"
+    ],
+    "protocol": {
+      "status": 200,
+      "success": true
+    },
+    "required_claims": [
+      "Pro plan costs $10"
+    ]
+  },
+  "id": "positive-002-answer-claims",
+  "kind": "positive",
+  "llm_fixture": {
+    "fixture_version": "v2",
+    "scenario": "grounded-answer",
+    "scenario_version": "v1",
+    "service": "llm-svc"
+  },
+  "max_retries": 0,
+  "num_sources": 5,
+  "query": "Summarize the pricing claims on the fixture site.",
+  "retrieval_mode": "keyword",
+  "search_fixture": {
+    "fixture_version": "v2",
+    "scenario": "healthy",
+    "scenario_version": "v1",
+    "service": "slopsearx-fixture"
+  },
+  "source_content": {
+    "http://test-site:8000/pricing": "# Fixture Site Pricing\n\n- Free: $0\n- Pro: $10\n- Business: $25"
+  },
+  "suite_version": "answer-evals-v1",
+  "target": "answer",
+  "timeout_seconds": 60
+}

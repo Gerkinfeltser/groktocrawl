@@ -45,6 +45,10 @@ SCENARIOS = {
     "contradictory",
     "citation-free",
     "echo",
+    # Grounded-answer eval scenarios (#570): additive, deterministic.
+    "grounded-answer",
+    "contradictory-evidence",
+    "miscited",
 }
 
 
@@ -292,6 +296,26 @@ def create_app() -> FastAPI:
             content = "The source says yes. The source says no."
         elif scenario == "citation-free":
             content = "Synthesized answer without source citations."
+        elif scenario == "grounded-answer":
+            # Grounded-answer eval scenario (#570): a known fixture fact with a
+            # [1] citation marker resolved by the agent's citation post-processing.
+            content = "The Fixture Site pricing page states the Pro plan costs $10 per month. [1]"
+        elif scenario == "contradictory-evidence":
+            # Abstain only when the supplied context contains both conflicting
+            # fixture claims; the scenario alone cannot manufacture conflict.
+            if "Pro: $10" in user_text and "Pro: $99" in user_text:
+                content = (
+                    "The retrieved sources conflict: the pricing page says Pro costs $10 "
+                    "while the pricing-v2 page says Pro costs $99. Because the evidence "
+                    "is contradictory, I cannot provide a confident answer."
+                )
+            else:
+                content = "The supplied evidence is consistent."
+        elif scenario == "miscited":
+            # Grounded-answer eval scenario (#570): deliberately cites index [2]
+            # for a claim that only appears in source [1], so the citation-support
+            # grader must fail.
+            content = "The Fixture Site Pro plan costs $10 per month. [2]"
         elif scenario == "echo":
             content = json.dumps(
                 {
