@@ -264,6 +264,87 @@ class TestSearch:
             assert captured_params["categories"] == "news,science"
 
     @pytest.mark.asyncio
+    async def test_forwards_scenario_param(self, client):
+        """search() must forward the scenario parameter in the HTTP request.
+
+        The scenario identifies the SlopSearX twin scenario to serve; dropping
+        it would silently change which scenario the upstream returns.
+        """
+        with pytest.MonkeyPatch.context() as mp:
+            captured_params = {}
+
+            async def mock_get(url, params=None):
+                captured_params.update(params or {})
+                import types
+
+                r = types.SimpleNamespace()
+                r.status_code = 200
+                r.json = lambda: {"results": [], "engines": []}
+                return r
+
+            mp.setattr(client._client, "get", mock_get)
+
+            await client.search("test query", scenario="rate-limit-retry-after")
+            assert captured_params.get("scenario") == "rate-limit-retry-after"
+
+    @pytest.mark.asyncio
+    async def test_passes_sources_category_param(self, client):
+        """search() must forward the categories translated from ``sources``.
+
+        sources→category translation is exercised through search() itself, not
+        only via the standalone ``_translate()`` helper.
+        """
+        with pytest.MonkeyPatch.context() as mp:
+            captured_params = {}
+
+            async def mock_get(url, params=None):
+                captured_params.update(params or {})
+                import types
+
+                r = types.SimpleNamespace()
+                r.status_code = 200
+                r.json = lambda: {"results": [], "engines": []}
+                return r
+
+            mp.setattr(client._client, "get", mock_get)
+
+            await client.search("test query", sources=["news"])
+            assert captured_params["categories"] == "news"
+
+    @pytest.mark.asyncio
+    async def test_search_budget_exhausted_raises_rate_limited(self):
+        """A client serves its search budget, then raises RateLimitedError.
+
+        The budget is enforced across calls: exactly ``max_searches`` searches
+        succeed and the next one is rejected before any HTTP request is made.
+        """
+        from agent.exceptions import RateLimitedError
+        from agent.searxng_client import SearXNGClient
+
+        budget_client = SearXNGClient(base_url="http://searxng.test", max_searches=2)
+        with pytest.MonkeyPatch.context() as mp:
+
+            async def mock_get(url, params=None):
+                import types
+
+                r = types.SimpleNamespace()
+                r.status_code = 200
+                r.json = lambda: {"results": [], "engines": []}
+                return r
+
+            mp.setattr(budget_client._client, "get", mock_get)
+
+            # The two in-budget searches succeed.
+            results, _ = await budget_client.search("one")
+            assert results == []
+            results, _ = await budget_client.search("two")
+            assert results == []
+
+            # The next search exceeds the budget and must be rejected.
+            with pytest.raises(RateLimitedError):
+                await budget_client.search("three")
+
+    @pytest.mark.asyncio
     async def test_close(self, client):
         with pytest.MonkeyPatch.context() as mp:
             closed = False
