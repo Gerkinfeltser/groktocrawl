@@ -2,18 +2,21 @@
 
 ## Services and profiles
 
-`docker compose up -d` starts the production service graph. `docker compose --profile fixture up --build -d` additionally starts `llm-svc`, `test-site`, and `tier3-fixture` for local evaluation. Semantic indexing is optional and best-effort on constrained hosts; before first enabling it, create the external model-cache volume with `docker volume create hf-cache`, then start `semantic-svc` and Qdrant with `docker compose --profile indexing up -d`. Without that profile, ordinary scrape and keyword/deep search continue, while vector and hybrid-vector retrieval, semantic/hybrid reranking, `/v2/find-similar`, and semantic-backed research-memory indexing are unavailable. The main public ports are agent API `8080`, portal `8082`, scraper `8001`, semantic service `8003` when indexing is enabled, SlopSearX `8081`, GroktoCrawl MCP `8002`, and direct SlopSearX MCP `8007` when the `mcp` profile is enabled.
+`docker compose up -d` starts the production service graph. `docker compose --profile fixture up --build -d` additionally starts `llm-svc`, `test-site`, `tier3-fixture`, `slopsearx-fixture`, and `agent-svc-fixture` for local evaluation. Semantic indexing is optional and best-effort on constrained hosts; before first enabling it, create the external model-cache volume with `docker volume create hf-cache`, then start `semantic-svc` and Qdrant with `docker compose --profile indexing up -d`. Without that profile, ordinary scrape and keyword/deep search continue, while vector and hybrid-vector retrieval, semantic/hybrid reranking, `/v2/find-similar`, and semantic-backed research-memory indexing are unavailable. The main public ports are agent API `8080`, fixture agent API `8084` when the fixture profile is enabled, portal `8082`, scraper `8001`, semantic service `8003` when indexing is enabled, SlopSearX `8081`, GroktoCrawl MCP `8002`, and direct SlopSearX MCP `8007` when the `mcp` profile is enabled.
 
 `agent-svc` coordinates requests; `scraper-svc` fetches content; optional `semantic-svc` uses Qdrant; Valkey stores operational state; SlopSearX discovers web results; `browser-svc`, `parse-svc`, `portal-svc`, `mcp-svc`, `slopsearx-mcp`, and Ofelia provide specialized capabilities. `mcp-svc` exposes GroktoCrawl API tools; the opt-in `slopsearx-mcp` companion exposes direct SlopSearX search-engine tools when the `mcp` profile is enabled. The [architecture guide](../architecture.md) describes ownership and data flow.
 
 ## Configuration
 
-For deterministic Compose integration runs, set
-`SEARXNG_URL=http://slopsearx-fixture:8080` and enable the fixture profile. The
-source-owned `slopsearx-fixture` is a
+For deterministic Compose integration runs, enable the fixture profile and send
+critical-journey requests to `http://localhost:8084` from the host or
+`http://agent-svc-fixture:8080` from another Compose service. Do not override
+the ordinary `agent-svc` search URL. The source-owned `slopsearx-fixture` is a
 versioned contract emulator with deterministic scenarios and process-local
 diagnostic state; it is not a ranking or index replica and is not a production
-default.
+default. CI runs a separate `agent-svc-fixture` instance against that boundary,
+leaving the ordinary integration service on the configured production-compatible
+search path.
 
 Copy `.env.sample` to `.env` and configure an OpenAI-compatible LLM for non-fixture use. `BRAVE_API_KEY` is required for useful open-web search results. The [configuration inventory](../reference/public-surface.md#configuration-keys) is validated against `.env.sample`; it separates provider, service URLs, vector index, adapters, cache, politeness, search controls, crawl limits, and research-memory settings.
 

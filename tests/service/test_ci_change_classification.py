@@ -411,11 +411,29 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
             self.integration_tests,
         )
         self.assertIn(
-            "SEARCH_BASE_URL=http://slopsearx-fixture:8080",
+            "SEARCH_BASE_URL=http://slopsearx:8080",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "AGENT_BASE_URL=http://agent-svc-fixture:8080",
             self.integration_tests,
         )
         self.assertIn("Wait for slopsearx-fixture", self.integration_tests)
         self.assertIn("Timed out waiting for slopsearx-fixture", self.integration_tests)
+        self.assertIn("Wait for agent-svc-fixture", self.integration_tests)
+        self.assertIn("Timed out waiting for agent-svc-fixture", self.integration_tests)
+        self.assertIn(
+            "docker compose --profile fixture build test-site tier3-fixture slopsearx-fixture agent-svc-fixture",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "docker compose --profile fixture up -d --force-recreate llm-svc tier3-fixture test-site slopsearx-fixture agent-svc-fixture",
+            self.integration_tests,
+        )
+        self.assertNotIn(
+            "SEARXNG_URL=http://slopsearx-fixture:8080 docker compose --profile indexing up -d",
+            self.integration_tests,
+        )
         self.assertIn("--cov=/app/agent", self.integration_tests)
         self.assertNotIn("--cov=/app/agent-svc/agent", self.integration_tests)
         self.assertNotIn(

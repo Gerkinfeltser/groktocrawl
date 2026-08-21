@@ -88,6 +88,7 @@ DELETE /v2/session/{session_id}
 
 <!-- service-inventory:start -->
 - agent-svc
+- agent-svc-fixture
 - browser-svc
 - flare-solverr
 - llm-svc

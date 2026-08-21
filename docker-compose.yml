@@ -257,6 +257,38 @@ services:
       timeout: 5s
       retries: 5
 
+  agent-svc-fixture:
+    build:
+      context: .
+      dockerfile: agent-svc/Dockerfile
+    image: ghcr.io/groktopus/groktocrawl-agent
+    restart: unless-stopped
+    profiles:
+      - fixture
+    ports:
+      - "8084:8080"
+    env_file:
+      - .env
+    depends_on:
+      valkey:
+        condition: service_healthy
+      slopsearx-fixture:
+        condition: service_healthy
+      scraper-svc:
+        condition: service_started
+    environment:
+      - VALKEY_URL=redis://valkey:6379/1
+      - SEARXNG_URL=http://slopsearx-fixture:8080
+      - SCRAPER_URL=http://scraper-svc:8001
+      - SEMANTIC_URL=http://semantic-svc:8003
+      - HOST=0.0.0.0
+      - PORT=8080
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   ofelia:
     image: mcuadros/ofelia:latest
     restart: unless-stopped

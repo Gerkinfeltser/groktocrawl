@@ -36,7 +36,9 @@ categories, and result count, but never query text.
 
 The fixture returns URLs under `FIXTURE_SITE_BASE_URL` (the existing
 `test-site` in Compose). The production `SEARXNG_URL` default remains the real
-SlopSearX service; Docker tests opt into the fixture explicitly.
+SlopSearX service. Docker tests use a separate fixture-profile `agent-svc`
+instance for deterministic critical journeys, so unrelated integration tests
+retain their existing provider boundary.
 
 ## Consequences
 

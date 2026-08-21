@@ -9,6 +9,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import pytest_asyncio
 import uvicorn
 
 sys.path.insert(0, str(Path(__file__).parents[2] / "slopsearx-fixture"))
@@ -20,7 +21,7 @@ from slopsearx_fixture.app import (
 )
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def search_client():
     from agent.searxng_client import SearXNGClient
 
