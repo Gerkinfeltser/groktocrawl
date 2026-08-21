@@ -419,10 +419,118 @@ def _finalize_result(result: dict, *, output_dir: Path | None) -> dict:
         output_dir.mkdir(parents=True, exist_ok=True)
         artifact_path = output_dir / f"{result['case_id']}.json"
         result["artifact_path"] = str(artifact_path)
-        artifact_path.write_text(json.dumps(result, indent=2, sort_keys=True))
+        artifact_path.write_text(
+            json.dumps(_artifact_payload(result), indent=2, sort_keys=True)
+        )
     else:
         result["artifact_path"] = None
     return result
+
+
+def _safe_error_classification(result: dict) -> str | None:
+    """Classify a failure without serializing provider/transport text."""
+    if not result.get("error"):
+        return None
+    error = str(result["error"]).lower()
+    if "selection deadline" in error:
+        return "selection_deadline"
+    if result.get("timeout"):
+        return "timeout"
+    for needle, classification in (
+        ("validation", "case_validation"),
+        ("content hash", "case_validation"),
+        ("transport failure", "transport"),
+        ("grader failure", "grader"),
+        ("scenario-use", "scenario_assertion"),
+        ("baseline", "baseline"),
+    ):
+        if needle in error:
+            return classification
+    return "evaluation_failure"
+
+
+def _artifact_payload(result: dict) -> dict:
+    """Return the minimized per-case artifact safe for CI upload."""
+    observed = result.get("observed") or {}
+    expected = result.get("expected") or {}
+    expected_protocol = expected.get("protocol") or {}
+    expected_summary = {
+        "protocol": {
+            "status": expected_protocol.get("status"),
+            "success": expected_protocol.get("success"),
+        },
+        "required_claim_count": len(expected.get("required_claims") or []),
+        "prohibited_claim_count": len(expected.get("prohibited_claims") or []),
+        "allowable_source_count": len(expected.get("allowable_source_urls") or []),
+        "citation_count": len(expected.get("citations") or []),
+        "abstain_expected": bool(expected.get("abstain_expected")),
+        "abstain_qualifier": expected.get("abstain_qualifier"),
+    }
+    observed_protocol = observed.get("protocol") or {}
+    fixture = result.get("fixture") or {}
+    scenario_use = result.get("scenario_use") or {}
+    payload = {
+        "case_id": result.get("case_id"),
+        "case_path": result.get("case_path"),
+        "request_hash": result.get("request_hash"),
+        "expected": expected_summary,
+        "observed": {
+            "protocol": {
+                "status": observed_protocol.get("status"),
+                "success": observed_protocol.get("success"),
+            },
+            "answer_present": bool(observed.get("answer")),
+            "source_count": len(observed.get("sources") or []),
+            "citation_count": len(observed.get("citations") or []),
+            "error_classification": _safe_error_classification(result),
+            "validation_error_count": len(observed.get("validation_errors") or []),
+        },
+        "fixture": {
+            "search_fixture": {
+                key: (fixture.get("search_fixture") or {}).get(key)
+                for key in (
+                    "service",
+                    "scenario",
+                    "scenario_version",
+                    "fixture_version",
+                )
+            },
+            "llm_fixture": {
+                key: (fixture.get("llm_fixture") or {}).get(key)
+                for key in (
+                    "service",
+                    "scenario",
+                    "scenario_version",
+                    "fixture_version",
+                )
+            },
+            "model": fixture.get("model"),
+            "llm_base_url_host": fixture.get("llm_base_url_host"),
+        },
+        "scenario_use": {
+            key: scenario_use.get(key)
+            for key in (
+                "search_observed_scenarios",
+                "llm_observed_scenarios",
+                "search_entry_count",
+                "llm_entry_count",
+            )
+        },
+        "outcome": result.get("outcome"),
+        "error": _safe_error_classification(result),
+        "timeout": bool(result.get("timeout")),
+        "latency_ms": result.get("latency_ms"),
+        "graders": [
+            {"id": grader.get("id"), "version": grader.get("version")}
+            for grader in result.get("graders", [])
+        ],
+        "verdicts": [
+            {"grader": verdict.get("grader"), "pass": bool(verdict.get("pass"))}
+            for verdict in result.get("verdicts", [])
+        ],
+        "artifact_path": result.get("artifact_path"),
+    }
+    return payload
 
 
 def validation_failure_record(
@@ -616,6 +724,10 @@ def compare_to_baseline(case_records: list[dict], baseline: dict) -> dict:
                         "observed": observed_verdicts.get(grader_id),
                     }
                 )
+    observed_case_ids = {record["case_id"] for record in case_records}
+    for case_id in baseline_cases:
+        if case_id not in observed_case_ids:
+            diff.append({"case_id": case_id, "reason": "missing from run"})
     return {"match": not diff, "diff": diff}
 
 
@@ -652,15 +764,29 @@ async def http_smoke(
     lane. The endpoint host must be on the eval allowlist (no live egress).
     """
     validate_endpoint_allowlist([base_url])
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(
-            f"{base_url.rstrip('/')}/v2/answer",
-            json={
-                "query": query,
-                "num_sources": 3,
-                "stream": False,
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{base_url.rstrip('/')}/v2/answer",
+                json={
+                    "query": query,
+                    "num_sources": 3,
+                    "stream": False,
+                },
+            )
+    except httpx.HTTPError as exc:
+        return {
+            "status": None,
+            "success": False,
+            "answer_present": False,
+            "citation_count": 0,
+            "smoke_ok": False,
+            "detail": {
+                "host": _host_of(base_url),
+                "classification": type(exc).__name__,
             },
-        )
+        }
+    else:
         try:
             payload = response.json()
         except ValueError:
@@ -679,6 +805,6 @@ async def http_smoke(
             "smoke_ok": ok,
             "detail": {
                 "host": _host_of(base_url),
-                "error": payload.get("error"),
+                "error_present": bool(payload.get("error")),
             },
         }

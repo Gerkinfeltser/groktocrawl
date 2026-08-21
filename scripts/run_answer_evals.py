@@ -182,7 +182,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"candidate baseline written to {candidate_path} (not canonical)")
 
     if args.http_smoke:
+        smoke_path = output_dir / "http-smoke.json"
         smoke = asyncio.run(harness.http_smoke(args.http_smoke))
+        smoke["artifact_path"] = str(smoke_path)
+        smoke_path.write_text(json.dumps(smoke, indent=2, sort_keys=True) + "\n")
         result["http_smoke"] = smoke
 
     if args.json:

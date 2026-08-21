@@ -526,8 +526,8 @@ def test_validation_failure_record_contains_expected_observed_and_its_own_path(
     artifact = Path(record["artifact_path"])
     persisted = json.loads(artifact.read_text())
     assert persisted["case_id"] == "positive-001-answer-grounded"
-    assert persisted["expected"] == {"valid_case": True}
-    assert persisted["observed"]["validation_errors"] == ["content hash mismatch"]
+    assert persisted["expected"]["required_claim_count"] == 0
+    assert persisted["observed"]["validation_error_count"] == 1
     assert persisted["artifact_path"] == str(artifact)
     assert persisted["outcome"] == "fail"
 
@@ -675,6 +675,61 @@ async def test_run_case_records_scenario_use_and_passes(tmp_path):
     assert (tmp_path / "positive-001-answer-grounded.json").exists()
 
 
+def test_per_case_artifact_minimizes_observed_content(tmp_path):
+    result = {
+        "case_id": "artifact-privacy",
+        "prompt": "secret prompt",
+        "sources": [{"url": "http://top-level-secret.invalid"}],
+        "expected": {
+            "required_claims": ["secret expected claim"],
+            "protocol": {
+                "status": 200,
+                "success": True,
+                "detail": "secret expected protocol detail",
+            },
+            "allowable_source_urls": [
+                "https://user:pass@example.invalid/?token=secret"
+            ],
+        },
+        "observed": {
+            "protocol": {
+                "status": 200,
+                "success": True,
+                "provider_error": "secret protocol detail",
+            },
+            "answer": "secret answer from provider",
+            "sources": [{"url": "http://secret.invalid", "content": "secret source"}],
+            "citations": [{"index": 1, "url": "http://secret.invalid"}],
+        },
+        "error": "provider failed with secret request body",
+        "timeout": False,
+        "verdicts": [
+            {"grader": "check_protocol", "pass": True, "message": "secret detail"}
+        ],
+    }
+    record = harness._finalize_result(result, output_dir=tmp_path)
+    serialized = Path(record["artifact_path"]).read_text()
+    persisted = json.loads(serialized)
+    assert "secret answer from provider" not in serialized
+    assert "secret source" not in serialized
+    assert "secret request body" not in serialized
+    assert "secret detail" not in serialized
+    assert "secret expected claim" not in serialized
+    assert "user:pass@example.invalid" not in serialized
+    assert "secret prompt" not in serialized
+    assert "top-level-secret.invalid" not in serialized
+    assert "secret protocol detail" not in serialized
+    assert "secret expected protocol detail" not in serialized
+    assert persisted["observed"] == {
+        "protocol": {"status": 200, "success": True},
+        "answer_present": True,
+        "source_count": 1,
+        "citation_count": 1,
+        "error_classification": "evaluation_failure",
+        "validation_error_count": 0,
+    }
+
+
 @pytest.mark.asyncio
 async def test_run_case_fails_on_scenario_use_assertion(tmp_path):
     case = _load_corpus_case("positive-001-answer-grounded")
@@ -743,8 +798,8 @@ async def test_run_case_timeout_is_a_persisted_failure(tmp_path):
     artifact = Path(record["artifact_path"])
     persisted = json.loads(artifact.read_text())
     assert persisted["case_id"] == record["case_id"]
-    assert persisted["expected"] == record["expected"]
-    assert persisted["observed"] == record["observed"]
+    assert persisted["observed"]["protocol"] == record["observed"]["protocol"]
+    assert persisted["observed"]["error_classification"] == "timeout"
     assert persisted["artifact_path"] == str(artifact)
 
 
@@ -779,8 +834,8 @@ async def test_selection_deadline_writes_complete_case_artifacts(tmp_path):
         artifact = Path(record["artifact_path"])
         persisted = json.loads(artifact.read_text())
         assert persisted["case_id"] == record["case_id"]
-        assert persisted["expected"] == record["expected"]
-        assert persisted["observed"] == record["observed"]
+        assert persisted["expected"]["protocol"] == record["expected"]["protocol"]
+        assert persisted["observed"]["error_classification"] == "selection_deadline"
         assert persisted["artifact_path"] == str(artifact)
 
 
@@ -822,6 +877,36 @@ def test_baseline_compare_detects_mismatch():
     comparison = harness.compare_to_baseline([record], baseline)
     assert comparison["match"] is False
     assert comparison["diff"][0]["reason"] == "outcome mismatch"
+
+
+def test_baseline_compare_detects_cases_missing_from_targeted_run():
+    baseline = {
+        "selection": "broad",
+        "suite_version": "answer-evals-v1",
+        "cases": [
+            {"case_id": "answer-case", "outcome": "pass", "graders": {}},
+            {"case_id": "research-case", "outcome": "pass", "graders": {}},
+        ],
+    }
+    comparison = harness.compare_to_baseline(
+        [{"case_id": "answer-case", "outcome": "pass", "verdicts": []}],
+        baseline,
+    )
+    assert comparison["match"] is False
+    assert {item["case_id"] for item in comparison["diff"]} == {"research-case"}
+
+
+@pytest.mark.asyncio
+async def test_http_smoke_transport_failure_is_controlled_and_sanitized():
+    with mock.patch(
+        "httpx.AsyncClient.post",
+        new=mock.AsyncMock(side_effect=httpx.ConnectError("secret request URL")),
+    ):
+        result = await harness.http_smoke("http://127.0.0.1:8084")
+    assert result["smoke_ok"] is False
+    assert result["status"] is None
+    assert result["detail"]["classification"] == "ConnectError"
+    assert "secret request URL" not in json.dumps(result)
 
 
 @pytest.mark.asyncio

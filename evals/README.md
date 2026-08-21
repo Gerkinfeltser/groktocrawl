@@ -133,10 +133,12 @@ versions, parsed model id and base-URL **host only**, grader id/version,
 verdicts, outcome, and artifact path.
 
 Prompts, queries, answers, headers, URL query strings/userinfo, environment
-dumps, and arbitrary configuration are **never serialized**; secret-like values
-are redacted (`sanitize()`), and `validate_allowlist()` fails closed if a
-non-allowlisted key ever appears. Provenance never writes or replaces the
-pinned baseline.
+  dumps, and arbitrary configuration are **never serialized** in provenance or
+  per-case artifacts; per-case artifacts contain only summarized observed
+  outcomes (counts, protocol, and safe classifications). Secret-like values are
+  redacted (`sanitize()`), and `validate_allowlist()` fails closed if a
+  non-allowlisted key ever appears. Provenance never writes or replaces the
+  pinned baseline.
 
 ## Negative-case rationale
 
