@@ -463,7 +463,6 @@ def main() -> int:
     parser.add_argument(
         "--corpus", type=Path, default=Path("provenance/live-calibration-corpus.json")
     )
-    parser.add_argument("--calibration-artifact", type=Path)
     args = parser.parse_args()
     return run(args.output, args.corpus)
 

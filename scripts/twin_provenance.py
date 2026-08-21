@@ -373,6 +373,114 @@ def _execution_mode() -> str:
     return mode if mode in {"hosted", "compose", "live"} else "hosted"
 
 
+def _valid_calibration_artifact(calibration: object) -> bool:
+    if not isinstance(calibration, dict):
+        return False
+    corpus = calibration.get("corpus")
+    identity = calibration.get("identity")
+    bounds = calibration.get("bounds")
+    limits = calibration.get("limits")
+    records = calibration.get("records")
+    if calibration.get("schema_version") != "live-calibration-v2":
+        return False
+    if calibration.get("outcome") not in {"success", "failure", "advisory_success"}:
+        return False
+    if calibration.get("failure_source") not in {
+        "none",
+        "authentication",
+        "quota",
+        "twin",
+        "infrastructure",
+        "harness",
+        "provider_drift",
+    }:
+        return False
+    if not (
+        isinstance(corpus, dict)
+        and isinstance(corpus.get("id"), str)
+        and corpus["id"]
+        and isinstance(corpus.get("digest"), str)
+        and len(corpus["digest"]) == 64
+        and all(char in "0123456789abcdef" for char in corpus["digest"])
+    ):
+        return False
+    if not isinstance(identity, dict):
+        return False
+    requested = identity.get("requested")
+    observed = identity.get("observed")
+    if not (
+        isinstance(requested, dict)
+        and all(isinstance(requested.get(key), str) for key in ("provider", "model"))
+        and isinstance(observed, dict)
+        and all(
+            isinstance(observed.get(key), str)
+            for key in ("search_provider", "llm_provider", "model")
+        )
+    ):
+        return False
+    if not (
+        isinstance(bounds, dict)
+        and all(
+            isinstance(bounds.get(key), int | float)
+            for key in (
+                "estimated_max_cost_usd",
+                "estimated_live_provider_cost_usd",
+                "cost_ceiling_usd",
+                "expected_calls",
+            )
+        )
+        and isinstance(limits, dict)
+        and all(
+            isinstance(limits.get(key), int | float)
+            for key in (
+                "timeout_seconds",
+                "max_calls",
+                "max_tokens",
+                "max_total_tokens",
+            )
+        )
+    ):
+        return False
+    if not isinstance(records, list):
+        return False
+    classifications = {
+        "match",
+        "provider_drift",
+        "authentication",
+        "quota",
+        "twin",
+        "infrastructure",
+        "harness",
+    }
+    for record in records:
+        if not isinstance(record, dict):
+            return False
+        if not isinstance(record.get("case_id"), str) or not record["case_id"]:
+            return False
+        if record.get("kind") not in {"search", "llm"}:
+            return False
+        if record.get("result") not in classifications:
+            return False
+        if record.get("classification") not in classifications:
+            return False
+        for key in ("provider_fingerprint", "twin_fingerprint"):
+            value = record.get(key)
+            if value is not None and not (
+                value == "unavailable"
+                or (
+                    isinstance(value, str)
+                    and len(value) == 64
+                    and all(char in "0123456789abcdef" for char in value)
+                )
+            ):
+                return False
+        for key in ("provider_latency_band", "twin_latency_band"):
+            value = record.get(key)
+            if value is not None and value not in {"fast", "normal", "slow"}:
+                return False
+    return True
+
+
 def build_manifest(output: Path, inputs: list[str] | None = None) -> dict[str, object]:
     corpus = Path("provenance/twin-corpus.json")
     corpus_data = json.loads(corpus.read_text()) if corpus.exists() else {}
@@ -467,9 +575,7 @@ def build_manifest(output: Path, inputs: list[str] | None = None) -> dict[str, o
     if calibration_artifact:
         try:
             calibration = json.loads(Path(calibration_artifact).read_text())
-            if not isinstance(calibration, dict) or not isinstance(
-                calibration.get("records"), list
-            ):
+            if not _valid_calibration_artifact(calibration):
                 raise ValueError("invalid calibration artifact")
             manifest["calibration"] = {
                 "schema_version": calibration.get("schema_version"),

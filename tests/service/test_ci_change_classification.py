@@ -236,8 +236,11 @@ class CiChangeClassificationTests(unittest.TestCase):
         for index, probe in enumerate(probes):
             compile(probe, f"docker.yml LLM probe {index}", "exec")
         compose = (ROOT / "docker-compose.yml").read_text()
-        self.assertGreaterEqual(compose.count("TWIN_RUN_ID=${TWIN_RUN_ID:-}"), 2)
-        self.assertIn("run_id=${TWIN_RUN_ID:-}", compose)
+        self.assertIn("TWIN_RUN_ID=${TWIN_RUN_ID:-local}", compose)
+        self.assertIn("run_id=${TWIN_RUN_ID:-local}", compose)
+        self.assertNotIn(
+            "LLM_BASE_URL=http://llm-svc:8011/v1?run_id=${TWIN_RUN_ID:-}", compose
+        )
         self.assertIn("run_id=${{ github.run_id }}-${{ github.run_attempt }}", workflow)
 
 

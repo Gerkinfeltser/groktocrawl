@@ -38,9 +38,7 @@ RUNTIME_SERVICES = (
 # Paths whose change affects every service image.
 _CROSS_CUTTING_PATHS = ("docker-compose.yml",)
 _COMMON_PREFIX = "common/"
-_TWIN_PREFIXES = (
-    "llm-svc/",
-    "slopsearx-fixture/",
+_TWIN_SHARED_PREFIXES = (
     "scenarios/",
     "scenario/",
     "tests/scenarios/",
@@ -55,13 +53,6 @@ _TWIN_EXACT_PATHS = frozenset(
         ".github/workflows/docker.yml",
         ".github/workflows/live-calibration.yml",
     }
-)
-_TWIN_CLIENT_SUFFIXES = (
-    "/llm.py",
-    "/searxng_client.py",
-    "/retry.py",
-    "/retry_policy.py",
-    "/caller_policy.py",
 )
 
 
@@ -131,7 +122,7 @@ def twin_test_selection(paths: Iterable[str]) -> str:
     if not relevant:
         return "none"
     if any(
-        path in _TWIN_EXACT_PATHS or path.startswith(_TWIN_PREFIXES[2:])
+        path in _TWIN_EXACT_PATHS or path.startswith(_TWIN_SHARED_PREFIXES)
         for path in relevant
     ):
         return "all"

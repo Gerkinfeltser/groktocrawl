@@ -280,8 +280,8 @@ services:
         condition: service_started
     environment:
       - VALKEY_URL=redis://valkey:6379/1
-      - TWIN_RUN_ID=${TWIN_RUN_ID:-}
-      - LLM_BASE_URL=http://llm-svc:8011/v1?run_id=${TWIN_RUN_ID:-}
+      - TWIN_RUN_ID=${TWIN_RUN_ID:-local}
+      - LLM_BASE_URL=http://llm-svc:8011/v1?run_id=${TWIN_RUN_ID:-local}
       - SEARXNG_URL=http://slopsearx-fixture:8080
       - SCRAPER_URL=http://scraper-svc:8001
       - SEMANTIC_URL=http://semantic-svc:8003

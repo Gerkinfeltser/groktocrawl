@@ -7,9 +7,10 @@
 ## Context
 
 The LLM and search fixtures are source-owned dependency twins. They must be
-safe on fork pull requests without credentials or self-hosted runner exposure,
-while trusted live calibration detects provider drift without changing the
-deterministic contract.
+safe on fork pull requests without credentials, while self-hosted execution is
+controlled by platform approval policy and runner-group access rather than by
+fork-editable workflow YAML alone. Trusted live calibration detects provider
+drift without changing the deterministic contract.
 
 ## Decision
 
@@ -46,9 +47,15 @@ and protected variables `LLM_BASE_URL`, `LLM_MODEL`,
 are assumptions used only to enforce a worst-case preflight ceiling, not claims
 of actual spend. Values are never documented or printed.
 
+The repository must require approval for all external-contributor workflow runs.
+Runner-group restrictions should add defense in depth where organization policy
+permits them. The workflow's same-repository condition is also defense in depth,
+not the security boundary.
+
 ## Consequences
 
-Fork pull requests receive hosted contract confidence without secrets;
-self-hosted and live-provider execution remain unavailable to forks. A live
+Fork pull requests receive hosted contract confidence without secrets. With the
+required platform approval and runner-group policy, self-hosted and live-provider
+execution remain unavailable to unapproved forks. A live
 divergence produces evidence for review but cannot redefine the pre-merge
 deterministic contract.

@@ -108,7 +108,9 @@ def test_compose_run_id_and_failure_provenance_are_unambiguous():
     docker = yaml.safe_load(workflow)
     assert "${LLM_BASE_URL:-http://llm-svc:8011/v1?run_id=${" not in compose
     assert "LLM_BASE_URL=${LLM_BASE_URL:-http://llm-svc:8011/v1}" in compose
-    assert "LLM_BASE_URL=http://llm-svc:8011/v1?run_id=${TWIN_RUN_ID:-}" in compose
+    assert "TWIN_RUN_ID=${TWIN_RUN_ID:-local}" in compose
+    assert "LLM_BASE_URL=http://llm-svc:8011/v1?run_id=${TWIN_RUN_ID:-local}" in compose
+    assert "LLM_BASE_URL=http://llm-svc:8011/v1?run_id=${TWIN_RUN_ID:-}" not in compose
     compose_evidence = workflow.split(
         "- name: Write Compose twin evidence manifest", 1
     )[1]

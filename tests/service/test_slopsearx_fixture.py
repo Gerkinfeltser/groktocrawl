@@ -16,10 +16,25 @@ import uvicorn
 sys.path.insert(0, str(Path(__file__).parents[2] / "slopsearx-fixture"))
 
 from slopsearx_fixture.app import (
+    MAX_LEDGER,
     SCHEMA_VERSION,
+    FixtureState,
     SearchResponse,
     create_app,
 )
+
+
+def test_scenario_request_partitions_are_hard_bounded():
+    state = FixtureState()
+    for index in range(MAX_LEDGER + 5):
+        state.next_scenario_request("healthy", f"query-{index}", "run-a")
+    assert len(state.scenario_requests) == MAX_LEDGER
+    newest_key = next(reversed(state.scenario_requests))
+    assert newest_key[2] == "run-a"
+    assert (
+        state.next_scenario_request("healthy", f"query-{MAX_LEDGER + 4}", "run-a") == 2
+    )
+    assert len(state.scenario_requests) == MAX_LEDGER
 
 
 @pytest_asyncio.fixture

@@ -335,6 +335,83 @@ def test_missing_live_calibration_writes_valid_failure_manifest(tmp_path, monkey
     assert manifest["outcome"]["failure_source"] == "harness"
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "schema_version": "live-calibration-v2",
+            "outcome": "failure",
+            "failure_source": "harness",
+            "records": [],
+        },
+        {
+            "schema_version": "live-calibration-v2",
+            "outcome": "success",
+            "failure_source": "none",
+            "corpus": {"id": "live-v2", "digest": "1" * 64},
+            "identity": {
+                "requested": {"provider": "provider", "model": "model"},
+                "observed": {
+                    "search_provider": "search",
+                    "llm_provider": "llm",
+                    "model": "model",
+                },
+            },
+            "bounds": {
+                "estimated_max_cost_usd": 0.1,
+                "estimated_live_provider_cost_usd": 0.1,
+                "cost_ceiling_usd": 1.0,
+                "expected_calls": 2,
+            },
+            "limits": {
+                "timeout_seconds": 20,
+                "max_calls": 6,
+                "max_tokens": 128,
+                "max_total_tokens": 512,
+            },
+            "records": [{}],
+        },
+    ],
+)
+def test_incomplete_live_calibration_writes_valid_failure_manifest(
+    tmp_path, monkeypatch, payload
+):
+    provenance = _load(
+        "incomplete_live_provenance", ROOT / "scripts/twin_provenance.py"
+    )
+    artifact = tmp_path / "incomplete.json"
+    artifact.write_text(json.dumps(payload))
+    output = tmp_path / "aggregate"
+    monkeypatch.setenv("TWIN_EXECUTION_MODE", "live")
+    monkeypatch.setenv("TWIN_SELECTION", "all")
+    monkeypatch.setenv("TWIN_TESTS", json.dumps(["scripts/live_calibration.py"]))
+    monkeypatch.setenv(
+        "TWIN_CHECKS",
+        "scenario-version-precheck,manifest-validation,fixture-immutability-check",
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "twin_provenance",
+            "--output",
+            str(output),
+            "--calibration-artifact",
+            str(artifact),
+        ],
+    )
+    assert provenance.main() == 1
+    manifest = json.loads((output / "twin-evidence.json").read_text())
+    validate(
+        manifest,
+        json.loads((ROOT / "provenance/twin-evidence.schema.json").read_text()),
+    )
+    assert manifest["outcome"]["result"] == "failure"
+    assert manifest["outcome"]["failure_source"] == "harness"
+    assert manifest["outcome"]["failure_detail"] == (
+        "missing or invalid calibration artifact"
+    )
+
+
 def test_calibration_failure_taxonomy_and_bounds():
     calibration = _load("calibration", ROOT / "scripts/live_calibration.py")
     assert calibration.classify_failure(401) == "authentication"

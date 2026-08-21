@@ -78,8 +78,10 @@ class FixtureState:
         """Return the ordinal for a non-sensitive scenario/query partition."""
         partition = hashlib.sha256(query.encode("utf-8")).hexdigest()[:16]
         key = (scenario, partition, run_id)
-        ordinal = self.scenario_requests.get(key, 0) + 1
+        ordinal = self.scenario_requests.pop(key, 0) + 1
         self.scenario_requests[key] = ordinal
+        while len(self.scenario_requests) > MAX_LEDGER:
+            del self.scenario_requests[next(iter(self.scenario_requests))]
         return ordinal
 
     def record(
