@@ -26,6 +26,8 @@ SCENARIOS = {
     "unauthorized",
     "forbidden",
     "rate-limit-retry-after",
+    "rate-limit-retry-after-fractional",
+    "rate-limit-retry-after-zero",
     "rate-limit-no-retry-after",
     "quota-exhaustion",
     "server-error",
@@ -237,15 +239,20 @@ def create_app(*, default_scenario: str = "healthy") -> FastAPI:
             payload: Response = JSONResponse(
                 {"error": f"fixture {selected}"}, status_code=status
             )
-        elif selected in {"rate-limit-retry-after", "rate-limit-no-retry-after"} or (
-            selected == "quota-exhaustion" and scenario_request > 1
-        ):
+        elif selected in {
+            "rate-limit-retry-after",
+            "rate-limit-no-retry-after",
+            "rate-limit-retry-after-fractional",
+            "rate-limit-retry-after-zero",
+        } or (selected == "quota-exhaustion" and scenario_request > 1):
             status, classification = 429, "rate_limited"
-            headers = (
-                {"Retry-After": "2"}
-                if selected in {"rate-limit-retry-after", "quota-exhaustion"}
-                else {}
-            )
+            retry_after = {
+                "rate-limit-retry-after": "2",
+                "quota-exhaustion": "2",
+                "rate-limit-retry-after-fractional": "0.5",
+                "rate-limit-retry-after-zero": "0",
+            }.get(selected)
+            headers = {"Retry-After": retry_after} if retry_after else {}
             payload = JSONResponse(
                 {"error": "fixture rate limited"}, status_code=status, headers=headers
             )

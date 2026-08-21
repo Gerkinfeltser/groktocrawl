@@ -300,6 +300,18 @@ class TestRateLimitClassification:
         assert _parse_retry_after("nan") is None
         assert _parse_retry_after("1e309") is None
 
+    def test_parse_retry_after_zero_seconds(self):
+        """Zero seconds is a valid Retry-After and must be relayed as 0.0."""
+        from agent.searxng_client import _parse_retry_after
+
+        assert _parse_retry_after("0") == 0.0
+
+    def test_parse_retry_after_fractional_seconds(self):
+        """Sub-second Retry-After values must be relayed as their fractional float."""
+        from agent.searxng_client import _parse_retry_after
+
+        assert _parse_retry_after("0.5") == 0.5
+
     @pytest.mark.asyncio
     async def test_429_raises_retryable_error_with_retry_after(self, client):
         from agent.exceptions import RetryableRateLimitError
