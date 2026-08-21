@@ -293,7 +293,9 @@ class TestChatCompletionsEndpoint:
             },
         )
         assert resp.status_code == 200
-        assert "[1]" in resp.json()["choices"][0]["message"]["content"]
+        content = resp.json()["choices"][0]["message"]["content"]
+        assert "[1]" in content
+        assert len(content) > 50
 
     def test_schema_response_populates_declared_optional_properties(self, client):
         schema = {

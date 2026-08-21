@@ -18,6 +18,16 @@ default. CI runs a separate `agent-svc-fixture` instance against that boundary,
 leaving the ordinary integration service on the configured production-compatible
 search path.
 
+The LLM fixture selects a scenario through
+`http://llm-svc:8011/v1/scenarios/<scenario>`; `LLMClient` appends
+`/chat/completions` without rewriting the base URL. The legacy
+`/v1/chat/completions` route remains the default behavior. Scenario semantics
+use `SCHEMA_VERSION` for the HTTP contract and `FIXTURE_VERSION` for scenario
+behavior. Tests should provide a path-safe `run_id` and filter
+`/diagnostics?run_id=...`; diagnostics are bounded and contain no prompts,
+context, authorization headers, or secrets. This is a contract emulator, not a
+provider-quality model; its validity ceiling is the documented contract.
+
 Copy `.env.sample` to `.env` and configure an OpenAI-compatible LLM for non-fixture use. `BRAVE_API_KEY` is required for useful open-web search results. The [configuration inventory](../reference/public-surface.md#configuration-keys) is validated against `.env.sample`; it separates provider, service URLs, vector index, adapters, cache, politeness, search controls, crawl limits, and research-memory settings.
 
 Only expose or override internal service URLs when deliberately splitting the compose deployment. Persist Valkey and Qdrant volumes in production; the embedding model cache volume avoids repeated model downloads.

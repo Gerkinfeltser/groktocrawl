@@ -29,6 +29,8 @@ ResearchEvent = TypedDict(
         "source": NotRequired[str],
         "chars": NotRequired[int],
         "content": NotRequired[str],
+        "classification": NotRequired[str],
+        "retry_after_seconds": NotRequired[float | None],
         "result": NotRequired[str],
         "source_details": NotRequired[list[dict[str, Any]]],
         "latency_ms": NotRequired[int],

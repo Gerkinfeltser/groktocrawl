@@ -200,7 +200,20 @@ async def stream_research_live(
                 done_payload["source_details"] = source_details
             yield f"data: {json.dumps(done_payload)}\n\n"
         elif event["type"] == "error":
-            yield f"data: {json.dumps({'type': 'error', 'content': event['content']})}\n\n"
+            payload: dict[str, Any] = {
+                "type": "error",
+                "content": event.get("content", "LLM provider failed"),
+            }
+            classification = event.get("classification")
+            if isinstance(classification, str):
+                payload["classification"] = classification
+            retry_after = event.get("retry_after_seconds")
+            if isinstance(retry_after, int | float) and not isinstance(
+                retry_after, bool
+            ):
+                payload["retry_after_seconds"] = float(retry_after)
+            yield f"data: {json.dumps(payload)}\n\n"
+            return
         elif event["type"] == "status":
             yield f"data: {json.dumps({'type': 'status', 'state': event['state']})}\n\n"
         elif event["type"] == "research_plan":

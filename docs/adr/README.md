@@ -79,4 +79,5 @@ An Architecture Decision Record captures an important architectural decision mad
 | 0052 | [Concurrent Cache-Assisted Hybrid Retrieval Planner](0052-hybrid-retrieval-planner.md) | accepted |
 | 0053 | [Retryable Rate-Limit Contract](0053-retryable-rate-limit-contract.md) | accepted |
 | 0054 | [Deterministic SlopSearX Contract Fixture](0054-deterministic-slopsearx-contract-fixture.md) | accepted |
+| 0055 | [Deterministic LLM Contract Fixture](0055-deterministic-llm-contract-fixture.md) | accepted |
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full ADR workflow: when to write an ADR, how to number it, and how to get it reviewed in a PR.

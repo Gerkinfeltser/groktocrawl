@@ -24,9 +24,7 @@ class TestLLMClientInit:
     def test_strips_trailing_slash(self):
         from agent.llm import LLMClient
 
-        client = LLMClient(
-            base_url="http://example.com/v1/", model="test-model"
-        )
+        client = LLMClient(base_url="http://example.com/v1/", model="test-model")
         assert client.base_url == "http://example.com/v1"
 
     def test_constructing_without_model_raises_value_error(self):
@@ -161,9 +159,7 @@ class TestLLMClientGenerate:
     async def test_no_auth_when_key_empty(self):
         from agent.llm import LLMClient
 
-        no_key = LLMClient(
-            base_url="http://test/v1", api_key="", model="test-model"
-        )
+        no_key = LLMClient(base_url="http://test/v1", api_key="", model="test-model")
         with patch.object(
             no_key._client,
             "post",
@@ -176,24 +172,56 @@ class TestLLMClientGenerate:
             assert "Authorization" not in headers
 
     @pytest.mark.asyncio
-    async def test_handles_api_error(self, llm):
+    async def test_classifies_rate_limit_as_retryable(self, llm):
+        from agent.exceptions import RetryableRateLimitError
+
+        response = _make_response(status_code=429, text="Rate limited")
+        response.headers = {"Retry-After": "2"}
         with patch.object(
             llm._client,
             "post",
-            return_value=_make_response(status_code=429, text="Rate limited"),
+            return_value=response,
         ):
-            result = await llm.generate(system_prompt="x", user_prompt="y")
-            assert "Error: LLM API returned 429" in result
+            with pytest.raises(RetryableRateLimitError) as exc_info:
+                await llm.generate(system_prompt="x", user_prompt="y")
+            assert exc_info.value.retry_after_seconds == 2
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_api_error_raises_typed_error(self, llm):
+        from agent.exceptions import ProviderOutputError
+
+        with patch.object(
+            llm._client,
+            "post",
+            return_value=_make_response(status_code=503, text="Unavailable"),
+        ):
+            with pytest.raises(ProviderOutputError):
+                await llm.generate(system_prompt="x", user_prompt="y")
+
+    @pytest.mark.asyncio
+    async def test_non_object_message_raises_typed_error(self, llm):
+        from agent.exceptions import ProviderOutputError
+
+        with patch.object(
+            llm._client,
+            "post",
+            return_value=_make_response(
+                json_data={"choices": [{"message": None, "finish_reason": "stop"}]}
+            ),
+        ):
+            with pytest.raises(ProviderOutputError):
+                await llm.generate(system_prompt="x", user_prompt="y")
 
     @pytest.mark.asyncio
     async def test_handles_network_error(self, llm):
         import httpx
+        from agent.exceptions import ProviderOutputError
 
         with patch.object(
             llm._client, "post", side_effect=httpx.ConnectError("Connection refused")
         ):
-            result = await llm.generate(system_prompt="x", user_prompt="y")
-            assert "Error: LLM call failed" in result
+            with pytest.raises(ProviderOutputError, match="transport failed"):
+                await llm.generate(system_prompt="x", user_prompt="y")
 
     @pytest.mark.asyncio
     async def test_thinking_omitted_by_default(self, llm):
@@ -215,22 +243,16 @@ class TestLLMClientGenerate:
 
         try:
             agent_load_settings.cache_clear()
-            with patch.dict(
-                os.environ, {"LLM_ENABLE_THINKING": "true"}, clear=False
-            ):
+            with patch.dict(os.environ, {"LLM_ENABLE_THINKING": "true"}, clear=False):
                 agent_load_settings.cache_clear()
                 from agent.llm import LLMClient
 
-                client = LLMClient(
-                    base_url="http://test/v1", api_key="k", model="ds"
-                )
+                client = LLMClient(base_url="http://test/v1", api_key="k", model="ds")
                 with patch.object(
                     client._client,
                     "post",
                     return_value=_make_response(
-                        json_data={
-                            "choices": [{"message": {"content": "ok"}}]
-                        }
+                        json_data={"choices": [{"message": {"content": "ok"}}]}
                     ),
                 ) as mock_post:
                     await client.generate(system_prompt="x", user_prompt="y")
@@ -330,7 +352,7 @@ class TestLLMClientGenerateStream:
             assert events[0]["type"] == "error"
 
     @pytest.mark.asyncio
-    async def test_skips_invalid_json_lines(self, llm):
+    async def test_rejects_invalid_json_lines(self, llm):
         mock_client_cls, _ = self._setup_stream_mock(
             [
                 "data: invalid json",
@@ -343,8 +365,30 @@ class TestLLMClientGenerateStream:
             tokens = []
             async for event in llm.generate_stream(system_prompt="x", user_prompt="y"):
                 tokens.append(event)
-            assert len(tokens) == 2
-            assert tokens[0] == {"type": "token", "content": "ok"}
+            assert len(tokens) == 1
+            assert tokens[0]["type"] == "error"
+            assert tokens[0]["classification"] == "malformed"
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_object_sse_choice(self, llm):
+        mock_client_cls, _ = self._setup_stream_mock(
+            ['data: {"choices":[null]}', "data: [DONE]"]
+        )
+
+        with patch("httpx.AsyncClient", mock_client_cls):
+            events = [
+                event
+                async for event in llm.generate_stream(
+                    system_prompt="x", user_prompt="y"
+                )
+            ]
+        assert events == [
+            {
+                "type": "error",
+                "classification": "malformed",
+                "content": "LLM provider returned malformed SSE",
+            }
+        ]
 
     @pytest.mark.asyncio
     async def test_includes_context(self, llm):
@@ -393,24 +437,28 @@ class TestLLMClientGenerateStream:
 
     @pytest.mark.asyncio
     async def test_schema_mode_error_propagates(self, llm):
-        """When schema + generate() fails, generate_stream yields error."""
+        """When schema + generate() fails, generate_stream yields a typed error event."""
         schema = {"type": "object", "properties": {"result": {"type": "string"}}}
         with patch.object(
             llm._client,
             "post",
             return_value=_make_response(status_code=500, text="Server error"),
         ):
-            events = []
-            async for event in llm.generate_stream(
-                system_prompt="Extract.",
-                user_prompt="Get data.",
-                schema=schema,
-            ):
-                events.append(event)
-
-            assert len(events) == 1
-            assert events[0]["type"] == "error"
-            assert "500" in events[0]["content"]
+            events = [
+                event
+                async for event in llm.generate_stream(
+                    system_prompt="Extract.",
+                    user_prompt="Get data.",
+                    schema=schema,
+                )
+            ]
+            assert events == [
+                {
+                    "type": "error",
+                    "classification": "non_retryable",
+                    "content": "LLM provider returned HTTP 500",
+                }
+            ]
 
     @pytest.mark.asyncio
     async def test_empty_schema_streams_normally(self, llm):
@@ -462,9 +510,7 @@ async def test_llama_cpp_disable_thinking_generate():
             ) as mock_post:
                 await client.generate(system_prompt="x", user_prompt="y")
                 body = mock_post.call_args[1]["json"]
-                assert body.get("chat_template_kwargs") == {
-                    "enable_thinking": False
-                }
+                assert body.get("chat_template_kwargs") == {"enable_thinking": False}
     finally:
         load_settings.cache_clear()
 
@@ -501,8 +547,6 @@ async def test_llama_cpp_disable_thinking_stream():
                     pass
 
                 body = mock_client.stream.call_args[1]["json"]
-                assert body.get("chat_template_kwargs") == {
-                    "enable_thinking": False
-                }
+                assert body.get("chat_template_kwargs") == {"enable_thinking": False}
     finally:
         load_settings.cache_clear()

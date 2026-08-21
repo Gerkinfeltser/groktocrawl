@@ -1,11 +1,19 @@
 """Deterministic OpenAI-compatible chat completions fixture."""
 
+import asyncio
 import json
 import logging
 import re
+from dataclasses import dataclass, field
+from typing import Any
 
-from fastapi import FastAPI
-from fastapi.responses import PlainTextResponse
+from fastapi import FastAPI, Query
+from fastapi.responses import (
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+    StreamingResponse,
+)
 from pydantic import BaseModel
 
 from common.logging import setup_logging
@@ -16,6 +24,47 @@ logger = logging.getLogger(__name__)
 
 # Marker injected by agent-svc LLM client when output_schema is requested
 _SCHEMA_MARKER = "MUST respond with valid JSON matching this schema:"
+SCHEMA_VERSION = "v1"
+FIXTURE_VERSION = "v2"
+MAX_DELAY_MS = 2_000
+MAX_DIAGNOSTICS = 200
+SCENARIOS = {
+    "default",
+    "streaming",
+    "stream-malformed",
+    "stream-truncated",
+    "delayed",
+    "timeout",
+    "rate-limit",
+    "server-error",
+    "malformed-json",
+    "schema-invalid",
+    "truncated",
+    "empty",
+    "refusal",
+    "contradictory",
+    "citation-free",
+    "echo",
+}
+
+
+@dataclass
+class FixtureState:
+    """Process-local diagnostics, deliberately excluding prompt and secret data."""
+
+    entries: list[dict[str, object]] = field(default_factory=list)
+    request_number: int = 0
+
+    def record(self, **entry: object) -> None:
+        self.request_number += 1
+        self.entries.append(
+            {
+                "request_id": self.request_number,
+                "schema_version": SCHEMA_VERSION,
+                **entry,
+            }
+        )
+        del self.entries[:-MAX_DIAGNOSTICS]
 
 
 def _resolve_type(prop_schema: dict) -> str:
@@ -87,12 +136,14 @@ class ChatCompletionRequest(BaseModel):
     temperature: float | None = None
     max_tokens: int | None = None
     response_format: dict | None = None
+    stream: bool = False
 
 
 def create_app() -> FastAPI:
     setup_logging()
 
-    app = FastAPI(title="GroktoCrawl LLM Fixture", version="0.1.0")
+    state = FixtureState()
+    app = FastAPI(title="GroktoCrawl LLM Fixture", version=FIXTURE_VERSION)
 
     # Register a basic metric so /metrics output has content
     METRICS.counter(
@@ -122,8 +173,101 @@ def create_app() -> FastAPI:
             media_type="application/openmetrics-text; version=1.0.0",
         )
 
-    @app.post("/v1/chat/completions")
-    async def chat_completions(req: ChatCompletionRequest):
+    @app.get("/diagnostics")
+    async def diagnostics(run_id: str | None = None) -> dict[str, object]:
+        entries = state.entries
+        if run_id:
+            entries = [entry for entry in entries if entry.get("run_id") == run_id]
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "fixture_version": FIXTURE_VERSION,
+            "entries": entries,
+        }
+
+    @app.post("/diagnostics/reset")
+    async def reset_diagnostics(run_id: str | None = None) -> dict[str, object]:
+        if run_id is None:
+            state.entries.clear()
+        else:
+            state.entries[:] = [
+                entry for entry in state.entries if entry.get("run_id") != run_id
+            ]
+        return {"status": "ok"}
+
+    async def _chat_completions(
+        req: ChatCompletionRequest,
+        scenario: str,
+        scenario_version: str = Query(default=SCHEMA_VERSION),
+        delay_ms: int = Query(default=0, ge=0, le=MAX_DELAY_MS),
+        chunks: int = Query(default=3, ge=1, le=32),
+        run_id: str | None = Query(default=None, pattern=r"^[A-Za-z0-9._-]{1,64}$"),
+    ):
+        if scenario_version != SCHEMA_VERSION:
+            return JSONResponse(
+                {"error": "unsupported fixture scenario version"}, status_code=400
+            )
+        if scenario not in SCENARIOS:
+            return JSONResponse({"error": "unknown fixture scenario"}, status_code=400)
+
+        effective_delay = max(
+            delay_ms, 200 if scenario in {"delayed", "timeout"} else 0
+        )
+        try:
+            if effective_delay:
+                await asyncio.sleep(effective_delay / 1000)
+        except asyncio.CancelledError:
+            state.record(
+                scenario=scenario,
+                scenario_version=SCHEMA_VERSION,
+                fixture_version=FIXTURE_VERSION,
+                run_id=run_id,
+                status=499,
+                classification="cancelled",
+                model=req.model,
+                stream=req.stream,
+            )
+            raise
+
+        state.record(
+            scenario=scenario,
+            scenario_version=SCHEMA_VERSION,
+            fixture_version=FIXTURE_VERSION,
+            run_id=run_id,
+            status=200,
+            classification="success",
+            model=req.model,
+            stream=req.stream,
+        )
+        classifications = {
+            "delayed": "delayed",
+            "timeout": "delayed",
+            "schema-invalid": "schema_invalid",
+            "truncated": "truncated",
+            "empty": "empty",
+            "refusal": "refusal",
+            "contradictory": "contradictory",
+            "citation-free": "citation_free",
+            "stream-malformed": "malformed_stream",
+            "stream-truncated": "truncated_stream",
+        }
+        if scenario in classifications:
+            state.entries[-1]["classification"] = classifications[scenario]
+        if scenario == "rate-limit":
+            state.entries[-1].update(status=429, classification="rate_limited")
+            return JSONResponse(
+                {"error": "fixture rate limited", "scenario": scenario},
+                status_code=429,
+                headers={"Retry-After": "2"},
+            )
+        if scenario == "server-error":
+            state.entries[-1].update(status=503, classification="upstream_error")
+            return JSONResponse({"error": "fixture unavailable"}, status_code=503)
+        if scenario == "malformed-json":
+            state.entries[-1].update(status=200, classification="malformed_envelope")
+            return Response(
+                "{malformed", status_code=200, media_type="application/json"
+            )
+
         def text(message: ChatMessage) -> str:
             if isinstance(message.content, str):
                 return message.content
@@ -136,7 +280,27 @@ def create_app() -> FastAPI:
         user_text = "\n".join(text(m) for m in req.messages if m.role == "user")
         system_text = "\n".join(text(m) for m in req.messages if m.role == "system")
 
-        if req.response_format and req.response_format.get("type") == "json_object":
+        if scenario == "schema-invalid":
+            content = json.dumps({"unexpected": True})
+        elif scenario == "truncated":
+            content = "The completion was truncated"
+        elif scenario == "empty":
+            content = ""
+        elif scenario == "refusal":
+            content = None
+        elif scenario == "contradictory":
+            content = "The source says yes. The source says no."
+        elif scenario == "citation-free":
+            content = "Synthesized answer without source citations."
+        elif scenario == "echo":
+            content = json.dumps(
+                {
+                    "model": req.model,
+                    "temperature": req.temperature,
+                    "max_tokens": req.max_tokens,
+                }
+            )
+        elif req.response_format and req.response_format.get("type") == "json_object":
             if "Select fixture tiles" in user_text:
                 content = json.dumps({"tiles": [0, 4, 8], "submit": True})
             # Handle recovery prompts — extract iframe URLs from page content
@@ -167,11 +331,11 @@ def create_app() -> FastAPI:
                 "cite sources" in (system_text + "\n" + user_text).lower()
             )
             content = (
-                "Synthesized answer from provided context. [1]"
+                "Synthesized answer from the provided source context. [1]"
                 if citation_requested
                 else "Synthesized answer from provided context."
             )
-        return {
+        response: dict[str, Any] = {
             "id": "chatcmpl-fixture",
             "object": "chat.completion",
             "created": 0,
@@ -180,7 +344,7 @@ def create_app() -> FastAPI:
                 {
                     "index": 0,
                     "message": {"role": "assistant", "content": content},
-                    "finish_reason": "stop",
+                    "finish_reason": "length" if scenario == "truncated" else "stop",
                 }
             ],
             "usage": {
@@ -189,6 +353,66 @@ def create_app() -> FastAPI:
                 "total_tokens": 0,
             },
         }
+        if scenario == "refusal":
+            response["choices"][0]["message"]["refusal"] = "fixture refusal"
+        if not req.stream or scenario not in {
+            "default",
+            "streaming",
+            "stream-malformed",
+            "stream-truncated",
+        }:
+            return response
+
+        text_content = response["choices"][0]["message"]["content"]
+        boundaries = max(1, min(chunks, len(text_content) or 1))
+        step = max(1, (len(text_content) + boundaries - 1) // boundaries)
+
+        async def events():
+            if scenario == "stream-malformed":
+                yield "data: {not-json\n\n"
+            for index in range(0, len(text_content), step):
+                payload = {
+                    "id": "chatcmpl-fixture",
+                    "object": "chat.completion.chunk",
+                    "model": req.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": text_content[index : index + step]},
+                        }
+                    ],
+                }
+                yield f"data: {json.dumps(payload)}\n\n"
+            if scenario != "stream-truncated":
+                yield "data: [DONE]\n\n"
+
+        return StreamingResponse(events(), media_type="text/event-stream")
+
+    @app.post("/v1/scenarios/{scenario}/chat/completions")
+    async def scenario_chat_completions(
+        scenario: str,
+        req: ChatCompletionRequest,
+        scenario_version: str = Query(default=SCHEMA_VERSION),
+        delay_ms: int = Query(default=0, ge=0, le=MAX_DELAY_MS),
+        chunks: int = Query(default=3, ge=1, le=32),
+        run_id: str | None = Query(default=None, pattern=r"^[A-Za-z0-9._-]{1,64}$"),
+    ):
+        return await _chat_completions(
+            req, scenario, scenario_version, delay_ms, chunks, run_id
+        )
+
+    @app.post("/v1/chat/completions")
+    async def default_chat_completions(
+        req: ChatCompletionRequest,
+        scenario: str = Query(default="default"),
+        scenario_version: str = Query(default=SCHEMA_VERSION),
+        delay_ms: int = Query(default=0, ge=0, le=MAX_DELAY_MS),
+        chunks: int = Query(default=3, ge=1, le=32),
+        run_id: str | None = Query(default=None, pattern=r"^[A-Za-z0-9._-]{1,64}$"),
+    ):
+        return await _chat_completions(
+            req, scenario, scenario_version, delay_ms, chunks, run_id
+        )
 
     return app
 
