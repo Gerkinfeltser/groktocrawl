@@ -31,6 +31,7 @@ import contextlib
 import datetime
 import hashlib
 import logging
+import math
 import os
 import time
 from contextlib import asynccontextmanager
@@ -174,6 +175,15 @@ COLLECTION_NAME = "groktocrawl_pages"
 MAX_DOCS = int(os.getenv("VECTOR_INDEX_MAX_DOCS", "250000"))
 QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
 QDRANT_QUERY_TIMEOUT = float(os.getenv("QDRANT_QUERY_TIMEOUT", "10"))
+# Client-side timeout for the blocking Qdrant HTTP calls. Defaults to
+# QDRANT_QUERY_TIMEOUT so the asyncio.wait_for wrapper in router_search
+# stays the binding bound — a lower hardcoded client timeout (the old 5s)
+# would fire first and make slow-but-healthy indexes unreachable (issue #588).
+# Rounded UP (ceil) to satisfy qdrant-client's int-typed timeout without ever
+# landing below the fractional wrapper timeout (int() truncation would).
+QDRANT_CLIENT_TIMEOUT = math.ceil(
+    float(os.getenv("QDRANT_CLIENT_TIMEOUT", str(QDRANT_QUERY_TIMEOUT)))
+)
 
 # ── Migration state (in-memory, lost on restart) ──────────────────
 # For restart-surviving state, store in Valkey or a known Qdrant point.
@@ -264,7 +274,7 @@ def _is_qdrant_ready() -> bool:
     client = _qdrant
     temporary_client = client is None
     if temporary_client:
-        client = QdrantClient(url=QDRANT_URL, timeout=5)
+        client = QdrantClient(url=QDRANT_URL, timeout=QDRANT_CLIENT_TIMEOUT)
     assert client is not None
     try:
         client.get_collections()
@@ -294,7 +304,7 @@ async def _ensure_qdrant() -> QdrantClient:
     """Lazy-init Qdrant client and collection with named vector support."""
     global _qdrant, _qdrant_ready
     if _qdrant is None:
-        _qdrant = QdrantClient(url=QDRANT_URL)
+        _qdrant = QdrantClient(url=QDRANT_URL, timeout=QDRANT_CLIENT_TIMEOUT)
     if not _qdrant_ready:
         try:
             collections = _qdrant.get_collections()

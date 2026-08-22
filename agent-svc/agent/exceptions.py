@@ -76,6 +76,20 @@ class SearchError(GroktoCrawlError):
     detail = "Search failed"
 
 
+class SemanticError(GroktoCrawlError):
+    """The semantic-svc vector backend failed or is unreachable.
+
+    Raised when a dependent call into semantic-svc (e.g. the find-similar
+    vector search) fails at the transport or HTTP level, so the failure
+    surfaces as a structured 502 instead of being masked as an empty
+    success result (issue #588).
+    """
+
+    status_code = 502
+    error_code = "SEMANTIC_SERVICE_ERROR"
+    detail = "Semantic service error"
+
+
 class ConflictError(GroktoCrawlError):
     status_code = 409
     error_code = "CONFLICT"
