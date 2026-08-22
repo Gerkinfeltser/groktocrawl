@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -87,7 +87,7 @@
+                 )
+                 raise RetryableRateLimitError(
+                     detail=(
+-                        "Downstream search capacity is temporarily exhausted "
++                        "XXDownstream search capacity is temporarily exhausted XX"
+                         "(SearXNG returned HTTP 429)"
+                     ),
+                     retry_after_seconds=retry_after,

@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -4,7 +4,7 @@
+         timeout=15,
+         headers={
+             "User-Agent": "GroktoCrawl/0.1",
+-            "Accept": "text/html,application/json",
++            "XXAcceptXX": "text/html,application/json",
+             "X-Forwarded-For": "127.0.0.1",
+         },
+     )

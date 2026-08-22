@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -17,7 +17,7 @@
+                 result.append(mapped)
+     if categories:
+         for c in categories:
+-            mapped = _CATEGORIES_MAP.get(c, c)
++            mapped = _CATEGORIES_MAP.get(c, None)
+             if mapped and mapped not in result:
+                 result.append(mapped)
+     return result or ["general"]

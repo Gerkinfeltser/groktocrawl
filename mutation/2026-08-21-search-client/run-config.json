@@ -1,0 +1,91 @@
+{
+  "artifacts": [
+    "run-config.json",
+    "raw-mutation-report.txt",
+    "mutmut-results.txt",
+    "mutmut-results-nonkilled.txt",
+    "mutmut-cicd-stats.json",
+    "mutmut-version.txt",
+    "show-diffs/",
+    "classification.md"
+  ],
+  "environment": {
+    "lockfile_state": "root uv.lock untouched; agent-svc/pyproject.toml gains only [tool.mutmut]; no permanent dependency added",
+    "package_index": "PyPI \u2014 the pinned ephemeral mutmut install is the sole permitted external contact; the data plane is hermetic (no provider calls)",
+    "python_version": "3.12.11",
+    "uv_version": "0.11.18"
+  },
+  "flake_rule": {
+    "recorded_run": {
+      "rerun_triggered": false,
+      "segfault": 0,
+      "suspicious": 0
+    },
+    "rule": "if segfault>0 or suspicious>0 in mutants/mutmut-cicd-stats.json, clear mutants/ and rerun once before trusting verdicts; a first occurrence is never a verdict"
+  },
+  "iso_date": "2026-08-21",
+  "pilot": "search-client decision slice bounded mutation-testing pilot (issue #572)",
+  "procedure": {
+    "cp_prerequisites": [
+      "cp -r ../tests agent-svc/tests",
+      "cp -r ../common agent-svc/common"
+    ],
+    "cwd": "agent-svc/",
+    "max_children": 1,
+    "mutation_invocation": "cd agent-svc && uv run --with mutmut==3.7.0 --no-sync mutmut run --max-children 1",
+    "provisioning_command": "uv sync --locked --no-dev --group fast-tests",
+    "proxy_env_workaround": "http_proxy=https_proxy=all_proxy=http://127.0.0.1:0 with NO_PROXY=* \u2014 bypasses the macOS CPython getproxies_macosx_sysconf segfault in urllib.request.getproxies() triggered by httpx.AsyncClient init (dummy proxies make getproxies_environment() non-empty; NO_PROXY lets uv still reach PyPI for the pinned install); hermetic (tests monkeypatch the HTTP client, no real proxy use)",
+    "qa_outcome_path": "/var/folders/gn/gpr8z9bn72z5kqm_fmjndj180000gn/T/qa-mutmut-2026-08-21.json",
+    "root_dir": "/Volumes/tank01/magnus/git/groktocrawl",
+    "seed": "mutmut 3.7.0 exposes no --seed flag. Determinism is pinned by the fixed tool version (mutmut==3.7.0) and the deterministic mutant input order (source lines of agent/searxng_client.py in file order).",
+    "timeout": {
+      "bounded_by": "runner subprocess timeout on the mutmut run call",
+      "note": "per-mutant pytest invocations run the hermetic slice with neutralized addopts; no mutant timed out in the recorded run",
+      "value_seconds": 1800
+    },
+    "with_packages": [
+      "mutmut==3.7.0"
+    ]
+  },
+  "results": {
+    "cicd_stats": "mutmut-cicd-stats.json",
+    "killed": 157,
+    "no_coverage": 0,
+    "raw_report": "raw-mutation-report.txt",
+    "results_list": "mutmut-results.txt",
+    "segfault": 0,
+    "show_diffs_dir": "show-diffs/",
+    "survived": 173,
+    "suspicious": 0,
+    "timeout": 0,
+    "total": 330
+  },
+  "run_dir": "mutation/2026-08-21-search-client",
+  "scope": {
+    "bounds": "single source file; full-file run (no wildcard args) bounded by --max-children (a concurrency bound, not a mutant budget)",
+    "mutant_count": 330,
+    "only_mutate": [
+      "agent/searxng_client.py"
+    ],
+    "source_file": "agent-svc/agent/searxng_client.py"
+  },
+  "test": {
+    "command": "QA_OUTCOME_PATH=<scratch> uv run --no-sync pytest tests/service/test_searxng_client.py -o 'addopts=' -p no:cacheprovider",
+    "count": "30",
+    "selection": {
+      "note": "mutmut runs pytest_add_cli_args_test_selection per mutant plus a clean-suite baseline and forced-fail sanity pass; every pytest invocation uses -o addopts= and -p no:cacheprovider with a scratch QA_OUTCOME_PATH",
+      "per_mutant": {
+        "pytest_add_cli_args_test_selection": [
+          "tests/service/test_searxng_client.py"
+        ]
+      }
+    },
+    "suite": "tests/service/test_searxng_client.py"
+  },
+  "tool": {
+    "install_method": "uv run --with mutmut==3.7.0 --no-sync (pinned, ephemeral; never added to uv.lock/manifests)",
+    "name": "mutmut",
+    "version": "3.7.0",
+    "version_capture": "mutmut-version.txt"
+  }
+}

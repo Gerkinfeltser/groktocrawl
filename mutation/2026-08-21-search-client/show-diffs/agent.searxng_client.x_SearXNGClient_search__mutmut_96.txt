@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -98,7 +98,7 @@
+                 "(caller did not opt into retryable classification)"
+             )
+             return [], SearchHealth(
+-                detail="SearXNG returned HTTP 429 (rate limited)"
++                detail="searxng returned http 429 (rate limited)"
+             )
+         if resp.status_code != 200:
+             outcome = "error"

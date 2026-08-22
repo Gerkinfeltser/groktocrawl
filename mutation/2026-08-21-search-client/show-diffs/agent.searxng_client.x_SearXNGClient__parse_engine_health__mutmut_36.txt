@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -13,7 +13,7 @@
+     empty_result = bool(
+         engines_responding > 0 and not any(r.get("url") for r in results)
+     )
+-    degraded = bool(engines_total > 0 and engines_responding < engines_total / 2)
++    degraded = bool(engines_total > 0 and engines_responding <= engines_total / 2)
+
+     # Build a human-readable detail string
+     if engines_total == 0:

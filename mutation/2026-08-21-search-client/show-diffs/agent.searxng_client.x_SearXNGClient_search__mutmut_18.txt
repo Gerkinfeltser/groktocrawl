@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -45,7 +45,7 @@
+                 ),
+                 details={
+                     "budget_used": self._search_count,
+-                    "budget_max": self._max_searches,
++                    "BUDGET_MAX": self._max_searches,
+                 },
+             )
+         self._search_count += 1
