@@ -144,10 +144,25 @@ def test_empty_override_means_unset(monkeypatch):
     assert gutenberg._epub_url("11").startswith("https://www.gutenberg.org/")
 
 
-def test_gutendex_base_override(monkeypatch):
+async def test_gutendex_base_override_reaches_production_fetch(monkeypatch):
+    # Drives _fetch_gutendex_metadata - the sole consumer of
+    # ADAPTER_GUTENDEX_API_BASE - so a regression that stops reading the
+    # override (and silently reverts to live gutendex.com) fails here.
     monkeypatch.setenv("ADAPTER_GUTENDEX_API_BASE", "http://test-site:8005")
-    url = gutenberg._gutendex_base() or "https://gutendex.com"
-    assert f"{url}/books/11" == "http://test-site:8005/books/11"
+
+    class Client(_FakeAsyncClient):
+        def __init__(self, **kwargs):
+            super().__init__(
+                {"/books/": _FakeResponse(json_data=_GUTENDEX_PAYLOAD)},
+                **kwargs,
+            )
+
+    monkeypatch.setattr(gutenberg.httpx, "AsyncClient", Client)
+    meta = await gutenberg._fetch_gutendex_metadata("11")
+
+    assert meta is not None
+    assert meta["title"] == "Alice's Adventures in Wonderland"
+    assert _FakeAsyncClient.requests[-1] == "http://test-site:8005/books/11"
 
 
 # ── Tier flow: EPUB success ─────────────────────────────────────────
