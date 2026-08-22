@@ -19,6 +19,7 @@ URL patterns:
 from __future__ import annotations
 
 import logging
+import os
 import re
 import zipfile
 from io import BytesIO
@@ -239,14 +240,47 @@ def _epub_to_markdown(zf: zipfile.ZipFile) -> tuple[str, list[str], int]:
     return body, chapter_titles, total_words
 
 
+def _cache_base() -> str:
+    """Base URL for gutenberg.org content downloads.
+
+    Overridable via ``ADAPTER_GUTENBERG_CACHE_BASE`` so hermetic test
+    twins can serve EPUB/plain-text fixtures without live egress.
+    Unset/empty means the real internet.
+    """
+    return os.environ.get("ADAPTER_GUTENBERG_CACHE_BASE", "").rstrip("/")
+
+
+def _gutendex_base() -> str:
+    """Base URL for the Gutendex metadata API.
+
+    Overridable via ``ADAPTER_GUTENDEX_API_BASE`` for hermetic tests.
+    Unset/empty means the real internet.
+    """
+    return os.environ.get("ADAPTER_GUTENDEX_API_BASE", "").rstrip("/")
+
+
+def _epub_url(book_id: str) -> str:
+    """URL of the EPUB download for *book_id* (base-URL aware)."""
+    return (
+        f"{_cache_base() or 'https://www.gutenberg.org'}/cache/epub/"
+        f"{book_id}/pg{book_id}-images-3.epub"
+    )
+
+
+def _txt_url(book_id: str) -> str:
+    """URL of the plain-text download for *book_id* (base-URL aware)."""
+    return (
+        f"{_cache_base() or 'https://www.gutenberg.org'}/cache/epub/"
+        f"{book_id}/pg{book_id}.txt"
+    )
+
+
 async def _fetch_epub(book_id: str) -> bytes | None:
     """Download an EPUB file from Project Gutenberg.
 
     Returns raw bytes or ``None`` on failure.
     """
-    epub_url = (
-        f"https://www.gutenberg.org/cache/epub/{book_id}/pg{book_id}-images-3.epub"
-    )
+    epub_url = _epub_url(book_id)
     try:
         async with httpx.AsyncClient(
             timeout=30,
@@ -315,7 +349,7 @@ async def _fetch_plain_text(book_id: str) -> str | None:
 
     Returns the raw text or ``None`` on failure.
     """
-    txt_url = f"https://www.gutenberg.org/cache/epub/{book_id}/pg{book_id}.txt"
+    txt_url = _txt_url(book_id)
     try:
         async with httpx.AsyncClient(
             timeout=30,
@@ -350,7 +384,7 @@ async def _fetch_gutendex_metadata(book_id: str) -> dict[str, Any] | None:
     Returns a metadata dict or ``None`` on timeout/failure.
     Uses a short 3s timeout — failures are non-fatal.
     """
-    url = f"https://gutendex.com/books/{book_id}"
+    url = f"{_gutendex_base() or 'https://gutendex.com'}/books/{book_id}"
     try:
         async with httpx.AsyncClient(
             timeout=3,

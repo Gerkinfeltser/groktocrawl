@@ -287,6 +287,12 @@ jobs:
           echo "CAPTCHA_VISION_API_KEY=fixture-only" >> .env
           echo "CAPTCHA_VISION_MODEL=fixture-model" >> .env
           echo "SCRAPER_PRIVATE_URL_ALLOWLIST=test-site,tier3-fixture" >> .env
+          # Gutenberg digital twin (#581): point the gutenberg adapter's
+          # EPUB/plain-text downloads and Gutendex enrichment at the
+          # deterministic test-site fixture so the integration lane never
+          # depends on third-party uptime.
+          echo "ADAPTER_GUTENBERG_CACHE_BASE=http://test-site:8000" >> .env
+          echo "ADAPTER_GUTENDEX_API_BASE=http://test-site:8000" >> .env
           echo "AGENT_SEARCH_RATE_LIMIT=1000/1s" >> .env
           # mcp-svc DNS-rebinding allowlist: include the compose service name
           # so the integration lane exercises a real non-loopback Host path.

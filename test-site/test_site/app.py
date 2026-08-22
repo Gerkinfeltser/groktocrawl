@@ -8,11 +8,18 @@
 import asyncio
 import gzip
 import os
+import zipfile
 from datetime import datetime, timezone
+from io import BytesIO
 from xml.etree.ElementTree import Element, SubElement, tostring
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse, Response
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+)
 
 app = FastAPI(title="GroktoCrawl Test Site", version="0.2.0")
 
@@ -710,4 +717,134 @@ async def near_duplicate_timestamp():
           </body>
         </html>
         """
+    )
+
+
+# ── Project Gutenberg digital twin (issue #581) ───────────────────────
+#
+# Deterministic stand-in for the upstream surfaces the gutenberg adapter
+# downloads from (EPUB/plain-text under www.gutenberg.org/cache/epub/, and
+# gutendex.com metadata). CI points the scraper adapter at this twin via
+# ADAPTER_GUTENBERG_CACHE_BASE / ADAPTER_GUTENDEX_API_BASE so integration
+# coverage never depends on third-party uptime. Unset env vars mean the
+# adapter talks to the real internet, exactly as before.
+
+_ALICE_CHAPTER_1 = (
+    "Alice was beginning to get very tired of sitting by her sister on the "
+    "bank, and of having nothing to do: once or twice she had peeped into "
+    "the book her sister was reading, but it had no pictures or "
+    "conversations in it. So she was considering in her own mind whether "
+    "the pleasure of making a daisy-chain would be worth the trouble of "
+    "getting up and picking the daisies, when suddenly a White Rabbit with "
+    "pink eyes ran close by her."
+)
+
+_ALICE_CHAPTER_2 = (
+    "Curiouser and curiouser! cried Alice (she was so much surprised, that "
+    "for the moment she quite forgot how to speak good English). Now I'm "
+    "opening out like the largest telescope that ever was! Good-bye, feet! "
+    "And she went on planning to herself how she would manage the pool of "
+    "tears, wondering whether she had fallen in the sea, or met with that "
+    "fearful shower of bright little things which had rattled about her."
+)
+
+
+def _gutenberg_epub_bytes() -> bytes:
+    """Build a minimal but structurally faithful EPUB (OPF + XHTML chapters)."""
+    buffer = BytesIO()
+    opf = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<package xmlns="http://www.idpf.org/2007/opf" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0">'
+        "<metadata>"
+        "<dc:title>Alice's Adventures in Wonderland</dc:title>"
+        "<dc:creator>Lewis Carroll</dc:creator>"
+        "<dc:language>en</dc:language>"
+        "<dc:subject>Fantasy fiction</dc:subject>"
+        "</metadata>"
+        "</package>"
+    )
+    chapter_one = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter I</title></head>'
+        f"<body><h1>Chapter I \u2014 Down the Rabbit-Hole</h1><p>{_ALICE_CHAPTER_1}</p></body></html>"
+    )
+    chapter_two = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter II</title></head>'
+        f"<body><h1>Chapter II \u2014 The Pool of Tears</h1><p>{_ALICE_CHAPTER_2}</p></body></html>"
+    )
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("mimetype", "application/epub+zip")
+        zf.writestr("OEBPS/content.opf", opf)
+        zf.writestr("OEBPS/chapter1.xhtml", chapter_one)
+        zf.writestr("OEBPS/chapter2.xhtml", chapter_two)
+    return buffer.getvalue()
+
+
+def _gutenberg_plain_text() -> str:
+    """Plain-text edition with real Gutenberg boilerplate markers."""
+    return (
+        "The Project Gutenberg eBook of Alice's Adventures in Wonderland\n"
+        "\n"
+        "This ebook is for the use of anyone anywhere in the United States.\n"
+        "\n"
+        "*** START OF THE PROJECT GUTENBERG EBOOK ALICE'S ADVENTURES IN WONDERLAND ***\n"
+        "\n"
+        "CHAPTER I.\n"
+        "Down the Rabbit-Hole\n"
+        "\n"
+        f"{_ALICE_CHAPTER_1}\n"
+        "\n"
+        "CHAPTER II.\n"
+        "The Pool of Tears\n"
+        "\n"
+        f"{_ALICE_CHAPTER_2}\n"
+        "\n"
+        "*** END OF THE PROJECT GUTENBERG EBOOK ALICE'S ADVENTURES IN WONDERLAND ***\n"
+    )
+
+
+@app.get("/cache/epub/{book_id}/{filename}")
+async def gutenberg_cache_file(book_id: int, filename: str):
+    """Twin of the gutenberg.org /cache/epub/ download paths.
+
+    Serves ``pg<id>-images-3.epub`` and ``pg<id>.txt``. Book 999 reproduces
+    the degraded-upstream scenario from issue #581 (non-EPUB bytes on the
+    EPUB path, plain text missing) so the adapter's plain-text fallback and
+    fall-through behavior stay exercised without live egress.
+    """
+    if filename == f"pg{book_id}-images-3.epub":
+        if book_id == 999:
+            return Response(
+                content="<html><body>upstream maintenance page</body></html>",
+                media_type="text/html",
+            )
+        return Response(
+            content=_gutenberg_epub_bytes(),
+            media_type="application/epub+zip",
+        )
+    if filename == f"pg{book_id}.txt":
+        if book_id == 999:
+            return PlainTextResponse("Not Found", status_code=404)
+        return Response(_gutenberg_plain_text(), media_type="text/plain")
+    return PlainTextResponse("Not Found", status_code=404)
+
+
+@app.get("/books/{book_id}")
+async def gutendex_book(book_id: int):
+    """Twin of the Gutendex metadata API shape consumed by the adapter."""
+    if book_id >= 99999999:
+        return JSONResponse({"detail": "Not found."}, status_code=404)
+    return JSONResponse(
+        {
+            "id": book_id,
+            "title": "Alice's Adventures in Wonderland",
+            "authors": [
+                {"name": "Carroll, Lewis", "birth_year": 1832, "death_year": 1898}
+            ],
+            "languages": ["en"],
+            "subjects": ["Fantasy fiction", "Alice (Fictitious character)"],
+            "download_count": 51000,
+        }
     )
