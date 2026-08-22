@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -65,7 +65,7 @@
+             params["scenario"] = scenario
+
+         resp = await self._client.get(
+-            f"{self.base_url}/search",
++            None,
+             params=params,  # type: ignore[arg-type]
+         )
+         if resp.status_code == 429:

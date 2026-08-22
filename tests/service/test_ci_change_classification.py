@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import subprocess
 import sys
+import textwrap
 import unittest
 from pathlib import Path
+
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 CLASSIFIER = ROOT / "scripts" / "classify_ci_changes.py"
@@ -179,6 +183,90 @@ class CiChangeClassificationTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.stdout, "false\n")
+
+    def test_twin_selection_table(self) -> None:
+        cases = [
+            (["llm-svc/llm_svc/app.py"], True, "llm"),
+            (["slopsearx-fixture/slopsearx_fixture/app.py"], True, "search"),
+            (["agent-svc/agent/searxng_client.py"], True, "search"),
+            (["docs/ci.md"], False, "none"),
+            (["docs/ci.md", "docker-compose.yml"], True, "all"),
+            (["unknown/path"], True, "all"),
+            ([], True, "all"),
+            ([""], True, "all"),
+        ]
+        for paths, expected_bool, expected_selection in cases:
+            with self.subTest(paths=paths):
+                self.assertEqual(MODULE.requires_twin_contracts(paths), expected_bool)
+                self.assertEqual(MODULE.twin_test_selection(paths), expected_selection)
+
+    def test_answer_evals_paths_require_runtime_and_twin_contracts(self) -> None:
+        # Issue #570: eval harness and fixture scenario changes are runtime +
+        # twin-relevant (never docs-only), so the narrow pre-merge eval step runs.
+        for path in (
+            "evals/answer_evals/harness.py",
+            "evals/answer_evals/grading.py",
+            "evals/answer_evals/routing.py",
+            "evals/answer_evals/manifest.json",
+            "evals/answer_evals/cases/positive-001-answer-grounded.json",
+            "scripts/run_answer_evals.py",
+            "llm-svc/llm_svc/app.py",
+            "slopsearx-fixture/slopsearx_fixture/app.py",
+            "test-site/test_site/app.py",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(MODULE.requires_full_runtime([path]))
+                self.assertTrue(MODULE.requires_twin_contracts([path]))
+                if path.startswith(("evals/", "scripts/", "test-site/")):
+                    expected_selection = "all"
+                elif path.startswith("llm-svc/"):
+                    expected_selection = "llm"
+                else:
+                    expected_selection = "search"
+                self.assertEqual(MODULE.twin_test_selection([path]), expected_selection)
+
+    def test_changed_path_shell_block_is_valid_and_keeps_zero_sha_else(self) -> None:
+        workflow = WORKFLOW.read_text()
+        block = workflow.split('if [ "${{ github.event_name }}"', 1)[1]
+        block = (
+            'if [ "${{ github.event_name }}"'
+            + block.split("\n\n  twin-contracts:", 1)[0]
+        )
+        block = textwrap.dedent(block).replace("${{", "${PLACEHOLDER_")
+        block = block.replace("}}", "}")
+        result = subprocess.run(
+            ["bash", "-n"], input=block, text=True, capture_output=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("git diff-tree --root", block)
+        self.assertIn(
+            'if [ "$base" = "0000000000000000000000000000000000000000" ]; then', block
+        )
+        self.assertIn(
+            'else\n              changed_paths=$(git diff --name-only "$base" "$head")',
+            block,
+        )
+
+    def test_embedded_llm_probe_python_compiles_and_run_id_is_propagated(self) -> None:
+        workflow = WORKFLOW.read_text()
+        parsed = yaml.safe_load(workflow)
+        integration = parsed["jobs"]["integration-tests"]["steps"]
+        run = next(
+            step["run"]
+            for step in integration
+            if step.get("name") == "Verify LLM fixture contract and agent routing"
+        )
+        probes = re.findall(r'python3 -c "\n(.*?)\n"', run, flags=re.DOTALL)
+        self.assertEqual(len(probes), 2)
+        for index, probe in enumerate(probes):
+            compile(probe, f"docker.yml LLM probe {index}", "exec")
+        compose = (ROOT / "docker-compose.yml").read_text()
+        self.assertIn("TWIN_RUN_ID=${TWIN_RUN_ID:-local}", compose)
+        self.assertIn("run_id=${TWIN_RUN_ID:-local}", compose)
+        self.assertNotIn(
+            "LLM_BASE_URL=http://llm-svc:8011/v1?run_id=${TWIN_RUN_ID:-}", compose
+        )
+        self.assertIn("run_id=${{ github.run_id }}-${{ github.run_attempt }}", workflow)
 
 
 class RuntimeGateWorkflowContractTests(unittest.TestCase):
@@ -407,7 +495,60 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
             self.integration_tests,
         )
         self.assertIn(
-            "for pkg in scraper-svc/scraper parse-svc/parse_svc portal-svc/portal browser-svc/browser_svc llm-svc/llm_svc common; do",
+            "for pkg in scraper-svc/scraper parse-svc/parse_svc portal-svc/portal browser-svc/browser_svc llm-svc/llm_svc slopsearx-fixture/slopsearx_fixture common; do",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "SEARCH_BASE_URL=http://slopsearx:8080",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "AGENT_BASE_URL=http://agent-svc-fixture:8080",
+            self.integration_tests,
+        )
+        self.assertIn("Wait for slopsearx-fixture", self.integration_tests)
+        self.assertIn("Timed out waiting for slopsearx-fixture", self.integration_tests)
+        self.assertIn("Wait for agent-svc-fixture", self.integration_tests)
+        self.assertIn("Timed out waiting for agent-svc-fixture", self.integration_tests)
+        self.assertIn(
+            "docker compose --profile fixture build test-site tier3-fixture slopsearx-fixture agent-svc-fixture",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "docker compose --profile fixture up -d --force-recreate llm-svc tier3-fixture test-site slopsearx-fixture agent-svc-fixture",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "Verify LLM fixture contract and agent routing", self.integration_tests
+        )
+        self.assertIn("agent LLM routing verified", self.integration_tests)
+        self.assertIn(
+            "endpoint = 'http://llm-svc:8011/v1/chat/completions'",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "LLM fixture citation and schema contracts verified",
+            self.integration_tests,
+        )
+        self.assertIn(
+            "Run targeted source-backed agent contracts", self.integration_tests
+        )
+        self.assertIn("Reset isolated test state", self.integration_tests)
+        self.assertIn("valkey-cli -n 0 FLUSHDB", self.integration_tests)
+        self.assertIn("valkey-cli -n 1 FLUSHDB", self.integration_tests)
+        reset_index = self.integration_tests.index("Reset isolated test state")
+        probe_index = self.integration_tests.index(
+            "Verify LLM fixture contract and agent routing"
+        )
+        targeted_index = self.integration_tests.index(
+            "Run targeted source-backed agent contracts"
+        )
+        critical_index = self.integration_tests.index("Critical journey smoke")
+        self.assertLess(reset_index, probe_index)
+        self.assertLess(probe_index, targeted_index)
+        self.assertLess(targeted_index, critical_index)
+        self.assertNotIn(
+            "SEARXNG_URL=http://slopsearx-fixture:8080 docker compose --profile indexing up -d",
             self.integration_tests,
         )
         self.assertIn("--cov=/app/agent", self.integration_tests)
@@ -453,6 +594,35 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
         )
         self.assertNotIn("comparison may have been skipped", self.integration_tests)
 
+    def test_narrow_answer_evals_step_is_bounded_twin_gated_and_uploads_provenance(
+        self,
+    ) -> None:
+        # Issue #570: the pre-merge narrow eval step runs in-process against the
+        # twins plus one real-route HTTP /v2/answer smoke over agent-svc-fixture.
+        self.assertIn(
+            "Run narrow grounded-answer eval (in-process + HTTP smoke)",
+            self.integration_tests,
+        )
+        self.assertIn("--selection narrow", self.integration_tests)
+        self.assertIn("--http-smoke http://127.0.0.1:8084", self.integration_tests)
+        self.assertIn("timeout-minutes: 5", self.integration_tests)
+        eval_block = self.integration_tests.split(
+            "Run narrow grounded-answer eval (in-process + HTTP smoke)", 1
+        )[1].split("\n      - name:", 1)[0]
+        self.assertIn("requires_twin_contracts == 'true'", eval_block)
+        self.assertIn("requires_full_runtime == 'true'", eval_block)
+        self.assertIn("scripts/run_answer_evals.py", eval_block)
+        self.assertIn("Upload answer-evals provenance", self.integration_tests)
+        self.assertIn("answer-evals-provenance", self.integration_tests)
+        self.assertIn("path: eval-out/", self.integration_tests)
+        # The eval step runs after the fixtures are up (agent-svc-fixture smoke).
+        self.assertLess(
+            self.integration_tests.index("Wait for agent-svc-fixture"),
+            self.integration_tests.index(
+                "Run narrow grounded-answer eval (in-process + HTTP smoke)"
+            ),
+        )
+
     def test_runtime_gate_only_bypasses_docs_only_pull_requests(self) -> None:
         self.assertIn("if: always()", self.runtime_gate)
         self.assertIn(
@@ -495,7 +665,7 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
             "- name: Fail when required runtime validation fails", self.runtime_gate
         )
         self.assertIn("needs.integration-tests.result != 'success'", self.runtime_gate)
-        self.assertEqual(self.runtime_gate.count("exit 1"), 2)
+        self.assertEqual(self.runtime_gate.count("exit 1"), 3)
 
 
 class FastTestsWorkflowContractTests(unittest.TestCase):
@@ -523,6 +693,12 @@ class FastTestsWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("--no-cov", self.workflow)
         self.assertNotIn("tests/integration", self.workflow)
         self.assertNotIn("docker", self.workflow.lower())
+
+    def test_fast_tests_pythonpath_includes_answer_eval_fixture_package(self) -> None:
+        self.assertIn(
+            "agent-svc:scraper-svc:llm-svc:slopsearx-fixture:parse-svc",
+            self.workflow,
+        )
 
     def test_changed_line_gate_skips_ref_creation_without_base_sha(self) -> None:
         zero_sha = "0" * 40

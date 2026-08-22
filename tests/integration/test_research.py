@@ -24,9 +24,12 @@ class TestValidateJsonIfSchema:
     def test_invalid_json_logs_warning(self, caplog):
         import logging
 
+        from agent.exceptions import StructuredOutputError
+
         caplog.set_level(logging.WARNING)
-        self.func("not json", {"type": "object"})
-        assert "not valid JSON" in caplog.text
+        with pytest.raises(StructuredOutputError):
+            self.func("not json", {"type": "object"})
+        assert "failed structured-output validation" in caplog.text
 
 
 class TestIsVideoPlatformUrl:
@@ -343,7 +346,7 @@ class TestRunResearch:
         with (
             patch("agent.research.loop.SearXNGClient", return_value=searxng),
             patch("agent.research.loop.ScraperClient", return_value=scraper),
-            patch("agent.research.loop.LLMClient", return_value=llm),
+            patch("agent.research.loop.LLMClient", return_value=llm) as llm_client,
         ):
             result = await run_research(
                 prompt="test",
@@ -353,9 +356,8 @@ class TestRunResearch:
             )
 
         assert result["result"] == "ok"
-        # LLMClient should have been constructed with model="gpt-4o"
-        llm_call = llm.generate.call_args[1]
-        assert "system_prompt" in llm_call
+        llm_client.assert_called_once_with("https://api.openai.com/v1", "", "gpt-4o")
+        assert "system_prompt" in llm.generate.call_args.kwargs
 
     @pytest.mark.asyncio
     async def test_sources_uses_filtered_list(self, mocks):

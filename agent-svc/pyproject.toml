@@ -9,6 +9,8 @@ dependencies = [
     "redis>=5.2.0",
     "httpx>=0.28.0",
     "pydantic>=2.10.0",
+    "jsonschema>=4.23.0",
+    "referencing>=0.28.4",
     "beautifulsoup4>=4.13.0",
     "python-multipart>=0.0.20",
 ]
@@ -16,3 +18,19 @@ dependencies = [
 [tool.deptry.per_rule_ignores]
 # Uvicorn is the container entry point; FastAPI loads multipart support dynamically.
 DEP002 = ["uvicorn", "python-multipart"]
+
+[tool.mutmut]
+# Bounded mutation-testing pilot config (issue #572). Run from cwd agent-svc/.
+# source_paths must be the import root ("agent") so mutant keys match the test
+# import path; only_mutate restricts the pilot to the search-client decision
+# slice. also_copy requires real copies of common/ and tests/ under agent-svc/
+# during the run (created + trap-cleaned by scripts/run_mutation_pilot.*).
+# pytest_add_cli_args neutralizes the repo's baked-in addopts (--cov, -n auto)
+# for every per-mutant invocation.
+source_paths = ["agent"]
+only_mutate = ["agent/searxng_client.py"]
+pytest_add_cli_args = ["-o", "addopts=", "-p", "no:cacheprovider", "-n", "0"]
+pytest_add_cli_args_test_selection = ["tests/service/test_searxng_client.py"]
+also_copy = ["common", "tests"]
+mutate_only_covered_lines = true
+use_setproctitle = false

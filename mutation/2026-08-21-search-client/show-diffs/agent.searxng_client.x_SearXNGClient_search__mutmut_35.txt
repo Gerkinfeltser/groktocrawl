@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -54,7 +54,7 @@
+         params = {
+             "q": query,
+             "format": "json",
+-            "language": "en",
++            "LANGUAGE": "en",
+             "pageno": 1,
+         }
+         params["categories"] = ",".join(effective_categories)

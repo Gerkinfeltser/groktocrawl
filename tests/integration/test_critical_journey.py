@@ -45,6 +45,10 @@ def test_search_contract():
     assert isinstance(data, dict), f"search contract payload: {payload}"
     web_results = data.get("web")
     assert isinstance(web_results, list), f"search contract payload: {payload}"
+    assert web_results, f"search fixture returned no results: {payload}"
+    assert all(
+        result.get("url", "").startswith(TEST_SITE + "/") for result in web_results
+    ), f"search did not use deterministic fixture URLs: {web_results}"
     print(f"search contract: result_count={len(web_results)}")
 
 

@@ -1,0 +1,48 @@
+{
+  "citation_style": "inline",
+  "content_hash": "sha256:58479f8b1b39c16cb83acffeae838f55d26a2de55162aef615b03db206c80bbb",
+  "expected": {
+    "abstain_expected": false,
+    "abstain_qualifier": null,
+    "allowable_source_urls": [
+      "http://test-site:8000/pricing",
+      "http://test-site:8000/pricing-v2"
+    ],
+    "citations": [],
+    "prohibited_claims": [
+      "Pro: $99"
+    ],
+    "protocol": {
+      "status": 200,
+      "success": true
+    },
+    "required_claims": [
+      "Pro plan costs $10"
+    ]
+  },
+  "id": "boundary-012-research-multi-source",
+  "kind": "boundary",
+  "llm_fixture": {
+    "fixture_version": "v2",
+    "scenario": "grounded-answer",
+    "scenario_version": "v1",
+    "service": "llm-svc"
+  },
+  "max_retries": 0,
+  "num_sources": 5,
+  "query": "What does the Fixture Site Pro plan cost?",
+  "retrieval_mode": "keyword",
+  "search_fixture": {
+    "fixture_version": "v2",
+    "scenario": "contradictory-sources",
+    "scenario_version": "v1",
+    "service": "slopsearx-fixture"
+  },
+  "source_content": {
+    "http://test-site:8000/pricing": "# Fixture Site Pricing\n\n- Free: $0\n- Pro: $10\n- Business: $25",
+    "http://test-site:8000/pricing-v2": "# Fixture Site Pricing V2\n\n- Pro: $99\n- Business: $25"
+  },
+  "suite_version": "answer-evals-v1",
+  "target": "research",
+  "timeout_seconds": 60
+}

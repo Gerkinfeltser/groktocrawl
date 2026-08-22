@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -17,7 +17,7 @@
+
+     # Build a human-readable detail string
+     if engines_total == 0:
+-        detail = "No engine status available from SearXNG"
++        detail = "XXNo engine status available from SearXNGXX"
+     elif degraded:
+         detail = (
+             f"Degraded: {engines_responding}/{engines_total} engines "

@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -5,7 +5,7 @@
+         headers={
+             "User-Agent": "GroktoCrawl/0.1",
+             "Accept": "text/html,application/json",
+-            "X-Forwarded-For": "127.0.0.1",
++            "X-Forwarded-For": "XX127.0.0.1XX",
+         },
+     )
+     self._search_count = 0

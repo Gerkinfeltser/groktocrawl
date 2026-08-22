@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -33,7 +33,7 @@
+     from .exceptions import RateLimitedError
+
+     started = time.monotonic()
+-    outcome = "success"
++    outcome = "SUCCESS"
+
+     try:
+         # ── Per-request search budget check ────────────────────

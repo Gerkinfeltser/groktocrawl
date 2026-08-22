@@ -43,7 +43,9 @@ def test_direct_slopsearx_mcp_is_opt_in_and_uses_shared_wiring():
     service = COMPOSE["services"]["slopsearx-mcp"]
     environment = _environment(service)
 
-    assert service["image"] == "ghcr.io/magnus919/slopsearx:latest"
+    assert service["image"] == (
+        "ghcr.io/magnus919/slopsearx@sha256:c7fd83077bf5f189a0125b6377b367740068d012e9caeb48318401a23437711d"
+    )
     # Gated behind a profile so a no-config `docker compose up` does not start
     # the companion; it runs only when the `mcp` profile is enabled.
     assert service["profiles"] == ["mcp"]
@@ -80,7 +82,7 @@ def test_direct_slopsearx_mcp_refuses_to_start_without_token():
     assert "exec python -m slopsearx.mcp" in script
 
 
-def test_direct_slopsearx_mcp_grants_default_on_and_allow_opt_out():
+def test_direct_slopsearx_mcp_grants_delegate_defaults_upstream():
     environment = _environment(COMPOSE["services"]["slopsearx-mcp"])
     grant_names = (
         "MCP_GRANT_JOBS",
@@ -90,8 +92,13 @@ def test_direct_slopsearx_mcp_grants_default_on_and_allow_opt_out():
         "MCP_TARGETED_SENSITIVE_ALLOWED",
     )
 
-    assert {_resolve(environment[name], {}) for name in grant_names} == {"1"}
-    disabled: dict[str, str] = {name: "0" for name in grant_names}  # noqa: C420
+    # Compose expresses no default: an unset grant interpolates to an empty
+    # value, which the SlopSearX image parses as "no override", leaving its
+    # secure-by-default policy (all grants off) in force.
+    assert {_resolve(environment[name], {}) for name in grant_names} == {""}
+    enabled: dict[str, str] = dict.fromkeys(grant_names, "1")
+    assert {_resolve(environment[name], enabled) for name in grant_names} == {"1"}
+    disabled: dict[str, str] = dict.fromkeys(grant_names, "0")
     assert {_resolve(environment[name], disabled) for name in grant_names} == {"0"}
 
 

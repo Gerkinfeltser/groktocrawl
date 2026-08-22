@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -8,7 +8,7 @@
+         """
+     engines = data.get("engines", [])
+     engines_total = len(engines)
+-    engines_responding = sum(1 for e in engines if e.get("results", 0) > 0)
++    engines_responding = sum(1 for e in engines if e.get("results", None) > 0)
+
+     empty_result = bool(
+         engines_responding > 0 and not any(r.get("url") for r in results)

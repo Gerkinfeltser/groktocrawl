@@ -11,7 +11,7 @@ services:
       retries: 20
 
   slopsearx:
-    image: ghcr.io/magnus919/slopsearx:latest
+    image: ghcr.io/magnus919/slopsearx@sha256:c7fd83077bf5f189a0125b6377b367740068d012e9caeb48318401a23437711d
     restart: unless-stopped
     ports:
       - "8081:8080"
@@ -26,7 +26,7 @@ services:
       retries: 3
 
   slopsearx-mcp:
-    image: ghcr.io/magnus919/slopsearx:latest
+    image: ghcr.io/magnus919/slopsearx@sha256:c7fd83077bf5f189a0125b6377b367740068d012e9caeb48318401a23437711d
     # The MCP companion must never run unauthenticated, but a required-token
     # guard using the Compose `:?` operator would abort a no-config
     # `docker compose up` at load time (Compose interpolates the whole file
@@ -55,11 +55,15 @@ services:
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8000
       - MCP_AUTH_TOKEN=${SLOPSEARX_MCP_AUTH_TOKEN:-}
-      - MCP_GRANT_JOBS=${MCP_GRANT_JOBS:-1}
-      - MCP_GRANT_SCIENCE=${MCP_GRANT_SCIENCE:-1}
-      - MCP_GRANT_RESEARCH=${MCP_GRANT_RESEARCH:-1}
-      - MCP_GRANT_SECURITY=${MCP_GRANT_SECURITY:-1}
-      - MCP_TARGETED_SENSITIVE_ALLOWED=${MCP_TARGETED_SENSITIVE_ALLOWED:-1}
+      # Grants delegate defaults to the SlopSearX image, which is secure by
+      # default: specialist grants and targeted sensitive-engine access stay
+      # off until explicitly enabled. Set values in .env to opt in, e.g.
+      # MCP_GRANT_SECURITY=1. An empty value means "no override" upstream.
+      - MCP_GRANT_JOBS=${MCP_GRANT_JOBS:-}
+      - MCP_GRANT_SCIENCE=${MCP_GRANT_SCIENCE:-}
+      - MCP_GRANT_RESEARCH=${MCP_GRANT_RESEARCH:-}
+      - MCP_GRANT_SECURITY=${MCP_GRANT_SECURITY:-}
+      - MCP_TARGETED_SENSITIVE_ALLOWED=${MCP_TARGETED_SENSITIVE_ALLOWED:-}
     depends_on:
       valkey:
         condition: service_healthy
@@ -93,6 +97,27 @@ services:
       - ENABLE_MARKDOWN=1
       - ENABLE_DYNAMIC=1
       - SITE_NAME=Fixture Site
+
+  slopsearx-fixture:
+    build:
+      context: .
+      dockerfile: slopsearx-fixture/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8083:8080"
+    profiles:
+      - fixture
+    environment:
+      - FIXTURE_SITE_BASE_URL=http://test-site:8000
+      - TWIN_RUN_ID=${TWIN_RUN_ID:-}
+    depends_on:
+      test-site:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json, urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3); assert json.load(response)['status'] == 'ok'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   tier3-fixture:
     build:
@@ -229,6 +254,41 @@ services:
       - SEARXNG_URL=${SEARXNG_URL:-http://slopsearx:8080}
       - SCRAPER_URL=${SCRAPER_URL:-http://scraper-svc:8001}
       - SEMANTIC_URL=${SEMANTIC_URL:-http://semantic-svc:8003}
+      - LLM_BASE_URL=${LLM_BASE_URL:-http://llm-svc:8011/v1}
+      - HOST=0.0.0.0
+      - PORT=8080
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  agent-svc-fixture:
+    build:
+      context: .
+      dockerfile: agent-svc/Dockerfile
+    image: ghcr.io/groktopus/groktocrawl-agent
+    restart: unless-stopped
+    profiles:
+      - fixture
+    ports:
+      - "8084:8080"
+    env_file:
+      - .env
+    depends_on:
+      valkey:
+        condition: service_healthy
+      slopsearx-fixture:
+        condition: service_healthy
+      scraper-svc:
+        condition: service_started
+    environment:
+      - VALKEY_URL=redis://valkey:6379/1
+      - TWIN_RUN_ID=${TWIN_RUN_ID:-local}
+      - LLM_BASE_URL=http://llm-svc:8011/v1?run_id=${TWIN_RUN_ID:-local}
+      - SEARXNG_URL=http://slopsearx-fixture:8080
+      - SCRAPER_URL=http://scraper-svc:8001
+      - SEMANTIC_URL=http://semantic-svc:8003
       - HOST=0.0.0.0
       - PORT=8080
     healthcheck:

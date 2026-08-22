@@ -270,6 +270,65 @@ class TestChatCompletionsEndpoint:
         assert data["id"] == "chatcmpl-fixture"
         assert "choices" in data
         assert len(data["choices"]) > 0
+        assert "[1]" not in data["choices"][0]["message"]["content"]
+
+    def test_chat_completions_adds_marker_when_citations_are_requested(self, client):
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "fixture-model",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Base your answer only on supplied context. "
+                            "Cite sources by their URL whenever you use information."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": "explain REST API authentication methods",
+                    },
+                ],
+            },
+        )
+        assert resp.status_code == 200
+        content = resp.json()["choices"][0]["message"]["content"]
+        assert "[1]" in content
+        assert len(content) > 50
+
+    def test_schema_response_populates_declared_optional_properties(self, client):
+        schema = {
+            "type": "object",
+            "properties": {
+                "comparison": {
+                    "type": "object",
+                    "properties": {
+                        "pros": {"type": "array", "items": {"type": "string"}}
+                    },
+                }
+            },
+        }
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "fixture-model",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "MUST respond with valid JSON matching this schema:"
+                            + json.dumps(schema)
+                        ),
+                    },
+                    {"role": "user", "content": "compare"},
+                ],
+                "response_format": {"type": "json_object"},
+            },
+        )
+        assert resp.status_code == 200
+        content = resp.json()["choices"][0]["message"]["content"]
+        assert json.loads(content) == {"comparison": {"pros": ["value", "value"]}}
 
     def test_chat_completions_without_request_id_does_not_pollute_metrics(self, client):
         """Chat completions request should not show up in /health's response."""

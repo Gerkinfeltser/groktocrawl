@@ -88,16 +88,23 @@ current service baselines are complete.
 
 ## Mutation-testing decision
 
-Mutation testing or an equivalent fault-detection check is warranted for the initial
-high-risk set, beginning with `common/url.py` and the URL/SSRF call paths listed above.
-The first useful mutation campaign should demonstrate that tests detect changes to:
+A bounded mutation-testing pilot was run on the search-client decision slice
+(`agent-svc/agent/searxng_client.py`, issue #572) to build fault-detection evidence. The
+full evidence package and how to rerun it live in [`mutation/`](mutation/README.md); the
+decision is recorded in [ADR-0057](adr/0057-defer-recurring-mutation-testing-ci.md). The
+outcome: **defer** a recurring, repository-wide mutation CI gate, and instead keep **bounded,
+issue-scoped mutation campaigns on high-risk decision slices**.
 
-- private, loopback, link-local, metadata, and IPv4-mapped IPv6 rejection;
-- exact-host allowlist behavior;
-- DNS-rebinding and transient-resolution handling; and
-- redirect or outbound-webhook destination validation.
+The pilot found and hardened genuine oracle gaps in the search-client decision logic (the
+`_parse_retry_after` boundary handling at `"0"` → `0.0` and `"0.5"` → `0.5`, plus
+search-budget, scenario, and sources-routing), with TDD-grade kill evidence. It did **not**
+justify an unconditional gate: the tooling requires a platform-specific segfault workaround
+and `--max-children 1` serialization, and at the unit oracle boundary 55 of 173 survivors
+were equivalent behavior and 118 invalid/cosmetic (0 genuine test gaps remain). No
+mutation-score gate, threshold, auto test-generation loop, or PR blocker was added.
 
-This issue records the warranted scope and test expectations. It does not add an
-unbounded mutation job to every pull request. A follow-up should run a bounded,
-reproducible campaign on these policy-critical modules, publish survivors, and use
-that evidence before changing the aggregate floor.
+This supersedes the earlier framing of the decision, which pointed at a future mutation
+campaign on the initial high-risk set (`common/url.py` and the URL/SSRF call paths). That
+warranted scope remains a candidate for a future bounded campaign — the recommendation and
+ADR-0057 are about *how* mutation testing runs (bounded and on demand), not *whether* it is
+valuable.

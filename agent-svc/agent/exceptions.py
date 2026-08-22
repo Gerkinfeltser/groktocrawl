@@ -58,6 +58,18 @@ class UpstreamError(GroktoCrawlError):
     detail = "Upstream service error"
 
 
+class StructuredOutputError(UpstreamError):
+    """The LLM returned output that does not satisfy the requested schema."""
+
+    detail = "LLM structured output was invalid"
+
+
+class ProviderOutputError(UpstreamError):
+    """The provider returned an invalid or unusable completion envelope."""
+
+    detail = "LLM provider output was invalid"
+
+
 class SearchError(GroktoCrawlError):
     status_code = 502
     error_code = "SEARCH_ERROR"

@@ -1,0 +1,12 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -40,9 +40,6 @@
+         if self._search_count >= self._max_searches:
+             outcome = "rate_limited"
+             raise RateLimitedError(
+-                detail=(
+-                    f"Search budget exceeded: {self._search_count}/{self._max_searches}"
+-                ),
+                 details={
+                     "budget_used": self._search_count,
+                     "budget_max": self._max_searches,
