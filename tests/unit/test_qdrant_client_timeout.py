@@ -133,6 +133,30 @@ class TestQdrantClientTimeoutDefault:
             )
             assert resolved >= float(query_timeout)
 
+    def test_fractional_query_timeout_rounds_up_not_down(self):
+        """Fractional wrapper timeout must not truncate below itself.
+
+        Regression for the int() truncation finding: with
+        QDRANT_QUERY_TIMEOUT=12.5 the client timeout resolves to 13 (ceil),
+        never 12, so it can never fire before the 12.5s wait_for wrapper.
+        """
+        resolved = _resolve_module_constant(
+            {"QDRANT_QUERY_TIMEOUT": "12.5"}, "QDRANT_CLIENT_TIMEOUT"
+        )
+        assert resolved == 13.0
+        assert resolved > 12.5
+
+    def test_explicit_fractional_client_timeout_rounds_up(self):
+        """An explicitly fractional QDRANT_CLIENT_TIMEOUT is ceil'd too."""
+        resolved = _resolve_module_constant(
+            {
+                "QDRANT_QUERY_TIMEOUT": "12.5",
+                "QDRANT_CLIENT_TIMEOUT": "15.5",
+            },
+            "QDRANT_CLIENT_TIMEOUT",
+        )
+        assert resolved == 16.0
+
 
 class TestQdrantClientTimeoutAppliedAtConstructionSites:
     """VAL-FIND-011: the configured timeout reaches BOTH construction sites."""

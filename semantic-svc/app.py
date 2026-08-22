@@ -31,6 +31,7 @@ import contextlib
 import datetime
 import hashlib
 import logging
+import math
 import os
 import time
 from contextlib import asynccontextmanager
@@ -178,9 +179,9 @@ QDRANT_QUERY_TIMEOUT = float(os.getenv("QDRANT_QUERY_TIMEOUT", "10"))
 # QDRANT_QUERY_TIMEOUT so the asyncio.wait_for wrapper in router_search
 # stays the binding bound — a lower hardcoded client timeout (the old 5s)
 # would fire first and make slow-but-healthy indexes unreachable (issue #588).
-# Rounded up to an int because qdrant-client types its timeout as int and
-# ceil()s fractional values itself.
-QDRANT_CLIENT_TIMEOUT = int(
+# Rounded UP (ceil) to satisfy qdrant-client's int-typed timeout without ever
+# landing below the fractional wrapper timeout (int() truncation would).
+QDRANT_CLIENT_TIMEOUT = math.ceil(
     float(os.getenv("QDRANT_CLIENT_TIMEOUT", str(QDRANT_QUERY_TIMEOUT)))
 )
 
