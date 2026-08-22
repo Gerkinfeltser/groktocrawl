@@ -809,28 +809,19 @@ def _gutenberg_plain_text() -> str:
 async def gutenberg_cache_file(book_id: int, filename: str):
     """Twin of the gutenberg.org /cache/epub/ download paths.
 
-    Serves ``pg<id>-images-3.epub`` and ``pg<id>.txt``. Book 999 reproduces
-    the degraded-upstream scenario from issue #581 (non-EPUB bytes on the
-    EPUB path, plain text missing) so the adapter's plain-text fallback and
-    fall-through behavior stay exercised without live egress. Mirrors the
-    gutendex twin's guard so nonexistent IDs stay nonexistent across every
-    upstream surface.
+    Serves ``pg<id>-images-3.epub`` and ``pg<id>.txt``. Nonexistent IDs
+    (>= 99999999) 404 on every path, mirroring real upstream behavior, so
+    adapter fall-through stays exercisable; the gutendex twin enforces the
+    same boundary.
     """
     if book_id >= 99999999:
         return PlainTextResponse("Not Found", status_code=404)
     if filename == f"pg{book_id}-images-3.epub":
-        if book_id == 999:
-            return Response(
-                content="<html><body>upstream maintenance page</body></html>",
-                media_type="text/html",
-            )
         return Response(
             content=_gutenberg_epub_bytes(),
             media_type="application/epub+zip",
         )
     if filename == f"pg{book_id}.txt":
-        if book_id == 999:
-            return PlainTextResponse("Not Found", status_code=404)
         return Response(_gutenberg_plain_text(), media_type="text/plain")
     return PlainTextResponse("Not Found", status_code=404)
 

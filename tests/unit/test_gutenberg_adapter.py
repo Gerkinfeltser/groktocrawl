@@ -15,8 +15,13 @@ from scraper.adapters import gutenberg
 # ── Fixtures mirroring test_site's twin payloads ────────────────────
 
 
-def _fixture_epub_bytes() -> bytes:
+def _fixture_epub_bytes(valid: bool = True) -> bytes:
     buffer = BytesIO()
+    if not valid:
+        # Large enough to pass the adapter's 100-byte size gate, then fail
+        # zipfile parsing - exercises the parse-failure branch, not the
+        # download-size gate.
+        return b"PK\x03\x04" + b"\x00" * 512
     opf = (
         '<?xml version="1.0" encoding="utf-8"?>'
         '<package xmlns="http://www.idpf.org/2007/opf" '
@@ -217,8 +222,7 @@ async def test_degraded_epub_falls_back_to_plain_text(monkeypatch):
             super().__init__(
                 {
                     "-images-3.epub": _FakeResponse(
-                        200,
-                        content=b"<html><body>upstream maintenance page</body></html>",
+                        200, content=_fixture_epub_bytes(valid=False)
                     ),
                     "pg11.txt": _FakeResponse(200, text=_PLAIN_TEXT),
                     "/books/": _FakeResponse(json_data=_GUTENDEX_PAYLOAD),
@@ -236,6 +240,9 @@ async def test_degraded_epub_falls_back_to_plain_text(monkeypatch):
     assert result.source == "gutenberg-plaintext"
     assert "Down the Rabbit-Hole" in result.markdown
     assert "START OF THE PROJECT GUTENBERG" not in result.markdown
+    assert any("pg11.txt" in url for url in Client.requests), (
+        "plain-text tier must be fetched after EPUB parse failure"
+    )
 
 
 async def test_both_tiers_down_raise_adapter_error(monkeypatch):

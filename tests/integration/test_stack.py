@@ -1631,12 +1631,20 @@ def test_gutenberg_adapter_cache_url():
 
 
 def test_gutenberg_adapter_invalid_id():
-    """Non-existent book ID should gracefully fall through or return error."""
+    """Non-existent book ID falls through gracefully with a valid envelope.
+
+    Note: after the adapter correctly declines a nonexistent ID, the generic
+    tier fetches the live gutenberg.org catalog page, so this test remains
+    intentionally live-web (issue #581 tracks full hermeticity of the
+    generic path).
+    """
     r = httpx.post(SCRAPER + "/scrape", json={"url": GUTENBERG_INVALID}, timeout=180)
+    assert r.status_code == 200
     payload = r.json()
-    # Either the adapter fails gracefully and the generic pipeline handles it,
-    # or the generic pipeline also fails — either way, no crash
-    assert not payload.get("error") or payload.get("success") is not None
+    if payload.get("success"):
+        assert isinstance(payload.get("data", {}).get("markdown"), str)
+    else:
+        assert payload.get("error"), "failure must carry an error payload"
 
 
 # ── Error response tests ──────────────────────────────────────────
