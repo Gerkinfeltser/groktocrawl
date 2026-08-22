@@ -1,0 +1,10 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -147,6 +147,6 @@
+         )
+         inc_counter(
+             _SEARCH_QUERIES_TOTAL,
+-            _SEARCH_QUERIES_TOTAL_HELP,
++            None,
+             {"engine": "searxng", "outcome": outcome},
+         )

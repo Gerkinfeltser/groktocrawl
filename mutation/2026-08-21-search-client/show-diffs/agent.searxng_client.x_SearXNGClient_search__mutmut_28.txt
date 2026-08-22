@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -52,7 +52,7 @@
+
+         effective_categories = self._translate(sources, categories)
+         params = {
+-            "q": query,
++            "XXqXX": query,
+             "format": "json",
+             "language": "en",
+             "pageno": 1,

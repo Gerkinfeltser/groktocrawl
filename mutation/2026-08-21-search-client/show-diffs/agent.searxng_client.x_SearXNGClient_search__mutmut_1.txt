@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -1,7 +1,7 @@
+ async def search(
+     self,
+     query: str,
+-    limit: int = 10,
++    limit: int = 11,
+     categories: list[str] | None = None,
+     sources: list[str] | None = None,
+     *,

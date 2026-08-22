@@ -1,0 +1,10 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -1,7 +1,6 @@
+ def __init__(self, base_url: str = "http://searxng:8080", max_searches: int = 5):
+     self.base_url = base_url.rstrip("/")
+     self._client = httpx.AsyncClient(
+-        timeout=15,
+         headers={
+             "User-Agent": "GroktoCrawl/0.1",
+             "Accept": "text/html,application/json",

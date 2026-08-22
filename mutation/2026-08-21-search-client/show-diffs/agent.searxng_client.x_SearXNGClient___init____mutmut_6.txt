@@ -1,0 +1,9 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -1,5 +1,5 @@
+ def __init__(self, base_url: str = "http://searxng:8080", max_searches: int = 5):
+-    self.base_url = base_url.rstrip("/")
++    self.base_url = base_url.lstrip("/")
+     self._client = httpx.AsyncClient(
+         timeout=15,
+         headers={

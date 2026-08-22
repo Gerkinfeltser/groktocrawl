@@ -1,0 +1,11 @@
+{
+  "check_was_interrupted_by_user": 0,
+  "killed": 157,
+  "no_tests": 0,
+  "segfault": 0,
+  "skipped": 0,
+  "survived": 173,
+  "suspicious": 0,
+  "timeout": 0,
+  "total": 330
+}

@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -13,7 +13,7 @@
+     if sources:
+         for s in sources:
+             mapped = _SOURCES_MAP.get(s, s)
+-            if mapped and mapped not in result:
++            if mapped or mapped not in result:
+                 result.append(mapped)
+     if categories:
+         for c in categories:

@@ -1,0 +1,11 @@
+--- agent/searxng_client.py
++++ agent/searxng_client.py
+@@ -101,7 +101,7 @@
+                 detail="SearXNG returned HTTP 429 (rate limited)"
+             )
+         if resp.status_code != 200:
+-            outcome = "error"
++            outcome = None
+             logger.warning(
+                 "SearXNG returned %d: %s", resp.status_code, resp.text[:200]
+             )
