@@ -130,7 +130,10 @@ def test_cache_base_override_rewrites_download_urls(monkeypatch):
 
 def test_trailing_slash_in_override_is_normalized(monkeypatch):
     monkeypatch.setenv("ADAPTER_GUTENBERG_CACHE_BASE", "http://test-site:8005/")
-    assert "/cache/epub//11/" not in gutenberg._epub_url("11")
+    assert gutenberg._epub_url("11") == (
+        "http://test-site:8005/cache/epub/11/pg11-images-3.epub"
+    )
+    assert gutenberg._txt_url("11") == ("http://test-site:8005/cache/epub/11/pg11.txt")
 
 
 def test_empty_override_means_unset(monkeypatch):

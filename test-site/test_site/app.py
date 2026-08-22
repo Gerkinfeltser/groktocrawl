@@ -812,8 +812,12 @@ async def gutenberg_cache_file(book_id: int, filename: str):
     Serves ``pg<id>-images-3.epub`` and ``pg<id>.txt``. Book 999 reproduces
     the degraded-upstream scenario from issue #581 (non-EPUB bytes on the
     EPUB path, plain text missing) so the adapter's plain-text fallback and
-    fall-through behavior stay exercised without live egress.
+    fall-through behavior stay exercised without live egress. Mirrors the
+    gutendex twin's guard so nonexistent IDs stay nonexistent across every
+    upstream surface.
     """
+    if book_id >= 99999999:
+        return PlainTextResponse("Not Found", status_code=404)
     if filename == f"pg{book_id}-images-3.epub":
         if book_id == 999:
             return Response(
