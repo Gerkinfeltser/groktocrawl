@@ -8,6 +8,7 @@ import os
 from unittest.mock import MagicMock, patch
 
 import pytest
+import pytest_asyncio
 from agent.settings import load_settings
 
 
@@ -845,7 +846,7 @@ async def _start_raw_sse_fixture():
     raise AssertionError("raw-SSE fixture did not become healthy")
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def raw_sse():
     handle, server, task = await _start_raw_sse_fixture()
     try:
@@ -856,9 +857,14 @@ async def raw_sse():
 
 
 def _make_slow_fixture(delay_ms: int):
-    """Build a fixture-url factory honoring ?delay_ms= (max 2000)."""
+    """Build a fixture-url factory honoring ?delay_ms= (max 2000).
 
-    @pytest.fixture
+    Uses ``pytest_asyncio.fixture`` (like test_llm_tcp_contract.py) so the
+    async generator fixture works under BOTH asyncio_mode=auto (local
+    pyproject) and the strict default mode inside the CI agent container.
+    """
+
+    @pytest_asyncio.fixture
     async def url():
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
