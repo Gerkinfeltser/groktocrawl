@@ -83,7 +83,7 @@ class LLMClient:
         self.api_key = api_key
         self.model = model
         self._admission = admission if admission is not None else get_admission()
-        self._client = httpx.AsyncClient(timeout=120)
+        self._client = httpx.AsyncClient(timeout=load_settings().llm_call_timeout)
 
     def _completion_url(self) -> str:
         """Append the endpoint while preserving optional fixture query params."""
@@ -200,7 +200,9 @@ class LLMClient:
         outcome = "success"
         started = time.monotonic()
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(
+                timeout=load_settings().llm_call_timeout
+            ) as client:
                 async with client.stream(
                     "POST",
                     self._completion_url(),
@@ -289,7 +291,9 @@ class LLMClient:
             raise
         except Exception as e:
             outcome = "error"
-            logger.error("LLM stream call failed: %s", e)
+            # str(e) can be empty (e.g. httpx read timeouts); always log the
+            # exception type name so failures stay diagnosable.
+            logger.error("LLM stream call failed (%s): %s", type(e).__name__, e)
             yield {
                 "type": "error",
                 "classification": "non_retryable",
@@ -426,7 +430,9 @@ class LLMClient:
             raise ProviderOutputError(detail="LLM provider transport failed") from exc
         except Exception as e:
             outcome = "error"
-            logger.error("LLM call failed: %s", e)
+            # str(e) can be empty (e.g. httpx read timeouts); always log the
+            # exception type name so failures stay diagnosable.
+            logger.error("LLM call failed (%s): %s", type(e).__name__, e)
             return f"Error: LLM call failed: {e}"
         finally:
             observe_elapsed(
