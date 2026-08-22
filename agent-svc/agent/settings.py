@@ -23,6 +23,13 @@ class AgentSettings(BaseModel):
     llm_llama_cpp_disable_thinking: bool = Field(
         default=False, alias="LLM_LLAMA_CPP_DISABLE_THINKING"
     )
+    # Per-operation idle bound (seconds) applied to LLM API calls: an httpx
+    # scalar timeout bounds connect/read/write inactivity individually, with
+    # no whole-request deadline, so streaming responses may legally run
+    # longer than this as long as tokens keep arriving. Raise it (e.g. 300)
+    # when pointing LLM_MODEL at reasoning models whose long thinking
+    # pauses exceed the default.
+    llm_call_timeout: float = Field(default=120.0, alias="LLM_CALL_TIMEOUT", gt=0)
     api_key: str = Field(default="", alias="API_KEY")
     webhook_secret: str = Field(default="", alias="WEBHOOK_SECRET")
     max_searches_per_request: int = Field(

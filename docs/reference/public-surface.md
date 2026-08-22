@@ -155,6 +155,7 @@ The configuration inventory follows `.env.sample`; unlisted implementation-only 
 - JOB_RETRY_MAX_WAIT_SECONDS
 - LLM_API_KEY
 - LLM_BASE_URL
+- LLM_CALL_TIMEOUT
 - LLM_ENABLE_THINKING
 - LLM_LLAMA_CPP_DISABLE_THINKING
 - LLM_MODEL
