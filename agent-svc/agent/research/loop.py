@@ -285,8 +285,15 @@ async def _run_research_events(
 
             # ── Gap detection after pass 1 ─────────────────────────
             if pass_count == 1:
-                gap_topics = await _detect_gaps(
-                    combined_context, llm, original_query=prompt
+                budget_spent = max_credits is not None and (
+                    max_credits <= 0 or len(all_source_details) >= max_credits
+                )
+                gap_topics = (
+                    []
+                    if budget_spent
+                    else await _detect_gaps(
+                        combined_context, llm, original_query=prompt
+                    )
                 )
                 if not gap_topics:
                     break  # Coverage is adequate, done

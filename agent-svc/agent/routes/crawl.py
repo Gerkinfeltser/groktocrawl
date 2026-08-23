@@ -134,35 +134,29 @@ async def create_crawl(
     effective_max_pages = _resolve_effective_max_pages(body.max_pages, body.limit)
 
     # ── NL→params: apply LLM-derived page cap ────────────────────
-    # derive_crawl_params() returns ``max_pages`` (the NL→params schema's
-    # name for the same Firecrawl ``limit`` knob). The merge above only
-    # covers include/exclude paths and max_depth, so without this the
-    # prompt-derived cap was silently dropped.
-    if body.prompt:
-        from ..nl_params import derive_crawl_params as _derive_for_limit
-
-        # Reuse the already-computed explicit set; only honor a derived
-        # cap when the caller did not set one explicitly.
-        if "limit" not in explicitly_set and "max_pages" not in explicitly_set:
-            derived = await _derive_for_limit(
-                prompt=body.prompt,
-                llm_base_url=request.app.state.llm_base_url,
-                llm_api_key=request.app.state.llm_api_key,
-                llm_model=request.app.state.llm_model,
+    # The merge above covers include/exclude paths and max_depth only;
+    # derive_crawl_params() also returns ``max_pages`` (the NL→params
+    # schema's name for the same Firecrawl ``limit`` knob), which was
+    # previously computed and then silently dropped. Reuse the first
+    # call's result — no extra LLM round-trip. Only honor a derived cap
+    # when the caller did not set one explicitly.
+    if (
+        body.prompt
+        and "limit" not in explicitly_set
+        and "max_pages" not in explicitly_set
+    ):
+        derived_cap = llm_result.get("max_pages")
+        if (
+            isinstance(derived_cap, int)
+            and derived_cap >= 1
+            and (effective_max_pages == 0 or derived_cap < effective_max_pages)
+        ):
+            logger.info(
+                "NL→params derived max_pages=%d applied to crawl %s",
+                derived_cap,
+                job_id,
             )
-            if "error" not in derived:
-                derived_cap = derived.get("max_pages")
-                if (
-                    isinstance(derived_cap, int)
-                    and derived_cap >= 1
-                    and (effective_max_pages == 0 or derived_cap < effective_max_pages)
-                ):
-                    logger.info(
-                        "NL→params derived max_pages=%d applied to crawl %s",
-                        derived_cap,
-                        job_id,
-                    )
-                    effective_max_pages = derived_cap
+            effective_max_pages = derived_cap
 
     # ── Streaming path: run inline, return SSE ────────────
     if body.stream:

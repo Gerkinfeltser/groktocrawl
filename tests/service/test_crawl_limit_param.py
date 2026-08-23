@@ -145,3 +145,52 @@ class TestCreateCrawlLimitWiring:
         payload = store.create_job.call_args.kwargs["payload"]
         assert payload["url"] == "https://example.com"
         assert payload["limit"] == 1
+
+
+class TestCreateCrawlPromptDerivedCap:
+    """NL→params page cap is applied without a second LLM round-trip."""
+
+    @pytest.mark.asyncio
+    async def test_prompt_derived_cap_applied_from_single_llm_call(self):
+        """A prompt-derived max_pages bounds the crawl; LLM called once."""
+        from agent.models import CrawlRequest
+        from agent.routes.crawl import create_crawl
+
+        request = _crawl_route_request_mock()
+        body = CrawlRequest(url="https://example.com", prompt="just the blog")
+        response = MagicMock()
+        response.headers = {}
+
+        with (
+            patch("agent.worker._process_crawl_async") as process,
+            patch(
+                "agent.nl_params.derive_crawl_params",
+                new=AsyncMock(return_value={"max_pages": 4, "max_depth": 1}),
+            ) as derive,
+        ):
+            await create_crawl(request, body, response)
+
+        derive.assert_awaited_once()
+        assert process.call_args.kwargs["max_pages"] == 4
+
+    @pytest.mark.asyncio
+    async def test_explicit_limit_beats_prompt_derived_cap(self):
+        """An explicit limit wins over the LLM-derived cap."""
+        from agent.models import CrawlRequest
+        from agent.routes.crawl import create_crawl
+
+        request = _crawl_route_request_mock()
+        body = CrawlRequest(url="https://example.com", prompt="blog", limit=2)
+        response = MagicMock()
+        response.headers = {}
+
+        with (
+            patch("agent.worker._process_crawl_async") as process,
+            patch(
+                "agent.nl_params.derive_crawl_params",
+                new=AsyncMock(return_value={"max_pages": 9}),
+            ),
+        ):
+            await create_crawl(request, body, response)
+
+        assert process.call_args.kwargs["max_pages"] == 2

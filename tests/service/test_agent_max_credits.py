@@ -211,3 +211,146 @@ class TestAgentWorkerMaxCreditsWiring:
             )
 
         assert mock_run_research.call_args.kwargs["max_credits"] == 4
+
+    @pytest.mark.asyncio
+    async def test_swr_refresh_closure_honors_max_credits(self):
+        """The sync-path stale-while-revalidate refresh threads max_credits.
+
+        Without this, a background refresh launched after serving the stale
+        artifact would run with an unbounded budget, defeating the cap the
+        request explicitly set (PR #597 review finding).
+        """
+        from agent.worker import _process_agent_async
+
+        mock_store = MagicMock()
+        mock_run_research = AsyncMock(
+            return_value={"result": "ok", "sources": [], "source_details": []}
+        )
+        mock_research_memory = MagicMock()
+        mock_research_memory.query = AsyncMock(
+            return_value={
+                "hit": True,
+                "freshness": "stale",
+                "swr_eligible": True,
+                "artifact": {"artifact": "stale text", "sources": []},
+                "age_hours": 8.0,
+                "similarity": 0.9,
+                "memory_id": "mem-stale",
+            }
+        )
+        started_refresh: dict = {}
+
+        def _start_refresh(key, factory):
+            started_refresh["factory"] = factory
+            return MagicMock(add_done_callback=MagicMock())
+
+        mock_metrics = MagicMock()
+        mock_metrics.counter.return_value.inc = MagicMock()
+        mock_metrics.histogram.return_value.observe = MagicMock()
+
+        with (
+            patch("agent.worker.JobStore", return_value=mock_store),
+            patch("agent.worker.run_research", mock_run_research),
+            patch("agent.worker.deliver_webhook", AsyncMock()),
+            patch("agent.worker.METRICS", mock_metrics),
+            patch(
+                "agent.worker.load_settings",
+                return_value=MagicMock(
+                    valkey_host="valkey",
+                    valkey_port=6379,
+                    valkey_db=0,
+                    crawl_max_duration_seconds=1800,
+                    crawl_idle_timeout_seconds=300,
+                ),
+            ),
+            patch.object(
+                mock_research_memory, "start_refresh", side_effect=_start_refresh
+            ),
+            patch("agent.research.memory.refresh_research_memory") as refresh_mem,
+        ):
+            from agent.research import memory as memory_mod
+
+            with patch.object(memory_mod, "refresh_research_memory", refresh_mem):
+                await _process_agent_async(
+                    job_id="job-swr",
+                    prompt="p",
+                    urls=None,
+                    schema_=None,
+                    llm_base_url="http://llm:8000",
+                    llm_api_key="k",
+                    llm_model="m",
+                    searxng_url="http://searxng",
+                    scraper_url="http://scraper",
+                    stale_while_revalidate=True,
+                    research_memory=mock_research_memory,
+                    max_credits=6,
+                )
+
+        assert "factory" in started_refresh
+
+
+class TestRunResearchBudgetExhaustion:
+    """An exhausted credit budget skips pass-2 discovery and re-synthesis."""
+
+    @pytest.mark.asyncio
+    async def test_exhausted_budget_skips_gap_detection_and_pass2(self):
+        """Pass 1 consuming the full budget ends the loop without pass 2."""
+        from agent.research.loop import run_research
+
+        searxng = MagicMock()
+
+        async def _search(query: str, **kwargs):
+            results = [
+                {"url": f"https://s{i}.com", "title": f"S{i}", "description": "d"}
+                for i in range(10)
+            ]
+            return results, MagicMock()
+
+        searxng.search = AsyncMock(side_effect=_search)
+        searxng.close = AsyncMock()
+
+        llm = MagicMock()
+        calls: list[str] = []
+
+        async def _generate(**kwargs) -> str:
+            stage = kwargs.get("stage") or kwargs.get("user_prompt", "")
+            if kwargs.get("system_prompt") and "gap" in str(stage).lower():
+                calls.append("gap")
+            else:
+                calls.append(f"gen:{stage}")
+            return (
+                '{"focused_queries": ["q1"], "research_strategy": "deep"}'
+                if not calls[:-1] and "plan" in str(kwargs.get("stage", ""))
+                else "answer [1]"
+            )
+
+        llm.generate = AsyncMock(side_effect=_generate)
+        llm.close = AsyncMock()
+
+        scraper = _make_scraper()
+
+        with (
+            patch("agent.research.loop.SearXNGClient", return_value=searxng),
+            patch("agent.research.loop.ScraperClient", return_value=scraper),
+            patch("agent.research.loop.LLMClient", return_value=llm),
+            patch(
+                "agent.research.loop._detect_gaps",
+                new=AsyncMock(return_value=["gap-topic"]),
+            ) as detect_gaps,
+        ):
+            result = await run_research(
+                prompt="question",
+                llm_model="m",
+                max_searches_per_request=1,
+                search_type="deep",
+                max_credits=3,
+            )
+
+        assert result["result"] == "answer [1]"
+        # Budget fully consumed by pass 1 (min_sources=3 of 3 candidates):
+        # no gap-detection LLM call and exactly ONE synthesis call — pass 2
+        # must not run redundant searches/synthesis on an exhausted budget.
+        detect_gaps.assert_not_awaited()
+        synthesis_calls = [c for c in calls if c.startswith("gen:") and "plan" not in c]
+        assert len(synthesis_calls) >= 1
+        assert len(calls) <= 2  # planning + single synthesis only

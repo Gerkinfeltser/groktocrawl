@@ -373,6 +373,7 @@ async def _process_agent_async(
                                 llm_model=llm_model,
                                 requested_model=requested_model,
                                 max_searches_per_request=max_searches_per_request,
+                                max_credits=max_credits,
                                 include_images=include_images,
                                 citation_style=cs,
                                 search_type=search_type,
