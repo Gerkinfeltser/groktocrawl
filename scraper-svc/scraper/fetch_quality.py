@@ -137,7 +137,10 @@ def _structural_text_extraction(html: str) -> str:
         if content:
             parts.append(content)
 
-    # Body text — strip non-content elements
+    # Strip head metadata entirely (title/meta were already captured above)
+    # so the body dump cannot duplicate them, then drop chrome elements.
+    if soup.head is not None:
+        soup.head.decompose()
     for tag in soup(["script", "style", "nav", "footer", "header"]):
         tag.decompose()
 
@@ -219,6 +222,16 @@ def _full_page_markdown(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "nav", "footer", "header"]):
         tag.decompose()
+    # Head metadata (title/meta/link) is chrome for recovery purposes;
+    # dropping it also keeps <title> text from leaking into the markdown
+    # and colliding with the title heading consumers may prepend.
+    if soup.head is not None:
+        soup.head.decompose()
+    # Div-based chrome survives the semantic strip above; drop the common
+    # class-based variants so recovered pages stay clean.
+    for selector in ("aside", ".sidebar", ".site-footer", ".footer"):
+        for tag in soup.select(selector):
+            tag.decompose()
     _unwrap_anchor_wrapped_cards(soup)
     markdown = md(str(soup), heading_style="ATX", strip=["script", "style"])
     return re.sub(r"\n{3,}", "\n\n", markdown).strip()
@@ -247,12 +260,13 @@ def html_to_markdown(html: str) -> str:
         for tag in summary_soup(["script", "style"]):
             tag.decompose()
         # Readability can retain site-level navigation in its fragment. Remove
-        # only nav elements that are direct children of Readability's root body;
-        # nested div-based article content may contain its own navigation.
+        # only chrome elements that are direct children of Readability's root
+        # body; nested div-based article content may contain its own
+        # navigation, headers, or footers carrying article metadata.
         fragment_root = summary_soup.find("body", id="readabilityBody")
         if fragment_root is None:
             fragment_root = summary_soup.find("body")
-        for tag in summary_soup.find_all("nav"):
+        for tag in summary_soup.find_all(["nav", "footer", "header"]):
             if fragment_root is not None and tag.parent is fragment_root:
                 tag.decompose()
         # The summary is Readability's selected content fragment. Keep its
@@ -269,13 +283,28 @@ def html_to_markdown(html: str) -> str:
         # scores zero on link density), re-extract the whole page uncapped.
         if _is_low_yield(result, html):
             recovered = _full_page_markdown(html)
-            logger.info(
-                "Low-yield recovery: %d chars from %d-char source -> %d chars",
+            # Only keep the recovery when it meaningfully beats the
+            # readability fragment. A complete short article on a large
+            # source gains almost nothing from the full-page conversion,
+            # which would otherwise merge sidebars/div-footers into the
+            # output; the #587 card-grid case grows ~16x (758 -> 12,472
+            # chars) so it still recovers. An empty recovery (nothing
+            # survives chrome-stripping) keeps the original fragment too,
+            # letting the structural fallback handle SPA shells below.
+            if recovered and len(recovered) >= len(result) * 2:
+                logger.info(
+                    "Low-yield recovery: %d chars from %d-char source -> %d chars",
+                    len(result),
+                    len(html),
+                    len(recovered),
+                )
+                return recovered
+            logger.debug(
+                "Low-yield candidate kept as-is: recovery gained too little "
+                "(%d -> %d chars); fragment looks complete or unrecoverable",
                 len(result),
-                len(html),
                 len(recovered),
             )
-            return recovered
 
         # Structural fallback: when readability produces little or no output,
         # extract visible text nodes from the full HTML. This handles sites

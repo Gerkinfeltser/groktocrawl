@@ -39,12 +39,23 @@ async def scrape_page(url: str, timeout: float = 15.0) -> str | None:
             if not markdown:
                 return None
 
+            # Only prepend the title when the shared pipeline didn't already
+            # emit it (structural fallback and full-page recovery paths both
+            # start with an H1 of the page title).
             from bs4 import BeautifulSoup
 
-            title = BeautifulSoup(html, "html.parser").title
-            title_text = title.get_text(strip=True) if title else ""
+            title_tag = BeautifulSoup(html, "html.parser").title
+            title_text = title_tag.get_text(strip=True) if title_tag else ""
 
-            return f"# {title_text}\n\n{markdown}" if title_text else markdown
+            first_line = markdown.split("\n", 1)[0].strip()
+            starts_with_title = bool(title_text) and (
+                first_line.startswith(f"# {title_text}")
+                or first_line == f"# {title_text}"
+            )
+            if not starts_with_title:
+                markdown = f"# {title_text}\n\n{markdown}"
+
+            return markdown
 
     except Exception as exc:
         logger.debug("Readability fallback failed for %s: %s", url, exc)

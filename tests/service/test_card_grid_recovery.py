@@ -422,3 +422,71 @@ def test_fetch_tiers_uses_shared_html_to_markdown():
     source = inspect.getsource(fetch_tiers)
     assert "from .fetch_quality import" in source or ("from .fetch_quality" in source)
     assert "html_to_markdown" in source
+
+
+# ── Review hardening: recovery must not replace complete fragments ──
+
+
+def test_recovery_keeps_complete_short_article_fragment():
+    """A complete short article on a large page is NOT swapped for a
+    full-page conversion that would merge sidebars/div-footers into it."""
+    from scraper.fetch_quality import html_to_markdown
+
+    article = (
+        "<p>This compact article is entirely complete despite its brevity. "
+        "It explains one narrow idea across three tidy paragraphs and needs "
+        "no further sections to stand alone as useful extracted content.</p>"
+        "<p>The second paragraph rounds out the argument with a concrete "
+        "example that readers can reproduce on their own hardware quickly.</p>"
+    )
+    # Filler bytes (HTML comments) push the source past the low-yield size
+    # gate without adding extractable text.
+    filler = "<!-- analytics blob " + "x" * 12000 + " -->"
+    html = (
+        "<html><head><title>Compact Note</title></head><body>"
+        f"{filler}<article>{article}</article>"
+        '<aside class="sidebar">Sidebar Navigation Text About Widgets</aside>'
+        "<footer>Div Footer Boilerplate Line</footer>"
+        "</body></html>"
+    )
+    markdown = html_to_markdown(html)
+    # Article survives intact...
+    assert "entirely complete despite its brevity" in markdown
+    # ...without the surrounding chrome a full-page dump would drag in.
+    assert "Sidebar Navigation Text About Widgets" not in markdown
+    assert "Div Footer Boilerplate Line" not in markdown
+
+
+@pytest.mark.asyncio
+async def test_scrape_page_does_not_duplicate_title(monkeypatch):
+    """When the shared pipeline already starts with the page title, the
+    helper must not prepend it again."""
+    import httpx
+    from scraper.adapters import _helpers
+
+    html = (
+        "<html><head><title>Dup Title Probe</title></head><body><p>Hello"
+        "</p></body></html>"
+    )
+
+    class _Resp:
+        status_code = 200
+        text = html
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get(self, url):
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    result = await _helpers.scrape_page("https://example.test/note")
+    assert result is not None
+    assert result.count("Dup Title Probe") == 1
