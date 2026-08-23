@@ -157,6 +157,7 @@ The configuration inventory follows `.env.sample`; unlisted implementation-only 
 - JOB_RETRY_MAX_WAIT_SECONDS
 - LLM_API_KEY
 - LLM_BASE_URL
+- LLM_CALL_TIMEOUT
 - LLM_ENABLE_THINKING
 - LLM_LLAMA_CPP_DISABLE_THINKING
 - LLM_MODEL
@@ -171,6 +172,7 @@ The configuration inventory follows `.env.sample`; unlisted implementation-only 
 - MCP_TARGETED_SENSITIVE_ALLOWED
 - NEAR_DUP_MODE
 - NEAR_DUP_THRESHOLD
+- QDRANT_CLIENT_TIMEOUT
 - QDRANT_URL
 - PARSE_MAX_SIZE_MB
 - QA_MAX_BOILERPLATE_RATIO

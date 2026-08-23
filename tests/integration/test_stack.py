@@ -1585,18 +1585,18 @@ GUTENBERG_FILES = "https://www.gutenberg.org/files/11/"
 GUTENBERG_CACHE = "https://gutenberg.org/cache/epub/11/"
 
 
+@pytest.mark.external
 def test_gutenberg_adapter_known_book():
-    """Known Gutenberg book (Alice in Wonderland) returns structured markdown with frontmatter."""
+    """Known Gutenberg book returns structured markdown and separate metadata."""
     r = httpx.post(SCRAPER + "/scrape", json={"url": GUTENBERG_ALICE}, timeout=180)
     payload = r.json()
     assert payload["success"] is True, payload.get("error")
     md = payload.get("data", {}).get("markdown", "")
-    # Should have YAML frontmatter
-    assert md.startswith("---"), "Should have YAML frontmatter"
-    # Should contain metadata fields
-    assert "title:" in md, "Should contain title metadata"
-    assert "gutenberg_id:" in md, "Should contain gutenberg_id metadata"
-    assert "author:" in md, "Should contain author metadata"
+    # Adapter metadata is returned separately from the markdown body.
+    metadata = payload.get("data", {}).get("metadata") or {}
+    assert metadata.get("title"), "Should contain title metadata"
+    assert metadata.get("gutenberg_id") == 11, "Should contain gutenberg_id metadata"
+    assert metadata.get("author"), "Should contain author metadata"
     # Should have substantive content
     assert len(md) > 500, f"Expected >500 chars, got {len(md)}"
     # Should have chapter-like content (Alice has chapters)
@@ -1612,6 +1612,7 @@ def test_gutenberg_adapter_known_book():
     assert "gutenberg" in src, f"Expected gutenberg source, got {src}"
 
 
+@pytest.mark.external
 def test_gutenberg_adapter_files_url():
     """Gutenberg /files/<id>/ URL pattern should also work."""
     r = httpx.post(SCRAPER + "/scrape", json={"url": GUTENBERG_FILES}, timeout=180)
@@ -1621,6 +1622,7 @@ def test_gutenberg_adapter_files_url():
     assert len(md) > 100, f"Expected >100 chars, got {len(md)}"
 
 
+@pytest.mark.external
 def test_gutenberg_adapter_cache_url():
     """Gutenberg /cache/epub/<id>/ URL pattern should also work."""
     r = httpx.post(SCRAPER + "/scrape", json={"url": GUTENBERG_CACHE}, timeout=180)
@@ -1630,6 +1632,7 @@ def test_gutenberg_adapter_cache_url():
     assert len(md) > 100, f"Expected >100 chars, got {len(md)}"
 
 
+@pytest.mark.external
 def test_gutenberg_adapter_invalid_id():
     """Non-existent book ID falls through gracefully with a valid envelope.
 
