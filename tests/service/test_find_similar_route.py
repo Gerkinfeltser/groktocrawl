@@ -14,6 +14,7 @@ returns mapped results, a genuinely empty index still yields
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -198,3 +199,137 @@ class TestFindSimilarOpenApiSchema:
             "$ref"
         ].split("/")[-1]
         assert success_ref == "FindSimilarResponse"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Web-mode happy path (promoted from validator scratch coverage, #588
+# follow-up). The #588 fix was scoped to qdrant mode; this pins the web mode's
+# unchanged rerank contract (search → embed → cosine rerank) so it is guarded
+# by the permanent suite rather than a throwaway validation test.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestFindSimilarWebModeRerank:
+    def test_web_mode_healthy_path_returns_reranked_results(self):
+        """VAL-FIND-016: web mode reranks searxng results by cosine
+        similarity against the scraped page and maps them to
+        url/title/description dicts — no error raised on the healthy path."""
+        from agent.research.similar import _run_find_similar_web
+
+        # Query embedding for the scraped page's content.
+        query_vec = [1.0, 0.0]
+
+        # Candidate embeddings chosen so cosine similarity against [1, 0] is
+        # deterministic: Alpha -> 1.0, Gamma -> ~0.707, Beta -> 0.0.
+        cand_vecs = {
+            "https://b.example.com/beta": [0.0, 1.0],
+            "https://c.example.com/gamma": [
+                0.7071067811865476,
+                0.7071067811865476,
+            ],
+            "https://a.example.com/alpha": [1.0, 0.0],
+        }
+
+        class _FakeScraper:
+            async def scrape(self, url):
+                return {
+                    "success": True,
+                    "data": {
+                        "markdown": "# Herb Gardens\n\nHydroponic herb gardening tips.",
+                        "metadata": {"title": "Herb Gardens"},
+                    },
+                }
+
+            async def close(self):
+                return None
+
+        class _FakeSearx:
+            """Healthy SearXNG returning three results in a deliberately
+            UNRANKED order (Beta, Gamma, Alpha) so passing requires actual
+            cosine reranking."""
+
+            async def search(self, query, limit=5):
+                results = [
+                    {
+                        "url": "https://b.example.com/beta",
+                        "title": "Beta",
+                        "description": "beta description",
+                    },
+                    {
+                        "url": "https://c.example.com/gamma",
+                        "title": "Gamma",
+                        "description": "gamma description",
+                    },
+                    {
+                        "url": "https://a.example.com/alpha",
+                        "title": "Alpha",
+                        "description": "alpha description",
+                    },
+                ]
+                return results[:limit], {}
+
+            async def close(self):
+                return None
+
+        class _FakeSemantic:
+            def __init__(self):
+                self.embed_calls: list[list[str]] = []
+
+            async def embed(self, texts):
+                self.embed_calls.append(list(texts))
+                if len(texts) == 1:
+                    # Single-text call: the query URL's markdown embedding.
+                    return [query_vec]
+                # Batch call: one embedding per candidate description.
+                vecs = []
+                for text in texts:
+                    for url_hint, vec in cand_vecs.items():
+                        marker = url_hint.split("/")[-1]
+                        if marker in text.lower():
+                            vecs.append(vec)
+                            break
+                    else:
+                        raise AssertionError(f"unexpected embed text: {text!r}")
+                return vecs
+
+            async def close(self):
+                return None
+
+        scraper = _FakeScraper()
+        semantic = _FakeSemantic()
+        searx = _FakeSearx()
+
+        with (
+            patch("agent.research.similar.ScraperClient", return_value=scraper),
+            patch("agent.semantic_client.SemanticClient", return_value=semantic),
+            patch("agent.research.similar.SearXNGClient", return_value=searx),
+        ):
+            # Must not raise; the #588 fix touched only the qdrant path.
+            results = asyncio.run(
+                _run_find_similar_web(
+                    url="https://example.com/herbs",
+                    limit=2,
+                    scraper_url="http://scraper.test",
+                    semantic_url="http://semantic.test",
+                    searxng_url="http://searxng.test",
+                )
+            )
+
+        # Non-empty reranked results, truncated to limit.
+        assert isinstance(results, list)
+        assert len(results) == 2
+
+        # Rerank actually reordered: Alpha (cos 1.0) beats Gamma (~0.707);
+        # raw searxng order was Beta, Gamma, Alpha — Beta must be dropped.
+        assert [r["title"] for r in results] == ["Alpha", "Gamma"]
+
+        # Mapping contract: dicts expose exactly url/title/description.
+        for item in results:
+            assert set(item.keys()) == {"url", "title", "description"}
+            assert item["url"].startswith("https://")
+            assert item["description"].endswith("description")
+
+        # Full pipeline ran: scrape -> search -> embed(query) -> embed(batch).
+        assert len(semantic.embed_calls) == 2
+        assert len(semantic.embed_calls[0]) == 1  # query markdown
+        assert len(semantic.embed_calls[1]) == 3  # candidate descriptions
