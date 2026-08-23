@@ -164,6 +164,7 @@ async def _run_multi_query_discover_and_scrape(
     scraper: ScraperClient,
     max_searches_per_request: int = 5,
     scrape_options: dict | None = None,
+    max_credits: int | None = None,
 ) -> dict:
     """Search multiple sub-queries, deduplicate URLs, scrape, and merge context.
 
@@ -172,6 +173,10 @@ async def _run_multi_query_discover_and_scrape(
     (deduplicating by URL, keeping the first occurrence for richer metadata),
     then scrapes the union. Merges documents into a single context block
     organized by query.
+
+    When ``max_credits`` is set (1 credit ≈ one successfully scraped page),
+    the candidate list handed to the scraper is truncated to that budget so
+    discovery can never exceed the requested credit allowance.
 
     Returns the same dict shape as ``_run_research_discover_and_scrape()``:
         search_results, target_urls, documents, source_details, context
@@ -232,6 +237,8 @@ async def _run_multi_query_discover_and_scrape(
 
     # Score and rank URLs before scraping (F1: source pre-filtering)
     target_urls = _filter_and_rank_urls(target_urls, max_urls=20)
+    if max_credits is not None and max_credits >= 0:
+        target_urls = target_urls[:max_credits]
     artifacts = await _scrape_with_fallback(
         target_urls, scraper, min_sources=3, scrape_options=scrape_options
     )
@@ -254,12 +261,17 @@ async def _run_research_discover_and_scrape(
     scraper: ScraperClient,
     max_searches_per_request: int = 5,
     scrape_options: dict | None = None,
+    max_credits: int | None = None,
 ) -> dict:
     """Search → filter → scrape → context-building phase for research.
 
     Shared by ``run_research`` and ``run_research_stream``. Uses
     ``_scrape_urls()`` for batch scraping; the stream variant yields
     progress events from the returned source_details after the call.
+
+    When ``max_credits`` is set (1 credit ≈ one successfully scraped page),
+    the candidate list handed to the scraper is truncated to that budget so
+    discovery can never exceed the requested credit allowance.
     """
     target_urls = list(urls) if urls else []
     search_results: list[dict] = []
@@ -272,6 +284,8 @@ async def _run_research_discover_and_scrape(
 
     # Score and rank URLs before scraping (F1: source pre-filtering)
     target_urls = _filter_and_rank_urls(target_urls, max_urls=20)
+    if max_credits is not None and max_credits >= 0:
+        target_urls = target_urls[:max_credits]
     artifacts = await _scrape_with_fallback(
         target_urls, scraper, min_sources=3, scrape_options=scrape_options
     )

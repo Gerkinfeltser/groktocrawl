@@ -1193,13 +1193,15 @@
           "max_credits": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "minimum": 1
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Max Credits"
+            "title": "Max Credits",
+            "description": "Maximum credits (successfully scraped source pages) the research job may consume; discovery stops once reached."
           },
           "webhook": {
             "anyOf": [
@@ -1526,7 +1528,7 @@
               }
             ],
             "title": "Limit",
-            "description": "Alias for max_pages. When both are set, the stricter (minimum) wins."
+            "description": "Maximum number of pages to crawl (Firecrawl v2 parity). Alias of max_pages; when both are set the stricter cap wins."
           },
           "ignore_sitemap": {
             "type": "boolean",

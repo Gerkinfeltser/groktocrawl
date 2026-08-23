@@ -83,6 +83,21 @@ class TestAgentRequest:
         with pytest.raises(ValidationError):
             AgentRequest(prompt="x" * 100001)
 
+    def test_max_credits_must_be_positive_when_set(self):
+        """max_credits bounds the research budget — 0/negative are rejected."""
+        from agent.models import AgentRequest
+
+        with pytest.raises(ValidationError):
+            AgentRequest(prompt="x", max_credits=0)
+        with pytest.raises(ValidationError):
+            AgentRequest(prompt="x", max_credits=-5)
+
+    def test_positive_max_credits_accepted(self):
+        from agent.models import AgentRequest
+
+        r = AgentRequest(prompt="x", max_credits=3)
+        assert r.max_credits == 3
+
 
 class TestAgentCreateResponse:
     def test_minimal(self):
@@ -277,6 +292,21 @@ class TestCrawlRequest:
 
         r = CrawlRequest(url="https://example.com", verbose=True)
         assert r.verbose is True
+
+    def test_limit_must_be_positive_when_set(self):
+        """limit bounds the crawl (Firecrawl parity) — it must be >= 1."""
+        from agent.models import CrawlRequest
+
+        with pytest.raises(ValidationError):
+            CrawlRequest(url="https://example.com", limit=0)
+        with pytest.raises(ValidationError):
+            CrawlRequest(url="https://example.com", limit=-3)
+
+    def test_positive_limit_accepted(self):
+        from agent.models import CrawlRequest
+
+        r = CrawlRequest(url="https://example.com", limit=1)
+        assert r.limit == 1
 
 
 class TestBatchScrapeRequest:

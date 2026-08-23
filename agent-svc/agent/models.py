@@ -475,7 +475,14 @@ class AgentRequest(BaseModel):
         default=None,
         description="Agent mode: None (default agent pipeline), 'plan' (plan-only, no execution)",
     )
-    max_credits: int | None = None
+    max_credits: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Maximum credits (successfully scraped source pages) the "
+            "research job may consume; discovery stops once reached."
+        ),
+    )
     webhook: dict[str, Any] | None = None
     strict_constrain_to_urls: bool = False
     stream: bool = Field(default=False, description="SSE streaming response")
@@ -579,7 +586,14 @@ class CrawlRequest(BaseModel):
     max_depth: int = Field(
         default=2, ge=0, description="Maximum link-follow depth, must be >= 0"
     )
-    limit: int | None = None
+    limit: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Maximum number of pages to crawl (Firecrawl v2 parity). "
+            "Alias of max_pages; when both are set the stricter cap wins."
+        ),
+    )
     ignore_sitemap: bool = False
     sitemap: str = Field(
         default="include",
