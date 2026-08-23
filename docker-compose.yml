@@ -199,6 +199,8 @@ services:
       # both vars with float() at import time, so the fallbacks must stay
       # non-empty numeric values equal to today's effective defaults — an
       # empty ${VAR:-} fallback would inject "" and crash-loop the service.
+      # Drift watch: each '10' fallback duplicates semantic-svc/app.py's
+      # own getenv default; bump both sides together.
       - QDRANT_QUERY_TIMEOUT=${QDRANT_QUERY_TIMEOUT:-10}
       - QDRANT_CLIENT_TIMEOUT=${QDRANT_CLIENT_TIMEOUT:-10}
     volumes:

@@ -396,6 +396,25 @@ def test_add_quality_consumes_source_html_size_natively():
     )
 
 
+def test_add_quality_presence_check_is_explicit_none_guard():
+    """The size-presence check must be an explicit ``is not None``.
+
+    A truthiness guard (``if result.get(...)``) silently discards the
+    legitimate ``source_html_size: 0`` sentinel and reads as accidental
+    rather than intentional; the explicit None check documents that only
+    absence falls back to measuring caller-provided HTML.
+    """
+    import inspect
+
+    from scraper import fetch_quality
+
+    source = inspect.getsource(fetch_quality._add_quality)
+    assert 'result.get("source_html_size") is not None' in source, (
+        "_add_quality should guard on `is not None` so a 0-byte size stays "
+        f"authoritative; got:\n{source}"
+    )
+
+
 # ── Hardening: yield-floor constants re-exported, not re-declared ──
 
 

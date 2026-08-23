@@ -345,8 +345,8 @@ def _add_quality(result: dict, html: str = "", title: str = "") -> dict:
     markdown = result.get("markdown", "")
     url = result.get("url", "")
     # Tiers store ``source_html_size`` natively as int; fall back to the
-    # caller-provided raw HTML when the tier did not carry a size.
-    if not html and result.get("source_html_size"):
+    # caller-provided raw HTML only when the tier carried no size at all.
+    if not html and result.get("source_html_size") is not None:
         html_size = result["source_html_size"]
     else:
         html_size = len(html)
