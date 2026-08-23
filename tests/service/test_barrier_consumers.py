@@ -490,6 +490,48 @@ class TestAnswerRerankReuseRefusal:
         assert len(artifacts) == 1
         assert artifacts[0].markdown == "# Clean\n\nBody."
 
+    @pytest.mark.asyncio
+    async def test_low_yield_article_rerank_artifact_passes_through(self):
+        """A #587-style thin-but-legitimate article is NOT refused at reuse.
+
+        Review finding: the rerank re-gate must not depend on scraper-svc's
+        quality machinery or refuse legitimate low-yield content — only the
+        challenge markers themselves flag here.
+        """
+        from agent.research.discovery import _scrape_answer_sources
+        from agent.research.sources import SourceArtifact
+
+        low_yield = SourceArtifact(
+            url="https://thin.test/z",
+            markdown="JavaScript powers this interactive card grid.",
+            char_count=50,
+        )
+        artifacts = await _scrape_answer_sources(
+            ["https://thin.test/z"], [low_yield], MagicMock(), num_sources=1
+        )
+
+        assert len(artifacts) == 1
+
+
+# ── barrier_guard unit checks (review-finding regressions) ───────
+
+
+class TestBarrierGuardSemantics:
+    def test_markdown_is_challenge_positive_and_negative(self):
+        from agent.barrier_guard import markdown_is_challenge
+
+        assert markdown_is_challenge(CHALLENGE_MARKDOWN)
+        assert markdown_is_challenge('script src="/_fs-ch-/challenge.js"')
+        # Legit JavaScript mentions and generic block phrases stay clean.
+        assert not markdown_is_challenge("JavaScript powers interactive maps.")
+        assert not markdown_is_challenge("Under maintenance. Please wait.")
+
+    def test_markdown_is_challenge_empty(self):
+        from agent.barrier_guard import markdown_is_challenge
+
+        assert not markdown_is_challenge(None)
+        assert not markdown_is_challenge("")
+
 
 # ── VAL-BARR-012: crawler records barrier pages as errors/skips ──
 

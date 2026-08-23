@@ -18,9 +18,6 @@ dependencies = [
 [tool.deptry.per_rule_ignores]
 # Uvicorn is the container entry point; FastAPI loads multipart support dynamically.
 DEP002 = ["uvicorn", "python-multipart"]
-# scraper-svc ships in the same image (PYTHONPATH includes scraper-svc/), so the
-# consumer-refusal seam re-gates rerank artifacts with scraper.extract.assess_quality (#586).
-DEP001 = ["scraper"]
 
 [tool.mutmut]
 # Bounded mutation-testing pilot config (issue #572). Run from cwd agent-svc/.

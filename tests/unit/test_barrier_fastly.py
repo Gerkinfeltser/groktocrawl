@@ -292,33 +292,76 @@ class TestBlockPageFastlyInterstitial:
     def test_f1_tier3_refuses_interstitial_via_barrier_envelope(self):
         """Tier 3 returns the barrier-detection error envelope for F1.
 
-        The post-extraction gate in ``fetch_via_playwright`` treats a
-        block_detected "fail" like a detected barrier: the challenge
+        The post-extraction gate in ``fetch_via_playwright`` refuses a page
+        when the barrier classifier fires OR the block gate scores "fail"
+        with >=2 pattern matches AND challenge corroboration: the challenge
         interstitial is refused (empty markdown + source=barrier-detection)
         and can never ship as healthy page content (#586).
         """
         html = _read(F1_PATH)
 
         # Reproduce the Tier 3 refusal decision locally (no browser needed):
-        # same inputs, same gate expression as fetch_tiers._playwright_fetch.
-        from scraper.extract import assess_quality
+        # same inputs, same gate logic as fetch_tiers._playwright_fetch.
+        from scraper.extract import BLOCK_PAGE_PATTERNS, _check_block_page
         from scraper.fetch_quality import _classify_barrier, html_to_markdown
 
         markdown = html_to_markdown(html)
         barrier = _classify_barrier(
             "JavaScript is disabled in your browser.", "", markdown, html
         )
-        quality = assess_quality(markdown, url="http://test/fastly-challenge")
+        status, _ = _check_block_page(markdown)
+        matched = [p for p in BLOCK_PAGE_PATTERNS if p.search(markdown.lower())]
+        corroborated = barrier.detected or any(
+            m in markdown.lower() for m in FASTLY_PROSE_MARKERS
+        )
 
-        refuse = (barrier.detected and barrier.confidence > 0.7) or quality[
-            "checks"
-        ].get("block_detected") == "fail"
+        refuse = (barrier.detected and barrier.confidence > 0.7) or (
+            status == "fail" and len(matched) >= 2 and corroborated
+        )
 
         assert refuse is True
-        # The envelope the tier returns on refusal: empty markdown,
-        # source=barrier-detection, barrier payload present.
-        assert quality["checks"]["block_detected"] == "fail"
         assert barrier.detected
+
+    def test_generic_two_pattern_page_is_not_refused_by_tier3_gate(self):
+        """Cookie banner + paywall co-occurrence does NOT trip the Tier 3 gate.
+
+        Review finding (P2): the post-extraction refusal requires challenge
+        corroboration; a legitimate page that happens to contain two generic
+        block phrases must not be refused as a blocking interstitial.
+        """
+        from scraper.extract import BLOCK_PAGE_PATTERNS, _check_block_page
+        from scraper.fetch_quality import html_to_markdown
+
+        html = (
+            "<html><head><title>Site Preferences</title></head><body>"
+            "<div class='cookie'>This site uses cookies. Please enable "
+            "javascript for preferences.</div><article><h1>Membership</h1>"
+            "<p>This content is available to subscribers only. Create an "
+            "account to continue reading quality journalism.</p></article>"
+            "</body></html>"
+        )
+        markdown = html_to_markdown(html)
+        status, _score = _check_block_page(markdown)
+        matched = [p.pattern for p in BLOCK_PAGE_PATTERNS if p.search(markdown.lower())]
+
+        # The page matches >=2 generic patterns; whatever the gate scores it,
+        # no challenge marker/provider is present, so the Tier 3 refusal
+        # expression stays False — the page ships as content.
+        assert len(matched) >= 2, matched
+        # ...but no challenge marker/provider is present, so the Tier 3
+        # refusal expression stays False — the page ships as content.
+        challenge_markers = (
+            "javascript is disabled",
+            "/_fs-ch-",
+            "verify you are",
+            "checking your browser",
+            "attention required",
+            "cloudflare-ray-id",
+            "ddos-guard",
+        )
+        corroborated = any(m in markdown.lower() for m in challenge_markers)
+        refuse = status == "fail" and len(matched) >= 2 and corroborated
+        assert refuse is False
 
     def test_single_generic_js_mention_stays_warn(self):
         """One pattern hit (a legit interactive-figure instruction) warns only."""

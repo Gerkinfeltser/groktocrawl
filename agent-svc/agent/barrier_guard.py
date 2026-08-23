@@ -50,6 +50,44 @@ def _block_flagged(result: dict) -> bool:
     return checks.get("block_detected") in ("warn", "fail")
 
 
+# Challenge-specific content markers for artifacts that lost the scraper's
+# ``warning``/``quality`` envelope (only markdown survives rerank reuse).
+# Mirrors the challenge/interstitial families of scraper-svc's
+# BLOCK_PAGE_PATTERNS; deliberately excludes the generic cookie/maintenance/
+# paywall families so legitimate pages mentioning them are not refused here
+# (the strict-quote policy still applies: verbatim barrier phrases flag).
+_CHALLENGE_CONTENT_MARKERS = (
+    "javascript is disabled",
+    "please enable javascript",
+    "enable javascript to continue",
+    "javascript is required",
+    "please turn javascript on",
+    "a required part of this site could",
+    "/_fs-ch-",
+    "please verify you are",
+    "verify you are a human",
+    "checking your browser",
+    "attention required",
+    "cloudflare-ray-id",
+    "ddos-guard",
+)
+
+
+def markdown_is_challenge(markdown: str | None) -> bool:
+    """Return True when bare markdown carries challenge-interstitial text.
+
+    Used by seams that receive markdown without the scraper envelope
+    (e.g. rerank-reuse artifacts built from bare ``scraper.scrape()`` calls),
+    so the #586 invariant holds even when no ``warning``/``quality`` fields
+    survive. Checks the leading 4,000 characters, mirroring the quality
+    gate's assessment window.
+    """
+    if not markdown:
+        return False
+    lowered = markdown[:4000].lower()
+    return any(marker in lowered for marker in _CHALLENGE_CONTENT_MARKERS)
+
+
 def refuse_reason(result: dict) -> str:
     """Human-readable reason string for a flagged payload (for logs/errors)."""
     checks = ((result.get("data") or {}).get("quality") or {}).get("checks") or {}

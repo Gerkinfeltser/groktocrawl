@@ -371,9 +371,38 @@ async def _playwright_fetch_unbounded(
                         # interstitial whose markdown matches >=2
                         # BLOCK_PAGE_PATTERNS scores blocking "fail" — refuse
                         # it here so it can never ship as healthy page content.
-                        from .extract import assess_quality
+                        # The gate requires challenge corroboration (a barrier-
+                        # provider hit or an explicit challenge marker in the
+                        # text) so ordinary pages that happen to co-occur with
+                        # two generic block patterns (cookie banner + paywall,
+                        # say) are not refused (#586 review).
+                        from .extract import BLOCK_PAGE_PATTERNS, _check_block_page
 
-                        quality = assess_quality(markdown, url=url)
+                        block_status, _ = _check_block_page(markdown)
+                        matched_patterns = [
+                            pattern.pattern
+                            for pattern in BLOCK_PAGE_PATTERNS
+                            if pattern.search(markdown.lower())
+                        ]
+                        challenge_corroborated = (
+                            barrier.detected or barrier.provider is not None
+                        ) or any(
+                            marker in markdown.lower()
+                            for marker in (
+                                "javascript is disabled",
+                                "enable javascript",
+                                "javascript is required",
+                                "couldn't load",
+                                "couldn’t load",
+                                "/_fs-ch-",
+                                "verify you are",
+                            )
+                        )
+                        block_fail_refusal = (
+                            block_status == "fail"
+                            and len(matched_patterns) >= 2
+                            and challenge_corroborated
+                        )
                         barrier_hit = (
                             barrier.detected
                             and not (
@@ -381,8 +410,7 @@ async def _playwright_fetch_unbounded(
                             )
                             and barrier.confidence > 0.7
                         )
-                        block_fail = quality["checks"].get("block_detected") == "fail"
-                        if barrier_hit or block_fail:
+                        if barrier_hit or block_fail_refusal:
                             reason = (
                                 f"barrier {barrier.barrier_type} "
                                 f"(confidence: {barrier.confidence:.2f})"

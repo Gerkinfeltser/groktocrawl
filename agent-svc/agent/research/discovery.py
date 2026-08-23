@@ -18,15 +18,12 @@ def _rerank_artifact_flagged(artifact: SourceArtifact) -> bool:
     """Whether a rerank-reuse artifact carries barrier-flagged content.
 
     Rerank artifacts lose the scraper's ``warning``/``quality`` envelope (only
-    markdown survives), so flagging is re-derived from the content itself:
-    markdown whose block-page gate reports "fail" is challenge text (#586).
+    markdown survives), so flagging is re-derived from the content itself via
+    the shared challenge-marker check in barrier_guard (#586).
     """
-    if not artifact.markdown:
-        return False
-    from scraper.extract import assess_quality
+    from ..barrier_guard import markdown_is_challenge
 
-    quality = assess_quality(artifact.markdown[:4000], url=artifact.url)
-    return quality["checks"].get("block_detected") in ("warn", "fail")
+    return markdown_is_challenge(artifact.markdown)
 
 
 async def _scrape_single(
