@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 
+from ..barrier_guard import is_barrier_flagged, log_refusal
 from ..metrics import METRICS
 from ..scraper_client import ScraperClient
 from ..searxng_client import SearXNGClient
@@ -11,6 +12,21 @@ from .scoring import _filter_and_rank_urls, _is_video_platform_url
 from .sources import SourceArtifact, artifacts_to_documents_and_details
 
 logger = logging.getLogger(__name__)
+
+
+def _rerank_artifact_flagged(artifact: SourceArtifact) -> bool:
+    """Whether a rerank-reuse artifact carries barrier-flagged content.
+
+    Rerank artifacts lose the scraper's ``warning``/``quality`` envelope (only
+    markdown survives), so flagging is re-derived from the content itself:
+    markdown whose block-page gate reports "fail" is challenge text (#586).
+    """
+    if not artifact.markdown:
+        return False
+    from scraper.extract import assess_quality
+
+    quality = assess_quality(artifact.markdown[:4000], url=artifact.url)
+    return quality["checks"].get("block_detected") in ("warn", "fail")
 
 
 async def _scrape_single(
@@ -23,7 +39,8 @@ async def _scrape_single(
     """Scrape a single URL with a semaphore for concurrency control.
 
     Returns a ``SourceArtifact`` carrying the fetched Markdown, or None on
-    failure.
+    failure. Barrier-flagged payloads (success-with-warning or block-fail
+    quality) are refused — the source is never ingested (#586).
     """
     async with semaphore:
         try:
@@ -33,6 +50,9 @@ async def _scrape_single(
                 timeout=url_timeout,
             )
             if result.get("success") and result.get("data", {}).get("markdown"):
+                if is_barrier_flagged(result):
+                    log_refusal(url, result)
+                    return None
                 md = result["data"]["markdown"]
                 return SourceArtifact(
                     url=url,
@@ -314,6 +334,10 @@ async def _scrape_answer_sources(
     when the ``num_sources`` quota is still unmet. Returns ordered artifacts
     (preferred in rank order, then any video fallback), deduplicated by URL
     and bounded to ``num_sources``.
+
+    Barrier-flagged rerank artifacts are dropped (#586): their markdown came
+    from bare ``scraper.scrape()`` calls that bypassed the shared refusal
+    seam, so they are re-gated here before reaching the answer context.
     """
     # Search results can repeat the same URL (keyword mode returns up to
     # 2x num_sources entries, many of them duplicates). Deduplicate first so
@@ -326,7 +350,20 @@ async def _scrape_answer_sources(
             deduped_urls.append(u)
     target_urls = deduped_urls
 
-    reused = {a.url: a for a in rerank_artifacts if a.markdown}
+    reused: dict[str, SourceArtifact] = {}
+    for artifact in rerank_artifacts:
+        if not artifact.markdown:
+            continue
+        if _rerank_artifact_flagged(artifact):
+            log_refusal(
+                artifact.url,
+                {
+                    "warning": None,
+                    "data": {"quality": {"checks": {"block_detected": "fail"}}},
+                },
+            )
+            continue
+        reused[artifact.url] = artifact
     dedup_counter = METRICS.counter(
         "fetches_deduped_total",
         "Total scrapes avoided by reusing already-fetched content",
@@ -355,9 +392,9 @@ async def _scrape_answer_sources(
     fresh_by_url = {a.url: a for a in fresh_preferred}
 
     preferred_artifacts = [
-        artifact
+        preferred_artifact
         for u in preferred
-        if (artifact := reused.get(u) or fresh_by_url.get(u)) is not None
+        if (preferred_artifact := reused.get(u) or fresh_by_url.get(u)) is not None
     ][:num_sources]
     artifacts = list(preferred_artifacts)
 
@@ -379,9 +416,9 @@ async def _scrape_answer_sources(
         for u in deprioritized:
             if len(artifacts) >= num_sources:
                 break
-            artifact = reused.get(u) or video_by_url.get(u)
-            if artifact is not None:
-                artifacts.append(artifact)
+            video_artifact = reused.get(u) or video_by_url.get(u)
+            if video_artifact is not None:
+                artifacts.append(video_artifact)
 
     return artifacts
 

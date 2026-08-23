@@ -26,6 +26,7 @@ BLOCK_PAGE_PATTERNS: list[re.Pattern] = [
     re.compile(r"please enable javascript"),
     re.compile(r"enable javascript to continue"),
     re.compile(r"javascript is required"),
+    re.compile(r"javascript is disabled"),
     re.compile(r"please turn javascript on"),
     # Bot challenges
     re.compile(r"please verify you are (?:a )?human"),
@@ -75,6 +76,10 @@ BLOCK_PAGE_PATTERNS: list[re.Pattern] = [
     # Maintenance
     re.compile(r"under maintenance"),
     re.compile(r"temporarily unavailable"),
+    # Fastly JS-challenge interstitial (#586) — combined with the patterns
+    # above it pushes the interstitial to >=2 matches, i.e. a blocking "fail".
+    re.compile(r"a required part of this site could(?:n[o'\u2019]| no)t load"),
+    re.compile(r"/_fs-ch-"),
 ]
 
 

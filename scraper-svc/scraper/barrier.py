@@ -1,8 +1,9 @@
 """Bot challenge detection and barrier classification.
 
 Detects Cloudflare JS challenges, DDoS-Guard, CAPTCHAs, rate-limit pages,
-and Substack redirect frames. Provides structured ``BarrierInfo`` results
-via ``_classify_barrier()``, which replaced the old boolean ``_looks_suspicious()``.
+Fastly JS-challenge interstitials (#586), and Substack redirect frames.
+Provides structured ``BarrierInfo`` results via ``_classify_barrier()``, which
+replaced the old boolean ``_looks_suspicious()``.
 """
 
 import logging
@@ -32,6 +33,24 @@ DDOS_GUARD_INDICATORS = [
     ".well-known/ddos-guard",
 ]
 
+# ── Fastly JS-challenge detection (#586) ───────────────────────
+# Prose rendered by Fastly's browser-challenge interstitials (observed on
+# nature.com). Matched case-insensitively against title/content; prose-only
+# matches accumulate confidence via the count-based ladder and must never be
+# treated as definitive on their own.
+FASTLY_CHALLENGE_INDICATORS = [
+    "javascript is disabled",
+    "please enable javascript to proceed",
+    "a required part of this site couldn't load",
+    "a required part of this site couldn’t load",
+]
+
+# Definitive HTML signature: Fastly challenge assets are served under this
+# prefix. Its presence in the raw HTML identifies a challenge page regardless
+# of what the extracted text looks like, so it short-circuits classification
+# at high confidence (mirroring the captcha-provider widget check).
+FASTLY_SIGNATURE_PREFIX = "/_fs-ch-"
+
 # ── Substack session/channel frame redirect detection ──────────
 SUBSTACK_REDIRECT_PATTERNS = [
     "substack.com/session-attribution-frame",
@@ -46,7 +65,9 @@ SUBSTACK_REDIRECT_PATTERNS = [
 def _is_bot_challenge(title: str, url: str) -> bool:
     """Check if the page title or URL indicates a bot challenge page.
 
-    Mirrors browser-svc's _is_bot_challenge() logic.
+    Mirrors browser-svc's _is_bot_challenge() logic. Fastly challenge pages
+    (#586) are included so the Tier 3 resolution poll engages for them too:
+    the poll waits out the interstitial instead of extracting its prose.
     """
     for indicator in CLOUDFLARE_INDICATORS:
         if indicator.lower() in title.lower():
@@ -56,7 +77,14 @@ def _is_bot_challenge(title: str, url: str) -> bool:
     for indicator in DDOS_GUARD_INDICATORS:
         if indicator.lower() in title.lower():
             return True
-    return "ddos-guard" in url.lower() or "/.well-known/ddos-guard" in url.lower()
+    if "ddos-guard" in url.lower() or "/.well-known/ddos-guard" in url.lower():
+        return True
+    # ── Fastly JS-challenge signals (#586) ─────────────────────
+    if FASTLY_SIGNATURE_PREFIX in url.lower():
+        return True
+    return any(
+        indicator.lower() in title.lower() for indicator in FASTLY_CHALLENGE_INDICATORS
+    )
 
 
 def _is_substack_redirect(url: str) -> bool:
@@ -74,7 +102,7 @@ class BarrierInfo:
     detected: bool
     barrier_type: (
         str | None
-    )  # "cloudflare", "ddos-guard", "captcha", "rate-limit", "substack-redirect", "empty", "suspicious", None
+    )  # "cloudflare", "ddos-guard", "captcha", "fastly", "rate-limit", "substack-redirect", "empty", "suspicious", None
     confidence: float
     detail: str = ""
     title: str = ""
@@ -90,12 +118,34 @@ def _classify_barrier(
     multi-signal classification. Returns a BarrierInfo dataclass
     with detected flag, barrier type, confidence score, and detail.
 
-    Confidence is derived from the number of distinct matched signals:
+    Definitive signatures short-circuit before count scoring: captcha
+    provider widgets and the Fastly ``/_fs-ch-`` asset prefix (#586)
+    return immediately at 0.95 confidence.
+
+    Otherwise, confidence is derived from the number of distinct matched
+    signals (the count-based ladder — prose-only inputs can never reach
+    the definitive 0.95 tier):
       1 signal  → 0.70
-      2 signals → 0.85
-      3+ signals → 0.95
+      2 signals → 0.90
+      3+ signals → capped at 0.95
     """
     html_lower = html.lower() if html else ""
+
+    # ── Definitive Fastly signature (#586) ────────────────────
+    # Fastly serves challenge assets under /_fs-ch-; seeing that prefix in
+    # the raw HTML identifies a challenge page no matter how the extracted
+    # text reads. Short-circuits at 0.95, mirroring the captcha-provider
+    # widget check above (same precedence position, before count scoring).
+    if FASTLY_SIGNATURE_PREFIX in html_lower or FASTLY_SIGNATURE_PREFIX in url.lower():
+        return BarrierInfo(
+            True,
+            "fastly",
+            0.95,
+            f"Definitive Fastly challenge signature ({FASTLY_SIGNATURE_PREFIX})",
+            title,
+            "fastly",
+        )
+
     captcha_providers = (
         (
             "turnstile",
@@ -167,6 +217,22 @@ def _classify_barrier(
     if "ddos-guard" in url_lower or "/.well-known/ddos-guard" in url_lower:
         signals.append("ddos-guard-url")
 
+    # ── Signal: Fastly challenge prose (#586) ─────────────────
+    # Each DISTINCT prose marker counts as its own signal so the count-based
+    # ladder accumulates confidence (1 marker → 0.70, 2 → 0.90). Prose-only
+    # matches can never reach the definitive 0.95 tier — that requires the
+    # /_fs-ch- HTML signature — so a tech article quoting a single phrase is
+    # flagged at low confidence rather than treated as definitive.
+    for indicator in FASTLY_CHALLENGE_INDICATORS:
+        if (
+            indicator in content_lower
+            or indicator in title_lower
+            or (html and indicator.lower() in html_lower)
+        ):
+            signal_name = f"fastly-prose:{indicator[:24]}"
+            if signal_name not in signals:
+                signals.append(signal_name)
+
     # ── Signal: Rate-limit detection in content ───────────────
     if "rate limit" in content_lower or "too many requests" in content_lower:
         signals.append("rate-limit")
@@ -199,6 +265,18 @@ def _classify_barrier(
 
     confidence = min(0.50 + (signal_count * 0.20), 0.95)
 
+    # ── Prose-only ceiling (#586) ─────────────────────────────
+    # The definitive 0.95 tier is reserved for structural signatures
+    # (captcha widgets above, the Fastly /_fs-ch- asset prefix). Prose-only
+    # matches accumulate through the ladder but cap at 0.90 so a page merely
+    # quoting the challenge text can never be classified as definitive.
+    prose_only = all(
+        s == "empty" or s.startswith("fastly-prose:") or s == "rate-limit"
+        for s in signals
+    )
+    if prose_only:
+        confidence = min(confidence, 0.90)
+
     # ── Determine the primary barrier type ────────────────────
     barrier_type: str | None = None
     for keyword, btype in [
@@ -206,6 +284,7 @@ def _classify_barrier(
         ("ddos-guard", "ddos-guard"),
         ("captcha", "captcha"),
         ("rate-limit", "rate-limit"),
+        ("fastly-prose", "fastly"),
         ("substack-redirect", "substack-redirect"),
         ("empty", "empty"),
         ("content-match", "suspicious"),

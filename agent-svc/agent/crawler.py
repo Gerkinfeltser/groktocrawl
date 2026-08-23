@@ -25,6 +25,7 @@ import httpx
 
 from common.url import is_private_host
 
+from .barrier_guard import is_barrier_flagged
 from .cancel import raise_if_cancelled
 from .crawl_cache import CrawlCache
 from .dedup import DedupManager
@@ -1106,6 +1107,72 @@ class CrawlEngine:
 
                 # Critical failure: user-provided start URL cannot be scraped
                 raise StartUrlScrapeError(url, error_msg)
+
+            # ── Barrier refusal (#586) ──────────────────────────
+            # A success payload flagged as barrier (warning key or
+            # block_detected warn/fail quality) is challenge/interstitial
+            # text: record an ERROR/skip entry, never a successful page.
+            # Children are not enqueued; the start URL fails honestly via
+            # the same StartUrlScrapeError path as any unscrapable page;
+            # child pages get the standard bounded retry (max 2) then skip.
+            if is_barrier_flagged(result):
+                checks = ((result.get("data") or {}).get("quality") or {}).get(
+                    "checks"
+                ) or {}
+                barrier_reason = (
+                    f"Barrier/challenge content detected "
+                    f"(warning={result.get('warning')!r}, "
+                    f"block_detected={checks.get('block_detected')!r})"
+                )
+                self._errors.append(
+                    {
+                        "url": url,
+                        "error": barrier_reason,
+                        "error_type": "barrier_detected",
+                        "error_code": "BARRIER_DETECTED",
+                        "timestamp": _now_timestamp(),
+                    }
+                )
+                logger.warning(
+                    "Barrier detected for %s (job %s): %s", url, job_id, barrier_reason
+                )
+                if error_callback is not None:
+                    await error_callback(
+                        job_id or "",
+                        {
+                            "url": url,
+                            "error": barrier_reason,
+                            "error_type": "barrier_detected",
+                        },
+                    )
+
+                if depth == 0 and not from_sitemap:
+                    # The crawl's START URL itself is barrier-flagged: fail
+                    # the job honestly rather than completing with zero pages.
+                    raise StartUrlScrapeError(url, barrier_reason)
+
+                if depth > 0 or from_sitemap:
+                    normalized = self.normalize_url(url)
+                    retries = self._retry_count.get(normalized, 0)
+                    if retries < 2:
+                        self._retry_count[normalized] = retries + 1
+                        backoff_delay = 2.0 if retries == 0 else 5.0
+                        logger.info(
+                            "Retrying %s (attempt %d/3, %.0fs backoff) — barrier flag",
+                            url,
+                            retries + 1,
+                            backoff_delay,
+                        )
+                        if self._errors and self._errors[-1].get("url") == url:
+                            self._errors.pop()
+                        self._seen.discard(normalized)
+                        await asyncio.sleep(backoff_delay)
+                        self._queue.appendleft((url, depth, from_sitemap))
+                    else:
+                        logger.info(
+                            "Barrier-flagged after 2 retries — skipping %s", url
+                        )
+                return
 
             # Record successful page with enriched metadata
             data = result.get("data", {})

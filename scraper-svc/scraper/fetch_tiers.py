@@ -367,18 +367,33 @@ async def _playwright_fetch_unbounded(
                     markdown = html_to_markdown(html)
                     if markdown and len(markdown) > 50:
                         barrier = _classify_barrier(title, url, markdown, html)
-                        if (
+                        # Post-extraction block-page gate (#586): a challenge
+                        # interstitial whose markdown matches >=2
+                        # BLOCK_PAGE_PATTERNS scores blocking "fail" — refuse
+                        # it here so it can never ship as healthy page content.
+                        from .extract import assess_quality
+
+                        quality = assess_quality(markdown, url=url)
+                        barrier_hit = (
                             barrier.detected
                             and not (
                                 captcha_resolved and barrier.barrier_type == "captcha"
                             )
                             and barrier.confidence > 0.7
-                        ):
+                        )
+                        block_fail = quality["checks"].get("block_detected") == "fail"
+                        if barrier_hit or block_fail:
+                            reason = (
+                                f"barrier {barrier.barrier_type} "
+                                f"(confidence: {barrier.confidence:.2f})"
+                                if barrier.detected
+                                else "blocking interstitial (block_detected: fail)"
+                            )
                             return {
-                                "error": f"Barrier detected: {barrier.barrier_type} (confidence: {barrier.confidence:.2f})",
+                                "error": f"Barrier detected: {reason}",
                                 "barrier": {
                                     "detected": True,
-                                    "type": barrier.barrier_type,
+                                    "type": barrier.barrier_type or "suspicious",
                                     "provider": barrier.provider,
                                     "confidence": barrier.confidence,
                                     "detail": barrier.detail,

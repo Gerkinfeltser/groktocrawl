@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .admission import get_admission
+from .barrier_guard import is_barrier_flagged, log_refusal
 from .cancel import JobCancelledError, raise_if_cancelled, set_token
 from .exceptions import RetryableRateLimitError
 from .metrics import METRICS
@@ -876,7 +877,27 @@ async def _process_batch_scrape_async(
                         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     }
                 else:
-                    if result.get("success"):
+                    if is_barrier_flagged(result):
+                        # Barrier-flagged success (#586): challenge text must
+                        # not reach pages or index payloads.
+                        log_refusal(url, result)
+                        checks = ((result.get("data") or {}).get("quality") or {}).get(
+                            "checks"
+                        ) or {}
+                        errors_by_index[index] = {
+                            "url": url,
+                            "error": (
+                                f"Barrier/challenge content detected "
+                                f"(warning={result.get('warning')!r}, "
+                                f"block_detected={checks.get('block_detected')!r})"
+                            ),
+                            "error_type": "barrier_detected",
+                            "error_code": "BARRIER_DETECTED",
+                            "timestamp": time.strftime(
+                                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                            ),
+                        }
+                    elif result.get("success"):
                         data = result["data"]
                         pages_by_index[index] = {
                             "url": url,
