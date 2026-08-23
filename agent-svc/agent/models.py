@@ -448,6 +448,10 @@ class ScrapeResponse(BaseModel):
     success: bool
     data: ScrapeData | None = None
     error: str | None = None
+    # Extraction-quality diagnostic mirrored from scraper-svc (#587): set
+    # when the final markdown is anomalously thin relative to its source
+    # so a truncation never presents as an unqualified success.
+    warning: str | None = None
 
 
 class AgentRequest(BaseModel):

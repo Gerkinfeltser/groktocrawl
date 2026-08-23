@@ -491,6 +491,9 @@ async def fetch_via_content_negotiation(
                         "markdown": markdown,
                         "source": "content-negotiation",
                         "url": url,
+                        # Volume gate input: lets the quality assessment flag
+                        # anomalously thin output relative to the source (#587).
+                        "source_html_size": str(len(resp.text)),
                     }
                     # Pass through ETag/Last-Modified for intelligent caching
                     etag = resp.headers.get("etag")
