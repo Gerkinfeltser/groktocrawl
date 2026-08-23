@@ -22,9 +22,18 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# The containerized integration lane provisions only docker-compose.yml into
+# /app as the Compose contract input (see .github/workflows/docker.yml); the
+# dotfile .env.sample never reaches that filesystem. The .env.sample doc
+# contract below is enforced where the file exists (local dev, Fast Tests,
+# and the `inventory` job running scripts/check-docs-surface.py) and skipped
+# otherwise.
+ENV_SAMPLE = ROOT / ".env.sample"
 
 _TIMEOUT_VARS = ("QDRANT_CLIENT_TIMEOUT", "QDRANT_QUERY_TIMEOUT")
 
@@ -102,6 +111,15 @@ class TestFallbackSafety:
 class TestEnvSampleDoc:
     """.env.sample must not imply a fixed default for QDRANT_CLIENT_TIMEOUT."""
 
+    @pytest.mark.skipif(
+        not ENV_SAMPLE.exists(),
+        reason=".env.sample is not provisioned in the containerized "
+        "integration lane; the docs inventory gate enforces it on every PR",
+        owner="repository-maintainer",
+        issue="#588",
+        classification="retained",
+        environment=".env.sample absent from /app in containerized runs",
+    )
     def test_example_value_does_not_state_fixed_default_of_10(self):
         text = (ROOT / ".env.sample").read_text()
         examples = re.findall(
@@ -115,6 +133,15 @@ class TestEnvSampleDoc:
             ".env.sample example must not present 10 as a fixed default"
         )
 
+    @pytest.mark.skipif(
+        not ENV_SAMPLE.exists(),
+        reason=".env.sample is not provisioned in the containerized "
+        "integration lane; the docs inventory gate enforces it on every PR",
+        owner="repository-maintainer",
+        issue="#588",
+        classification="retained",
+        environment=".env.sample absent from /app in containerized runs",
+    )
     def test_comment_documents_query_timeout_tracking(self):
         text = (ROOT / ".env.sample").read_text()
         marker = "# Client-side timeout (seconds) for blocking Qdrant HTTP calls."
