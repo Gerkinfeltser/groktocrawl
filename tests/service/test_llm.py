@@ -5,7 +5,7 @@ using mocked HTTP responses.
 """
 
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -1019,9 +1019,14 @@ async def _collect(agen) -> list:
     return [item async for item in agen]
 
 
-def _effective_timeout_seconds(timeout: object) -> float:
+def _effective_timeout_seconds(timeout: httpx.Timeout | float) -> float:
     """Normalize httpx.Timeout | float into a single comparable number."""
-    return float(timeout.read) if hasattr(timeout, "read") else float(timeout)
+    if isinstance(timeout, httpx.Timeout):
+        # Tests always construct the client with an explicit scalar timeout,
+        # so the per-op values are set (not None).
+        assert timeout.read is not None
+        return float(timeout.read)
+    return float(timeout)
 
 
 class TestTimeoutDiagnosabilityLogging:
@@ -1326,3 +1331,284 @@ class TestScopeBoundaryNoOtherLLMClients:
         assert offenders == [], (
             f"modules besides agent/llm.py reference chat/completions: {offenders}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Regression-hardening promotions (validator scratch tests, #589/#588 follow-up)
+#
+# These pin semantic gaps the milestone-1 user-testing validators covered with
+# throwaway tests; they claim no new contract assertions (those milestones are
+# sealed). Time semantics are unchanged: scaled-down REAL delays against real
+# sockets — never virtual-clock mocking, never httpx.MockTransport for
+# timeout behavior (MockTransport handler sleeps are invisible to httpx's
+# timeout machinery).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestDefaultTimeoutThreePointBoundary:
+    """VAL-LLM-001/005 three-point boundary at the unset-default anchor.
+
+    Scaled 100x against production numbers: unset default 120s ↔ 1.2s
+    (default equivalent), raised config 300s ↔ 3.0s (configured T),
+    provider delay 150s ↔ 1.5s (D). So 1.2 < 1.5 < 3.0: the same D that
+    is abandoned under the default-equivalent bound succeeds once the knob
+    is raised past D. The repo's TestSlowProviderTimeoutEnvelope covers the
+    configured-T side (D=1.5s vs T=3s success and T=0.05s failure); the
+    default-equivalent point below is the piece only the scratch validator
+    exercised.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unset_default_is_120_at_full_scale(self, monkeypatch):
+        """Anchor the scaling: env absent → the real default is 120.0."""
+        monkeypatch.delenv("LLM_CALL_TIMEOUT", raising=False)
+        load_settings.cache_clear()
+        try:
+            assert load_settings().llm_call_timeout == 120.0
+        finally:
+            load_settings.cache_clear()
+
+    @pytest.mark.asyncio
+    async def test_delay_exceeding_default_equivalent_times_out(
+        self, slow_1500ms_url, monkeypatch
+    ):
+        """Point A: with the effective bound AT the scaled default
+        equivalent (1.2s), the D=1.5s provider is abandoned before it can
+        respond — proving D genuinely exceeds the default-equivalent
+        scale (ProviderOutputError, bounded elapsed < D)."""
+        from agent.llm import LLMClient
+
+        monkeypatch.setenv("LLM_CALL_TIMEOUT", "1.2")
+        load_settings.cache_clear()
+        try:
+            client = LLMClient(slow_1500ms_url, api_key="", model="fixture-model")
+            started = _time.monotonic()
+            with pytest.raises(ProviderOutputError):
+                await asyncio.wait_for(
+                    client.generate(system_prompt="x", user_prompt="y"), timeout=10
+                )
+            elapsed = _time.monotonic() - started
+            # The ProviderOutputError itself proves the configured bound
+            # aborted the call before the provider could succeed (point B
+            # shows the same D succeeds under a raised T); the generous
+            # elapsed ceiling keeps the wall-clock check flake-free on
+            # loaded CI runners while still bounding the failure path.
+            assert elapsed < 3.0
+            await asyncio.wait_for(client.close(), timeout=5)
+        finally:
+            load_settings.cache_clear()
+
+    @pytest.mark.asyncio
+    async def test_same_delay_under_raised_timeout_succeeds(
+        self, slow_1500ms_url, monkeypatch
+    ):
+        """Point B: identical D=1.5s provider completes once T is raised to
+        3s (scaled image of LLM_CALL_TIMEOUT=300 vs the unset 120 default)."""
+        from agent.llm import LLMClient
+
+        monkeypatch.setenv("LLM_CALL_TIMEOUT", "3")
+        load_settings.cache_clear()
+        try:
+            client = LLMClient(slow_1500ms_url, api_key="", model="fixture-model")
+            started = _time.monotonic()
+            result = await asyncio.wait_for(
+                client.generate(system_prompt="Be helpful.", user_prompt="Say hi."),
+                timeout=10,
+            )
+            elapsed = _time.monotonic() - started
+            assert "Synthesized answer from provided context." in result
+            # Waited out the full real delay D, and finished under T.
+            assert 1.5 <= elapsed < 3.0
+            await asyncio.wait_for(client.close(), timeout=5)
+        finally:
+            load_settings.cache_clear()
+
+
+class TestStreamSuccessEnvelope:
+    """Success-side stream envelope on the raw-SSE fixture path.
+
+    The repo's stream tests drive generate_stream through mocked httpx
+    clients; these pin the same contract against the real uvicorn raw-SSE
+    fixture (real socket, real httpx per-op timeout machinery).
+    """
+
+    @pytest.mark.asyncio
+    async def test_fast_provider_stream_ends_with_done_event(self, raw_sse):
+        """VAL-LLM-006 success side: a fast provider yields token events
+        ending in a done event with full content, and never an error."""
+        from agent.llm import LLMClient
+
+        # Three instant token chunks, no stall, straight through to [DONE].
+        raw_sse.configure(stall_after=3, quiet_seconds=0.0)
+        client = LLMClient(raw_sse.base_url, api_key="", model="fixture-model")
+        try:
+            events = await asyncio.wait_for(
+                _collect(client.generate_stream(system_prompt="x", user_prompt="y")),
+                timeout=10,
+            )
+        finally:
+            await asyncio.wait_for(client.close(), timeout=5)
+        assert events
+        assert events[-1]["type"] == "done"
+        assert events[-1].get("full_content", "").strip()
+        assert not any(event["type"] == "error" for event in events)
+
+    @pytest.mark.asyncio
+    async def test_stream_forced_timeout_yields_error_releases_slot_no_leak(
+        self, raw_sse, monkeypatch
+    ):
+        """VAL-LLM-009 stream side: a forced timeout inside generate_stream
+        yields the error event, releases the admission slot (generator
+        finally), and closes without a dangling-client hang. The repo's
+        TestCleanTimeoutFailure covers only the generate() path."""
+        from agent.admission import get_admission
+        from agent.llm import LLMClient
+
+        call_timeout = 0.5
+        raw_sse.configure(stall_after=2, quiet_seconds=3.0)
+        monkeypatch.setenv("LLM_CALL_TIMEOUT", str(call_timeout))
+        load_settings.cache_clear()
+        try:
+            admission = get_admission()
+            assert admission.active("llm") == 0
+            client = LLMClient(raw_sse.base_url, api_key="", model="fixture-model")
+            started = _time.monotonic()
+            events = await asyncio.wait_for(
+                _collect(client.generate_stream(system_prompt="x", user_prompt="y")),
+                timeout=call_timeout + 5,
+            )
+            elapsed = _time.monotonic() - started
+            assert events
+            assert events[-1]["type"] == "error"
+            assert events[-1]["classification"] == "non_retryable"
+            assert not any(e["type"] == "done" for e in events)
+            # Bounded by ~T, not ∞.
+            assert call_timeout <= elapsed < 3.0
+            # Admission slot released by the generator's finally block.
+            assert admission.active("llm") == 0
+            # Persistent client still closes cleanly — no dangling-client hang.
+            await asyncio.wait_for(client.close(), timeout=5)
+        finally:
+            load_settings.cache_clear()
+
+    @pytest.mark.asyncio
+    async def test_mid_stream_stall_aborts_and_releases_admission_slot(
+        self, raw_sse, monkeypatch
+    ):
+        """VAL-LLM-014 slot hygiene: abort after a mid-stream stall leaves
+        the admission controller clean (the existing quiet-period test
+        asserts timing + error event but not slot release)."""
+        from agent.admission import get_admission
+        from agent.llm import LLMClient
+
+        call_timeout = 0.5
+        raw_sse.configure(stall_after=1, quiet_seconds=3.0)
+        monkeypatch.setenv("LLM_CALL_TIMEOUT", str(call_timeout))
+        load_settings.cache_clear()
+        try:
+            admission = get_admission()
+            assert admission.active("llm") == 0
+            client = LLMClient(raw_sse.base_url, api_key="", model="fixture-model")
+            events = await asyncio.wait_for(
+                _collect(client.generate_stream(system_prompt="x", user_prompt="y")),
+                timeout=call_timeout + 5,
+            )
+            assert events
+            assert events[-1]["type"] == "error"
+            assert events[-1].get("classification") == "non_retryable"
+            assert not any(e["type"] == "done" for e in events)
+            assert admission.active("llm") == 0  # released on abort
+            await asyncio.wait_for(client.close(), timeout=5)
+        finally:
+            load_settings.cache_clear()
+
+
+class TestWorkerRecordsSynthesisTimeoutReason:
+    """VAL-LLM-016(b): a schema-path synthesis ProviderOutputError reaches
+    store.fail_job with the provider reason via the real worker wrapper —
+    job failure is never a silent truncation."""
+
+    @pytest.mark.asyncio
+    async def test_schema_synthesis_timeout_fails_job_with_reason(self, monkeypatch):
+        """ProviderOutputError from run_research propagates through the real
+        _run_job_with_observability wrapper into store.fail_job."""
+        from agent.research.loop import run_research
+        from agent.worker import _run_job_with_observability
+
+        async def observed_work():
+            # Mirrors worker._process_agent_async's work_fn: the awaited
+            # run_research re-raises the pipeline's ProviderOutputError.
+            return await run_research(
+                prompt="question",
+                schema={"type": "object"},
+                llm_model="fixture-model",
+            )
+
+        searxng = MagicMock()
+        searxng.close = AsyncMock()
+        scraper = MagicMock()
+        scraper.close = AsyncMock()
+        llm = MagicMock()
+        llm.close = AsyncMock()
+        llm.generate = AsyncMock(
+            side_effect=ProviderOutputError(detail="LLM synthesis timed out")
+        )
+        plan = {
+            "focused_queries": ["question"],
+            "research_strategy": "focused",
+            "reasoning": "fixture",
+        }
+        discovered = {
+            "context": "source context",
+            "source_details": [
+                {"url": "https://example.com", "source": "fixture", "char_count": 14}
+            ],
+            "search_results": [{"url": "https://example.com"}],
+        }
+        captured_fail: dict = {}
+
+        class StoreSpy:
+            def fail_job(self, job_id: str, error_message: str) -> None:
+                captured_fail["reason"] = error_message
+
+        with (
+            patch("agent.research.loop.SearXNGClient", return_value=searxng),
+            patch("agent.research.loop.ScraperClient", return_value=scraper),
+            patch("agent.research.loop.LLMClient", return_value=llm),
+            patch(
+                "agent.research.loop._generate_research_plan",
+                new=AsyncMock(return_value=plan),
+            ),
+            patch(
+                "agent.research.loop._run_research_discover_and_scrape",
+                new=AsyncMock(return_value=discovered),
+            ),
+            patch(
+                # The wrapper calls its own module-level import, so the
+                # interception point is agent.worker.deliver_webhook.
+                "agent.worker.deliver_webhook",
+                new=AsyncMock(return_value=None),
+            ) as webhook_mock,
+        ):
+            await asyncio.wait_for(
+                _run_job_with_observability(
+                    "job-fixture",
+                    "agent",
+                    StoreSpy(),  # type: ignore[arg-type]
+                    None,  # no webhook config → deliver_webhook no-ops anyway
+                    observed_work,
+                ),
+                timeout=10,
+            )
+
+        assert captured_fail.get("reason"), "job must be marked failed"
+        assert "timed out" in captured_fail["reason"]
+        # No webhook configured: the wrapper still routes the failure event
+        # through deliver_webhook, but with webhook_config=None, which makes
+        # delivery a no-op (no HTTP POST is ever attempted).
+        webhook_mock.assert_called_once()
+        call = webhook_mock.call_args
+        assert call.args[0] is None  # webhook_config
+        assert call.args[1] == "failed"
+        assert call.args[2] == "job-fixture"
+        assert call.args[3] == {"error": "LLM synthesis timed out"}
