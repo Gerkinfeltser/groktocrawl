@@ -30,6 +30,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _resolve_effective_max_pages(max_pages: int, limit: int | None) -> int:
+    """Resolve ``limit`` against ``max_pages`` into one engine cap.
+
+    Firecrawl-parity semantics: ``limit`` caps the number of pages a
+    crawl processes, exactly like ``max_pages``; when both are set the
+    stricter (smaller positive) bound wins. ``max_pages=0`` means
+    unlimited, so a plain ``min()`` would let an unset ``max_pages``
+    silently swallow a set ``limit`` — the accepted-but-ignored bug
+    found during mission validation of #587/#588/#589.
+
+    Returns 0 (= unlimited) only when neither parameter bounds the
+    crawl.
+    """
+    candidates = [c for c in (max_pages, limit) if c is not None and c > 0]
+    return min(candidates) if candidates else 0
+
+
 @router.post("/v2/crawl", response_model=CrawlCreateResponse)
 async def create_crawl(
     request: Request, body: CrawlRequest, response: Response
@@ -110,10 +127,42 @@ async def create_crawl(
     store: JobStore = request.app.state.job_store
     job_id = store.create_job(kind="crawl", payload=body.model_dump())
 
-    # Resolve limit vs max_pages conflict (stricter wins, per VAL-CRAWL-089)
-    effective_max_pages = body.max_pages
-    if body.limit is not None:
-        effective_max_pages = min(body.max_pages, body.limit)
+    # Resolve limit vs max_pages conflict (stricter wins, per VAL-CRAWL-089).
+    # max_pages=0 means unlimited, so limit must feed the resolver directly
+    # — a plain min(max_pages, limit) would collapse to 0 and silently
+    # ignore the requested page cap.
+    effective_max_pages = _resolve_effective_max_pages(body.max_pages, body.limit)
+
+    # ── NL→params: apply LLM-derived page cap ────────────────────
+    # derive_crawl_params() returns ``max_pages`` (the NL→params schema's
+    # name for the same Firecrawl ``limit`` knob). The merge above only
+    # covers include/exclude paths and max_depth, so without this the
+    # prompt-derived cap was silently dropped.
+    if body.prompt:
+        from ..nl_params import derive_crawl_params as _derive_for_limit
+
+        # Reuse the already-computed explicit set; only honor a derived
+        # cap when the caller did not set one explicitly.
+        if "limit" not in explicitly_set and "max_pages" not in explicitly_set:
+            derived = await _derive_for_limit(
+                prompt=body.prompt,
+                llm_base_url=request.app.state.llm_base_url,
+                llm_api_key=request.app.state.llm_api_key,
+                llm_model=request.app.state.llm_model,
+            )
+            if "error" not in derived:
+                derived_cap = derived.get("max_pages")
+                if (
+                    isinstance(derived_cap, int)
+                    and derived_cap >= 1
+                    and (effective_max_pages == 0 or derived_cap < effective_max_pages)
+                ):
+                    logger.info(
+                        "NL→params derived max_pages=%d applied to crawl %s",
+                        derived_cap,
+                        job_id,
+                    )
+                    effective_max_pages = derived_cap
 
     # ── Streaming path: run inline, return SSE ────────────
     if body.stream:

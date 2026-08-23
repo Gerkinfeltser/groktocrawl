@@ -240,6 +240,7 @@ async def _process_agent_async(
     research_memory: Any = None,
     search_type: str = "deep",
     max_searches_per_request: int = 5,
+    max_credits: int | None = None,
     fingerprint: str | None = None,
     task_tracker: Any = None,
 ) -> None:
@@ -472,6 +473,7 @@ async def _process_agent_async(
             citation_style=cs,
             search_type=search_type,
             max_searches_per_request=max_searches_per_request,
+            max_credits=max_credits,
         )
 
         job_meta = store.get_job(job_id)
