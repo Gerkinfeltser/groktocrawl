@@ -20,7 +20,12 @@ from .barrier import (
     _is_bot_challenge,  # noqa: F401
     _is_substack_redirect,  # noqa: F401
 )
-from .extract import assess_quality, is_low_yield_text
+from .extract import (
+    MIN_LOW_YIELD_SOURCE_CHARS,  # noqa: F401  (re-exported; see extract.py)
+    VOLUME_YIELD_RATIO_FLOOR,
+    assess_quality,
+    is_low_yield_text,
+)
 from .metadata import extract_all_metadata
 from .settings import load_settings
 
@@ -28,12 +33,6 @@ logger = logging.getLogger(__name__)
 
 _settings = load_settings()
 QA_MIN_QUALITY_THRESHOLD = _settings.qa_min_quality_threshold
-
-# ── Low-yield recovery thresholds (#587) ────────────────────────
-# Re-exported from extract.is_low_yield_text's constants; see that
-# function for the calibration rationale.
-MIN_LOW_YIELD_SOURCE_CHARS = 10000
-VOLUME_YIELD_RATIO_FLOOR = 0.02
 
 # ── Embedded content detection ─────────────────────────────────
 # Extensions and domain patterns that suggest an iframe/embed points
@@ -195,6 +194,9 @@ def _unwrap_anchor_wrapped_cards(soup) -> None:
             continue  # inline link — keep it
         href = anchor.get("href")
         # Preserve the href as a markdown-style link on the title text.
+        # ] ( ) are backslash-escaped in both parts so titles like
+        # "Vector [core] (2024)" and parens-bearing hrefs still render as
+        # valid links instead of terminating the link syntax early.
         if href:
             first_block = blocks[0]
             target = first_block.find(["h1", "h2", "h3", "h4", "h5", "h6"]) or (
@@ -202,8 +204,10 @@ def _unwrap_anchor_wrapped_cards(soup) -> None:
             )
             if target is None:
                 target = first_block
+            link_text = re.sub(r"([\[\]()])", r"\\\1", target.get_text(strip=True))
+            link_href = re.sub(r"([()])", r"\\\1", str(href))
             link = soup.new_tag("span")
-            link.string = f"[{target.get_text(strip=True)}]({href})"
+            link.string = f"[{link_text}]({link_href})"
             target.clear()
             target.append(link)
         anchor.unwrap()
@@ -340,8 +344,10 @@ def _add_quality(result: dict, html: str = "", title: str = "") -> dict:
     """
     markdown = result.get("markdown", "")
     url = result.get("url", "")
+    # Tiers store ``source_html_size`` natively as int; fall back to the
+    # caller-provided raw HTML when the tier did not carry a size.
     if not html and result.get("source_html_size"):
-        html_size = int(result["source_html_size"])
+        html_size = result["source_html_size"]
     else:
         html_size = len(html)
     quality = assess_quality(

@@ -17,7 +17,11 @@ from >10KB of HTML). These tests pin the fix:
 
 The deterministic fixture under ``tests/fixtures/html/`` is modeled on a
 saved snapshot of the live reproduction URL (same topology: intro container
-plus sibling anchor-wrapped card grid, 25 cards, >10KB HTML).
+plus sibling anchor-wrapped card grid, 25 cards, >10KB HTML). The raw
+snapshot itself is committed alongside it as ``hardware-page-live.html``
+(captured 2026-08-22, sole reference used by the milestone-3 validator) so
+mechanical drift between the modeled fixture and the real page can be
+checked without re-fetching.
 """
 
 from __future__ import annotations
@@ -31,12 +35,9 @@ SCRAPER_SVC = Path(__file__).resolve().parents[2] / "scraper-svc"
 if str(SCRAPER_SVC) not in sys.path:
     sys.path.insert(0, str(SCRAPER_SVC))
 
-FIXTURE = (
-    Path(__file__).resolve().parents[1]
-    / "fixtures"
-    / "html"
-    / "card_grid_anchor_wrapped.html"
-)
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "html"
+FIXTURE = FIXTURES / "card_grid_anchor_wrapped.html"
+LIVE_SNAPSHOT = FIXTURES / "hardware-page-live.html"
 
 # The 25 card titles/hrefs encoded in the deterministic fixture.
 CARD_HREFS = [
@@ -330,18 +331,89 @@ def test_add_quality_no_warning_for_recovered_result(card_grid_html):
     assert not enriched.get("warning")
 
 
-def test_tier2_fallback_carries_source_html_size():
-    """Tier 2 HTML-fallback results expose their source size for the check."""
+@pytest.mark.asyncio
+async def test_tier2_fallback_carries_int_source_html_size():
+    """Tier 2 HTML-fallback results expose their source size as a native int.
+
+    The quality-assessment volume gate consumes ``source_html_size``
+    arithmetically, so the tier must store the byte count as ``int`` (not a
+    string needing a compensating cast downstream).
+    """
     from scraper import fetch_tiers
 
-    source = inspect_getsource(fetch_tiers.fetch_via_content_negotiation)
-    assert "source_html_size" in source
+    html = (
+        "<html><head><title>Tier 2 Probe</title></head><body>"
+        "<p>Static HTML fallback body long enough to exceed the hundred "
+        "character minimum gate for the content-negotiation conversion.</p>"
+        "</body></html>"
+    )
+
+    class _Resp:
+        status_code = 200
+        text = html
+        content = html.encode()
+
+        headers = {"content-type": "text/html; charset=utf-8"}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __exit__(self, *exc):
+            return False
+
+        async def get(self, *args, **kwargs):
+            return _Resp()
+
+    result = await fetch_tiers.fetch_via_content_negotiation(
+        "https://example.test/page", _Client()
+    )
+    assert result is not None
+    assert result["source"] == "content-negotiation"
+    assert isinstance(result["source_html_size"], int), (
+        f"expected int source_html_size, got {type(result['source_html_size'])}"
+    )
+    assert result["source_html_size"] == len(html)
 
 
-def inspect_getsource(func):
+def test_add_quality_consumes_source_html_size_natively():
+    """_add_quality must read ``source_html_size`` as-is (no int() re-cast).
+
+    With tiers storing the size natively as int, a compensating ``int()``
+    cast in the consumer would be dead weight masking contract drift.
+    """
     import inspect
 
-    return inspect.getsource(func)
+    from scraper import fetch_quality
+
+    source = inspect.getsource(fetch_quality._add_quality)
+    assert "int(" not in source, (
+        "_add_quality should consume source_html_size natively instead of "
+        "re-casting with int()"
+    )
+
+
+# ── Hardening: yield-floor constants re-exported, not re-declared ──
+
+
+def test_yield_floor_constants_reexported_from_extract():
+    """fetch_quality must re-export extract's authoritative constants.
+
+    Re-declaring the literals here lets the warning-message floor silently
+    diverge from the predicate that decides when warnings fire.
+    """
+    import scraper.extract as extract_mod
+    from scraper import fetch_quality
+
+    assert fetch_quality.MIN_LOW_YIELD_SOURCE_CHARS is (
+        extract_mod.MIN_LOW_YIELD_SOURCE_CHARS
+    )
+    assert fetch_quality.VOLUME_YIELD_RATIO_FLOOR is (
+        extract_mod.VOLUME_YIELD_RATIO_FLOOR
+    )
 
 
 # ── VAL-YIELD-008: shared consumers aligned ──────────────────────
@@ -455,6 +527,263 @@ def test_recovery_keeps_complete_short_article_fragment():
     # ...without the surrounding chrome a full-page dump would drag in.
     assert "Sidebar Navigation Text About Widgets" not in markdown
     assert "Div Footer Boilerplate Line" not in markdown
+
+
+# ── Hardening: 2x meaningful-gain gate boundary behavior ─────────
+#
+# html_to_markdown keeps the low-yield recovery only when
+# ``len(recovered) >= len(fragment) * 2``, where ``fragment`` is the
+# readability output that tripped the low-yield check (~766 chars on this
+# fixture — NOT the final recovered output). These tests drive that exact
+# comparison by monkeypatching ``_full_page_markdown`` to controlled sizes
+# and deriving the true fragment length by disabling the low-yield branch,
+# so the boundary is pinned deterministically.
+
+
+@pytest.fixture()
+def recovery_gate(monkeypatch):
+    """Instrument the 2x gain gate with controllable recovery sizes.
+
+    Returns a harness with:
+    - ``fragment_length()``: length of the readability fragment that the
+      gate compares against (low-yield branch disabled for the probe).
+    - ``set_stub_size(n)``: next ``run()`` sees ``_full_page_markdown``
+      return an ``n``-char string (0 = empty recovery).
+    - ``run()``: executes ``html_to_markdown`` on the fixture.
+    """
+    from types import SimpleNamespace
+
+    from scraper import fetch_quality
+
+    state: dict = {"size": None}
+    real_full_page = fetch_quality._full_page_markdown
+    real_is_low_yield = fetch_quality._is_low_yield
+
+    def _stub_full_page(html_arg):
+        if state["size"] is not None:
+            return "r" * state["size"]
+        return real_full_page(html_arg)
+
+    def _no_recovery(markdown, source_size):
+        return False
+
+    monkeypatch.setattr(fetch_quality, "_full_page_markdown", _stub_full_page)
+
+    def fragment_length():
+        # Disable the low-yield branch so html_to_markdown returns exactly
+        # the readability fragment the gate compares against.
+        monkeypatch.setattr(fetch_quality, "_is_low_yield", _no_recovery)
+        length = len(fetch_quality.html_to_markdown(FIXTURE.read_text()))
+        monkeypatch.setattr(fetch_quality, "_is_low_yield", real_is_low_yield)
+        return length
+
+    def run():
+        return fetch_quality.html_to_markdown(FIXTURE.read_text())
+
+    def set_stub_size(n):
+        state["size"] = n
+
+    return SimpleNamespace(
+        fragment_length=fragment_length, run=run, set_stub_size=set_stub_size
+    )
+
+
+def test_gain_gate_exact_boundary_swaps_to_recovery(recovery_gate):
+    """recovered == 2x fragment exactly -> recovery IS kept (>= comparison)."""
+    g = recovery_gate
+    fragment_len = g.fragment_length()
+    assert fragment_len > 0
+
+    g.set_stub_size(2 * fragment_len)
+    swapped = g.run()
+    assert len(swapped) == 2 * fragment_len
+
+
+def test_gain_gate_below_2x_keeps_readability_fragment(recovery_gate):
+    """recovered < 2x fragment -> readability fragment kept verbatim."""
+    g = recovery_gate
+    fragment_len = g.fragment_length()
+    assert fragment_len > 0
+
+    g.set_stub_size(2 * fragment_len - 1)  # one char short of the >= gate
+    kept = g.run()
+    assert len(kept) == fragment_len, (
+        f"expected the {fragment_len}-char fragment to be kept, got "
+        f"{len(kept)} chars (sub-threshold recovery was swapped in)"
+    )
+
+
+def test_gain_gate_above_2x_swaps_to_recovery(recovery_gate):
+    """recovered clearly above 2x fragment -> recovery swapped in (#587 case)."""
+    g = recovery_gate
+    fragment_len = g.fragment_length()
+
+    g.set_stub_size(4 * fragment_len)
+    swapped = g.run()
+    assert len(swapped) == 4 * fragment_len
+
+
+def test_gain_gate_empty_recovery_keeps_fragment(recovery_gate):
+    """An empty recovery never replaces the fragment (guards SPA shells)."""
+    g = recovery_gate
+    fragment_len = g.fragment_length()
+
+    g.set_stub_size(0)
+    kept = g.run()
+    assert len(kept) == fragment_len
+
+
+# ── Hardening: markdown-link construction escapes specials ────────
+#
+# Titles/hrefs containing ] ( ) would otherwise render broken markdown
+# links like [Vector [core] (2024)](/wiki/C++). The unwrap helper escapes
+# those characters; markdownify preserves the backslash escapes verbatim.
+# Text content itself stays preserved — this is purely link-rendering
+# hygiene.
+
+SPECIALS_HTML = (
+    "<html><head><title>Specials</title></head><body>"
+    "<a href='/wiki/C++'><h3>Vector [core] (2024)</h3>"
+    "<p>Bracketed card body copy.</p></a>"
+    "<a href='/w/a(b)'><h3>Paren Href Card</h3>"
+    "<p>Another card body.</p></a>"
+    "</body></html>"
+)
+
+
+def test_unwrap_escapes_specials_in_title_link_text():
+    """] ( ) in titles are backslash-escaped inside the [title](href) span."""
+    from bs4 import BeautifulSoup
+    from scraper.fetch_quality import _unwrap_anchor_wrapped_cards
+
+    soup = BeautifulSoup(SPECIALS_HTML, "html.parser")
+    _unwrap_anchor_wrapped_cards(soup)
+    span = soup.find("span")
+    assert span is not None
+    text = span.get_text()
+    assert text == "[Vector \\[core\\] \\(2024\\)](/wiki/C++)", text
+
+
+def test_unwrap_escapes_parens_in_href():
+    """Unescaped parens in an href would terminate the link target early."""
+    from bs4 import BeautifulSoup
+    from scraper.fetch_quality import _unwrap_anchor_wrapped_cards
+
+    soup = BeautifulSoup(SPECIALS_HTML, "html.parser")
+    _unwrap_anchor_wrapped_cards(soup)
+    spans = soup.find_all("span")
+    paren_href_span = next(s for s in spans if "/w/a" in s.get_text())
+    assert "\\(b\\)" in paren_href_span.get_text()
+
+
+def test_unwrap_leaves_plain_titles_and_hrefs_untouched():
+    """No escape noise for titles/hrefs without special characters."""
+    from bs4 import BeautifulSoup
+    from scraper.fetch_quality import _unwrap_anchor_wrapped_cards
+
+    plain_html = (
+        "<html><body><a href='/cards/plain'><h3>Plain Card</h3>"
+        "<p>Body copy.</p></a></body></html>"
+    )
+    soup = BeautifulSoup(plain_html, "html.parser")
+    _unwrap_anchor_wrapped_cards(soup)
+    text = soup.find("span").get_text()
+    assert text == "[Plain Card](/cards/plain)"
+    assert "\\" not in text
+
+
+def test_unwrap_preserves_title_text_with_specials_end_to_end():
+    """Escaped link syntax does not lose any visible title characters."""
+    from bs4 import BeautifulSoup
+    from scraper.fetch_quality import _unwrap_anchor_wrapped_cards
+
+    soup = BeautifulSoup(SPECIALS_HTML, "html.parser")
+    _unwrap_anchor_wrapped_cards(soup)
+    text = soup.find("span").get_text()
+    # Strip only the link-syntax scaffolding; the title characters remain.
+    inner = text[len("[") : text.rindex("](")]
+    assert inner.replace("\\", "") == "Vector [core] (2024)"
+
+
+# ── Hardening: live-snapshot drift reference ─────────────────────
+
+
+def test_live_snapshot_fixture_present_and_real_page_shaped():
+    """The raw live-page snapshot is committed for drift comparison.
+
+    It must stay byte-stable once committed (it is the validator's sole
+    offline reference) and keep the real page's defining properties.
+    """
+    assert LIVE_SNAPSHOT.exists(), (
+        "hardware-page-live.html snapshot missing; it is the committed "
+        "drift-comparison reference for the deterministic fixture"
+    )
+    html = LIVE_SNAPSHOT.read_text()
+    # Captured 2026-08-22 from open-neuromorphic.org hardware directory.
+    assert len(html) > 50000
+    assert "open-neuromorphic" in html
+    # Same card-grid topology as the deterministic fixture.
+    assert "hardware-card-wide-link" in html
+    for token in ("Loihi", "Akida", "SpiNNaker"):
+        assert token in html, f"contract token {token} missing from live snapshot"
+
+
+def test_live_snapshot_drift_vs_deterministic_fixture():
+    """Mechanical drift comparison: live snapshot vs modeled fixture.
+
+    The deterministic fixture intentionally models the live page's
+    topology. This test pins the shared structural invariants so silent
+    divergence between the two references surfaces as a test failure.
+    """
+    from bs4 import BeautifulSoup
+
+    live = BeautifulSoup(LIVE_SNAPSHOT.read_text(), "html.parser")
+    modeled = BeautifulSoup(FIXTURE.read_text(), "html.parser")
+
+    def topology(soup):
+        cards = soup.select("a.hardware-card-wide-link")
+        prose = soup.select_one("div.prose")
+        top_list = cards[0].find_parent("ul") if cards else None
+        while top_list is not None and top_list.parent.name in ("li", "ul"):
+            top_list = top_list.parent
+        wrapped = sum(1 for a in cards if a.find("h3") is not None)
+        return {
+            "cards": len(cards),
+            "wrapped_h3": wrapped,
+            "has_prose": prose is not None,
+            "grid_is_sibling_of_prose": (
+                prose is not None
+                and top_list is not None
+                and prose.parent is top_list.parent
+            ),
+        }
+
+    live_shape = topology(live)
+    modeled_shape = topology(modeled)
+    # Both pages carry the anchor-wrapped sibling-grid trap.
+    assert live_shape["wrapped_h3"] == live_shape["cards"] > 0
+    assert modeled_shape["wrapped_h3"] == modeled_shape["cards"] == 25
+    assert live_shape["has_prose"] and modeled_shape["has_prose"]
+    assert live_shape["grid_is_sibling_of_prose"]
+    assert modeled_shape["grid_is_sibling_of_prose"]
+
+    # Card-level overlap: every fixture card models a real live-page card.
+    live_text = LIVE_SNAPSHOT.read_text()
+    missing_from_live = [href for href, _ in CARD_HREFS if href not in live_text]
+    # The fixture's synthetic Sakura entry is the only invented card.
+    assert all("sakura" in href for href in missing_from_live), (
+        f"unexpected fixture/live drift: {missing_from_live}"
+    )
+
+    # Recovery parity: the extractor handles both references the same way.
+    from scraper.fetch_quality import html_to_markdown
+
+    live_md = html_to_markdown(LIVE_SNAPSHOT.read_text())
+    modeled_md = html_to_markdown(FIXTURE.read_text())
+    assert len(live_md) >= 10240 and len(modeled_md) >= 10240
+    for token in ("Loihi", "Akida", "SpiNNaker"):
+        assert token in live_md, f"{token} lost recovering the live snapshot"
+        assert token in modeled_md, f"{token} lost recovering the fixture"
 
 
 @pytest.mark.asyncio

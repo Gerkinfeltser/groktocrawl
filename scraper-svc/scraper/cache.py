@@ -156,6 +156,25 @@ async def _get_cache_client():
         return None
 
 
+def _migrate_legacy_cached_entry(cached: dict) -> None:
+    """Normalize fields of cached entries written by older scraper versions.
+
+    ``source_html_size`` is stored natively as int since the #587 yield
+    hardening; entries persisted before that upgrade carry the legacy
+    string form, which would break the quality-assessment volume gate
+    (TypeError) on every cache hit. Normalizing here — the single choke
+    point all cache reads flow through — keeps the migration invisible to
+    consumers. Idempotent: native ints pass through untouched.
+    """
+    size = cached.get("source_html_size")
+    if isinstance(size, str):
+        try:
+            cached["source_html_size"] = int(size)
+        except ValueError:
+            logger.warning("Dropping unparseable cached source_html_size %r", size)
+            cached.pop("source_html_size", None)
+
+
 async def _check_cache(url: str) -> dict | None:
     """Check Valkey for a cached scrape result with freshness revalidation.
 
@@ -183,6 +202,7 @@ async def _check_cache(url: str) -> dict | None:
                 return None
 
             cached = json.loads(cached_raw)
+            _migrate_legacy_cached_entry(cached)
             outcome = "hit"
             logger.info("Cache hit for %s (key=%s)", url, key)
 

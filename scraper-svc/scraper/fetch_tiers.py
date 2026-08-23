@@ -464,7 +464,7 @@ async def fetch_via_content_negotiation(
             # Standard markdown detection
             if _looks_like_markdown(resp.text):
                 logger.info("Tier 2 hit: content negotiation for %s", url)
-                result = {
+                result: dict = {
                     "markdown": resp.text,
                     "source": "content-negotiation",
                     "url": url,
@@ -493,7 +493,8 @@ async def fetch_via_content_negotiation(
                         "url": url,
                         # Volume gate input: lets the quality assessment flag
                         # anomalously thin output relative to the source (#587).
-                        "source_html_size": str(len(resp.text)),
+                        # Stored as a native int — consumers read it directly.
+                        "source_html_size": len(resp.text),
                     }
                     # Pass through ETag/Last-Modified for intelligent caching
                     etag = resp.headers.get("etag")
