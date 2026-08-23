@@ -353,8 +353,12 @@ def _add_quality(result: dict, html: str = "", title: str = "") -> dict:
     quality = assess_quality(
         markdown, html=html, url=url, title=title, html_size=html_size
     )
+    # Preserve a pre-existing warning (e.g. a cached entry's barrier flag)
+    # unless the fresh assessment produces its own (#586).
+    prior_warning = result.get("warning")
     result["quality"] = quality
     volume_status = quality.get("checks", {}).get("volume")
+    block_status = quality.get("checks", {}).get("block_detected")
     if volume_status == "fail" and not result.get("warning"):
         ratio = (len(markdown) / html_size) if html_size else 0.0
         result["warning"] = (
@@ -367,6 +371,22 @@ def _add_quality(result: dict, html: str = "", title: str = "") -> dict:
             url or "<unknown>",
             len(markdown),
             html_size,
+        )
+    elif (
+        block_status in ("warn", "fail")
+        and not prior_warning
+        and not result.get("warning")
+    ):
+        # Challenge/interstitial text survived extraction (ADR-0015): surface
+        # an explicit warning so consumers refuse it — cache hits included.
+        result["warning"] = (
+            f"Block-page content detected (block_detected={block_status}); "
+            "the page may be a challenge or error interstitial."
+        )
+        logger.warning(
+            "Block-page content detected for %s (block_detected=%s)",
+            url or "<unknown>",
+            block_status,
         )
     return result
 

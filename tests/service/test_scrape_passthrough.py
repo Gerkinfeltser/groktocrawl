@@ -95,7 +95,12 @@ def test_scrape_data_quality_default_none():
 
 
 def test_v2_scrape_passes_through_warning_and_quality():
-    """/v2/scrape mirrors scraper-svc warning + quality on low-yield results."""
+    """/v2/scrape mirrors scraper-svc warning + quality on low-yield results.
+
+    The #586 barrier refusal only fires for challenge/interstitial flags
+    (block_detected warn/fail); the #587 low-yield warning keeps its
+    pass-through contract — visible on the surface, still a success.
+    """
     client = TestClient(_build_app(SCRAPER_PAYLOAD_LOW_YIELD))
     resp = client.post(
         "/v2/scrape", json={"url": "https://example.test/hw", "formats": ["markdown"]}
