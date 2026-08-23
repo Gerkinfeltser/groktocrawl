@@ -117,9 +117,6 @@ async def _run_research_events(
             }
             yield {"type": "status", "state": "searching"}
 
-            if max_credits is not None and max_credits <= 0:
-                break
-
             if pass_count == 1:
                 # ── Pass 1: normal discovery ──────────────────────
                 if strategy == "deep" and len(queries) > 1:
@@ -285,8 +282,8 @@ async def _run_research_events(
 
             # ── Gap detection after pass 1 ─────────────────────────
             if pass_count == 1:
-                budget_spent = max_credits is not None and (
-                    max_credits <= 0 or len(all_source_details) >= max_credits
+                budget_spent = (
+                    max_credits is not None and len(all_source_details) >= max_credits
                 )
                 gap_topics = (
                     []

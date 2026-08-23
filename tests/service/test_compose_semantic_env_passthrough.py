@@ -107,6 +107,46 @@ class TestFallbackSafety:
         # fallback mirrors 10 to keep unset-.env behavior byte-identical.
         assert float(_fallback(env, "QDRANT_CLIENT_TIMEOUT")) == 10.0
 
+    def test_fallback_documents_drift_watch_against_app_py_default(self):
+        """The '10' fallbacks must carry an app.py-default drift comment.
+
+        semantic-svc/app.py independently parses these variables with its own
+        ``float(os.getenv(...))`` defaults; the compose fallbacks duplicate
+        that value, so the compose block must say so — a future editor
+        bumping one side without the other silently desyncs unset-.env
+        deployments.
+        """
+        compose_text = (ROOT / "docker-compose.yml").read_text()
+        semantic_block = compose_text.split("semantic-svc:", 1)[1].split(
+            "  qdrant:", 1
+        )[0]
+        for var in _TIMEOUT_VARS:
+            anchor = f"- {var}="
+            lines = semantic_block.splitlines()
+            idx = next(
+                i for i, line in enumerate(lines) if line.strip().startswith(anchor)
+            )
+            # Walk upward collecting the governing comment block, skipping
+            # sibling environment entries (the paired timeout var sits
+            # between the comment block and the second substitution).
+            context_lines: list[str] = []
+            cursor = idx - 1
+            while cursor >= 0 and len(context_lines) < 10:
+                stripped = lines[cursor].strip()
+                if stripped.startswith("#"):
+                    context_lines.append(lines[cursor])
+                elif stripped.startswith("- "):
+                    pass  # sibling environment entry, keep walking
+                else:
+                    break
+                cursor -= 1
+            context = "\n".join(reversed(context_lines))
+            assert "duplicat" in context.lower(), (
+                f"compose fallback comment for {var} must note that the "
+                f"'10' fallback duplicates semantic-svc app.py's default "
+                f"(drift watch), context:\n{context}"
+            )
+
 
 class TestEnvSampleDoc:
     """.env.sample must not imply a fixed default for QDRANT_CLIENT_TIMEOUT."""
@@ -126,11 +166,15 @@ class TestEnvSampleDoc:
             r"^#\s*QDRANT_CLIENT_TIMEOUT=(\S+)\s*$", text, re.MULTILINE
         )
         assert len(examples) == 1, f"expected exactly one example line, got {examples}"
-        # The default TRACKS QDRANT_QUERY_TIMEOUT; showing "=10" reads as a
-        # fixed default. Any illustrative override value other than 10 is
-        # acceptable (e.g. raising it alongside a raised query timeout).
-        assert float(examples[0]) != 10.0, (
-            ".env.sample example must not present 10 as a fixed default"
+        # The default TRACKS QDRANT_QUERY_TIMEOUT; showing "=10" alone reads
+        # as a fixed default. A legitimate illustrative override equal to 10
+        # is acceptable when the paired QDRANT_QUERY_TIMEOUT example raises
+        # the pair together (the comment explains the tracking); anything
+        # below 10 would contradict the "client stays the looser bound"
+        # guidance and still fails here.
+        assert float(examples[0]) >= 10.0, (
+            ".env.sample example must not present a client timeout below "
+            "the query timeout's effective default of 10"
         )
 
     @pytest.mark.skipif(

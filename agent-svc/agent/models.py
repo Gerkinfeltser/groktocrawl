@@ -479,8 +479,10 @@ class AgentRequest(BaseModel):
         default=None,
         ge=1,
         description=(
-            "Maximum credits (successfully scraped source pages) the "
-            "research job may consume; discovery stops once reached."
+            "Attempt-bounded research budget: discovery stops admitting "
+            "scrape attempts once this many candidates have been scraped "
+            "(candidates are truncated before scraping, so failed scrapes "
+            "still consume budget — credits are not success-guaranteed)."
         ),
     )
     webhook: dict[str, Any] | None = None
@@ -591,7 +593,9 @@ class CrawlRequest(BaseModel):
         ge=1,
         description=(
             "Maximum number of pages to crawl (Firecrawl v2 parity). "
-            "Alias of max_pages; when both are set the stricter cap wins."
+            "Like max_pages but ge=1: unlike max_pages, 0 is rejected "
+            "rather than meaning unlimited; when both are set the "
+            "stricter cap wins."
         ),
     )
     ignore_sitemap: bool = False

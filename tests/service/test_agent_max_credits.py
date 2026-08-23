@@ -266,27 +266,79 @@ class TestAgentWorkerMaxCreditsWiring:
             patch.object(
                 mock_research_memory, "start_refresh", side_effect=_start_refresh
             ),
-            patch("agent.research.memory.refresh_research_memory") as refresh_mem,
+            patch(
+                "agent.worker.refresh_research_memory",
+                new=AsyncMock(
+                    return_value={
+                        "result": "ok",
+                        "sources": [],
+                        "source_details": [],
+                    }
+                ),
+            ) as refresh_mem,
         ):
-            from agent.research import memory as memory_mod
+            await _process_agent_async(
+                job_id="job-swr",
+                prompt="p",
+                urls=None,
+                schema_=None,
+                llm_base_url="http://llm:8000",
+                llm_api_key="k",
+                llm_model="m",
+                searxng_url="http://searxng",
+                scraper_url="http://scraper",
+                stale_while_revalidate=True,
+                research_memory=mock_research_memory,
+                max_credits=6,
+            )
 
-            with patch.object(memory_mod, "refresh_research_memory", refresh_mem):
-                await _process_agent_async(
-                    job_id="job-swr",
-                    prompt="p",
-                    urls=None,
-                    schema_=None,
-                    llm_base_url="http://llm:8000",
-                    llm_api_key="k",
-                    llm_model="m",
-                    searxng_url="http://searxng",
-                    scraper_url="http://scraper",
-                    stale_while_revalidate=True,
-                    research_memory=mock_research_memory,
-                    max_credits=6,
-                )
+            assert "factory" in started_refresh
 
-        assert "factory" in started_refresh
+            # Invoke the captured factory INSIDE the patch context: the
+            # closure resolves refresh_research_memory at call time, so a
+            # late invocation must still observe the patched binding and
+            # thread max_credits into it — the request's budget must not
+            # be silently dropped to None (worker.py binds
+            # refresh_research_memory at module scope; that is the name
+            # the closure resolves).
+            await started_refresh["factory"]()
+
+        assert refresh_mem.await_count == 1
+        assert refresh_mem.await_args.kwargs["max_credits"] == 6
+
+
+class TestMaxCreditsGuardRemoval:
+    """loop.py must not defend against max_credits <= 0.
+
+    The request model enforces ``max_credits: ge=1`` (0/negative are 422s),
+    so the in-loop ``max_credits is not None and max_credits <= 0`` guards
+    are unreachable defensive branches that imply a reachable zero-budget
+    state. Their presence invites callers to rely on a contract the API
+    does not offer; removal keeps loop.py trusting its validated inputs.
+    """
+
+    def test_run_research_events_has_no_zero_credit_guard(self):
+        import inspect
+
+        from agent.research import loop
+
+        source = inspect.getsource(loop._run_research_events)
+        assert "max_credits <= 0" not in source, (
+            "_run_research_events still carries an unreachable max_credits<=0 "
+            "guard — the API model enforces ge=1, so drop the dead branch"
+        )
+
+    @pytest.mark.asyncio
+    async def test_budget_spent_check_uses_counted_sources_only(self):
+        """budget_spent compares consumed sources to the budget directly."""
+        import inspect
+
+        from agent.research import loop
+
+        source = inspect.getsource(loop._run_research_events)
+        assert "len(all_source_details) >= max_credits" in source, (
+            f"budget_spent must keep the sources-consumed comparison:\n{source}"
+        )
 
 
 class TestRunResearchBudgetExhaustion:
