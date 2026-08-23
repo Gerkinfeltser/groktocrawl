@@ -171,6 +171,7 @@ The configuration inventory follows `.env.sample`; unlisted implementation-only 
 - NEAR_DUP_MODE
 - NEAR_DUP_THRESHOLD
 - QDRANT_CLIENT_TIMEOUT
+- QDRANT_QUERY_TIMEOUT
 - QDRANT_URL
 - PARSE_MAX_SIZE_MB
 - QA_MAX_BOILERPLATE_RATIO

@@ -194,6 +194,13 @@ services:
       - EMBED_MODEL_NAME=${EMBED_MODEL_NAME:-BAAI/bge-m3}
       - EMBED_DIM=${EMBED_DIM:-1024}
       - ACTIVE_EMBED_MODEL=${ACTIVE_EMBED_MODEL:-v_bge-m3}
+      # Qdrant timeout tuning must pass through from .env or operator
+      # overrides are silently ignored (#588 follow-up). app.py parses
+      # both vars with float() at import time, so the fallbacks must stay
+      # non-empty numeric values equal to today's effective defaults — an
+      # empty ${VAR:-} fallback would inject "" and crash-loop the service.
+      - QDRANT_QUERY_TIMEOUT=${QDRANT_QUERY_TIMEOUT:-10}
+      - QDRANT_CLIENT_TIMEOUT=${QDRANT_CLIENT_TIMEOUT:-10}
     volumes:
       - hf-cache:/root/.cache/huggingface
     depends_on:
