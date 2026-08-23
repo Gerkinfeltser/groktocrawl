@@ -27,6 +27,8 @@ The same stack pointed at a real LLM provider, an open-web search backend, and a
 
 **Config (in `.env`):** an OpenAI-compatible LLM provider (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`), `BRAVE_API_KEY` for web search, and `API_KEY` for API authentication. `llm-svc`, `test-site`, and `tier3-fixture` are fixture-only and must **not** be started in production; omit the `fixture` profile. The optional direct SlopSearX MCP companion (`slopsearx-mcp`) is opt-in via the `mcp` Compose profile and then requires a non-empty `SLOPSEARX_MCP_AUTH_TOKEN`.
 
+Timeouts are configurable: raise `LLM_CALL_TIMEOUT` (idle-timeout seconds, default 120 — e.g. set 300 for reasoning models), and tune `QDRANT_QUERY_TIMEOUT` / `QDRANT_CLIENT_TIMEOUT` if the semantic/Qdrant path needs different bounds.
+
 ```bash
 cp .env.sample .env   # set LLM_BASE_URL/LLM_API_KEY/LLM_MODEL, BRAVE_API_KEY, API_KEY
 docker compose up --build -d
@@ -59,6 +61,8 @@ curl -N -X POST http://localhost:8080/v2/crawl \
 #   data: {"type":"done","id":...,"status":"completed","pages":N,...}
 ```
 
+`limit` is honored as a page cap (must be ≥ 1); omit it for an unlimited crawl.
+
 **Expected success output:** the webhook fires a `crawl.started` event before scraping, a `crawl.page` event after each page, and a `crawl.completed` event at the end — each with a unique `webhookId` (omit an `events` filter to receive all of them). The SSE stream emits flat `page` events and a terminal `done` event.
 
 > **Background jobs are best-effort.** Async jobs (crawl, agent, extract, batch-scrape, llmstxt, plan execution) run in-process and are **not restart-safe**: a restart does not resume interrupted work, roll back partial artifacts, or replay undelivered webhooks. After any `agent-svc` restart, reconcile jobs stranded in `processing` — see [Job durability and recovery](docs/guides/deployment.md#job-durability-and-recovery), the [Interrupted Jobs runbook](docs/runbooks/interrupted-jobs.md), and [ADR-0047](docs/adr/0047-defer-restart-safe-execution.md).
@@ -67,8 +71,8 @@ curl -N -X POST http://localhost:8080/v2/crawl \
 
 | Area | Capabilities |
 |---|---|
-| Web data | Scrape, batch scrape, map, crawl, parse, browser sessions, and llms.txt generation |
-| Search and retrieval | SlopSearX search, rich/deep research modes, semantic index, and similarity search |
+| Web data | Scrape, batch scrape, map, crawl, parse, browser sessions, and llms.txt generation; the scraper recovers low-yield (card-style) page bodies and warns on partial extractions |
+| Search and retrieval | SlopSearX search, rich/deep research modes, semantic index, and similarity search; vector-search backend failures surface as errors rather than silent empty results |
 | Research | Grounded answers, streaming agent research, plans, sessions, citations, and reusable research memory |
 | Operations | Monitors, webhooks, health probes, Prometheus metrics, cache controls, and politeness controls |
 | Integrations | Portal UI, Model Context Protocol server, and site adapters for code, publishing, commerce, and security sources |
