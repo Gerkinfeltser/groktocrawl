@@ -46,10 +46,12 @@ async def scrape(request: Request, body: ScrapeRequest) -> ScrapeResponse:
                 markdown=scraper_data.get("markdown", ""),
                 metadata=scraper_data.get("metadata")
                 or {"source": scraper_data.get("source", "unknown")},
+                quality=scraper_data.get("quality"),
                 images=[ImageData(**img) for img in scraper_data.get("images", [])]
                 if scraper_data.get("images")
                 else None,
             ),
+            warning=result.get("warning"),
         )
     if result.get("error_code") == "CAPTCHA_UNRESOLVED":
         raise CaptchaError(

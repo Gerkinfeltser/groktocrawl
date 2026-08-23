@@ -20,7 +20,7 @@ from .barrier import (
     _is_bot_challenge,  # noqa: F401
     _is_substack_redirect,  # noqa: F401
 )
-from .extract import assess_quality
+from .extract import assess_quality, is_low_yield_text
 from .metadata import extract_all_metadata
 from .settings import load_settings
 
@@ -28,6 +28,12 @@ logger = logging.getLogger(__name__)
 
 _settings = load_settings()
 QA_MIN_QUALITY_THRESHOLD = _settings.qa_min_quality_threshold
+
+# ── Low-yield recovery thresholds (#587) ────────────────────────
+# Re-exported from extract.is_low_yield_text's constants; see that
+# function for the calibration rationale.
+MIN_LOW_YIELD_SOURCE_CHARS = 10000
+VOLUME_YIELD_RATIO_FLOOR = 0.02
 
 # ── Embedded content detection ─────────────────────────────────
 # Extensions and domain patterns that suggest an iframe/embed points
@@ -145,12 +151,90 @@ def _structural_text_extraction(html: str) -> str:
     return result[:10000]
 
 
+def _is_low_yield(markdown: str, html: str | None) -> bool:
+    """Detect anomalously low readable yield relative to the source size.
+
+    Thin wrapper over the shared ``extract.is_low_yield_text`` predicate so
+    recovery and quality assessment agree on what counts as thin output.
+    """
+    return bool(html) and is_low_yield_text(markdown, len(html or ""))
+
+
+_BLOCK_TAGS = {
+    "p",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "ul",
+    "ol",
+    "table",
+    "blockquote",
+    "pre",
+}
+
+
+def _unwrap_anchor_wrapped_cards(soup) -> None:
+    """Unwrap ``<a>`` elements that wrap block-level content in place.
+
+    Card-style pages wrap each card's ``<h3>``/``<p>`` inside its parent
+    anchor, which zeroes readability's link-density-weighted scores. The
+    wrapper is replaced by the block content itself and the href survives
+    as a markdown link attached to the first block's text (typically the
+    card title), so ``[Title](href)`` is preserved end-to-end. Inline-only
+    anchors (normal links inside paragraphs) are left untouched.
+    """
+    for anchor in list(soup.find_all("a")):
+        blocks = [c for c in anchor.find_all(_BLOCK_TAGS) if c is not None]
+        if not blocks:
+            continue  # inline link — keep it
+        href = anchor.get("href")
+        # Preserve the href as a markdown-style link on the title text.
+        if href:
+            first_block = blocks[0]
+            target = first_block.find(["h1", "h2", "h3", "h4", "h5", "h6"]) or (
+                first_block.find("p")
+            )
+            if target is None:
+                target = first_block
+            link = soup.new_tag("span")
+            link.string = f"[{target.get_text(strip=True)}]({href})"
+            target.clear()
+            target.append(link)
+        anchor.unwrap()
+
+
+def _full_page_markdown(html: str) -> str:
+    """Render an entire page to markdown with chrome stripped (uncapped).
+
+    Recovery path for low-yield readability results: unlike
+    ``_structural_text_extraction`` this keeps document structure and has
+    no output cap, so large card-directory bodies survive intact.
+    """
+    from bs4 import BeautifulSoup
+    from markdownify import markdownify as md
+
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "nav", "footer", "header"]):
+        tag.decompose()
+    _unwrap_anchor_wrapped_cards(soup)
+    markdown = md(str(soup), heading_style="ATX", strip=["script", "style"])
+    return re.sub(r"\n{3,}", "\n\n", markdown).strip()
+
+
 def html_to_markdown(html: str) -> str:
     """Convert HTML to clean markdown using readability + markdownify.
 
     Falls back to structural BeautifulSoup text extraction when
     readability produces little or no output (common for SPA-heavy
     sites where the non-JS HTML shell lacks article-like structure).
+
+    When readability succeeds but yields anomalously little text relative
+    to the source size (card grids whose every card lives under a parent
+    anchor score nothing and are silently dropped), recovers the full body
+    via an uncapped full-page conversion with chrome stripped (#587).
     """
     try:
         from bs4 import BeautifulSoup
@@ -180,6 +264,19 @@ def html_to_markdown(html: str) -> str:
         markdown = re.sub(r"\n{3,}", "\n\n", markdown)
         result = markdown.strip()
 
+        # Low-yield recovery: when readability selects only a small fragment
+        # of a large page (e.g. an intro container while a sibling card grid
+        # scores zero on link density), re-extract the whole page uncapped.
+        if _is_low_yield(result, html):
+            recovered = _full_page_markdown(html)
+            logger.info(
+                "Low-yield recovery: %d chars from %d-char source -> %d chars",
+                len(result),
+                len(html),
+                len(recovered),
+            )
+            return recovered
+
         # Structural fallback: when readability produces little or no output,
         # extract visible text nodes from the full HTML. This handles sites
         # where FlareSolverr returns real HTML but readability-lxml finds no
@@ -206,11 +303,36 @@ def _add_quality(result: dict, html: str = "", title: str = "") -> dict:
 
     Lightweight post-extraction quality check — runs after each successful tier.
     Quality score is non-blocking; consumers set their own tolerance.
+
+    When the tier result carries ``source_html_size`` (or the caller passes
+    raw HTML), the volume-comparison gate can detect anomalously thin output
+    relative to the source and surface it as an explicit ``warning`` so a
+    truncation is never presented to callers as an unqualified success (#587).
     """
     markdown = result.get("markdown", "")
     url = result.get("url", "")
-    quality = assess_quality(markdown, html=html, url=url, title=title)
+    if not html and result.get("source_html_size"):
+        html_size = int(result["source_html_size"])
+    else:
+        html_size = len(html)
+    quality = assess_quality(
+        markdown, html=html, url=url, title=title, html_size=html_size
+    )
     result["quality"] = quality
+    volume_status = quality.get("checks", {}).get("volume")
+    if volume_status == "fail" and not result.get("warning"):
+        ratio = (len(markdown) / html_size) if html_size else 0.0
+        result["warning"] = (
+            f"Low yield: extracted {len(markdown)} chars from a "
+            f"{html_size}-char HTML source (ratio {ratio:.4f}, floor "
+            f"{VOLUME_YIELD_RATIO_FLOOR}). The page body may be truncated."
+        )
+        logger.warning(
+            "Low-yield extraction for %s: %d chars from %d-char source",
+            url or "<unknown>",
+            len(markdown),
+            html_size,
+        )
     return result
 
 

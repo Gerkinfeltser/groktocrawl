@@ -12,8 +12,11 @@ logger = logging.getLogger(__name__)
 
 
 async def scrape_page(url: str, timeout: float = 15.0) -> str | None:
-    """Fetch a URL and extract readable content with readability-lxml.
+    """Fetch a URL and extract readable content via the shared pipeline.
 
+    Delegates to ``fetch_quality.html_to_markdown`` so adapters benefit from
+    the same readability + low-yield-recovery behavior as the standard tier
+    pipeline (issue #587: card-style pages no longer lose their bodies).
     Returns markdown text, or ``None`` on failure.
     """
     try:
@@ -28,21 +31,20 @@ async def scrape_page(url: str, timeout: float = 15.0) -> str | None:
             if resp.status_code != 200:
                 return None
 
-            from bs4 import BeautifulSoup
-            from readability import Document
+            from ..fetch_quality import html_to_markdown
 
             html = resp.text
-            doc = Document(html)
-            title = doc.title()
-            summary_html = doc.summary()
+            markdown = html_to_markdown(html)
 
-            soup = BeautifulSoup(summary_html, "html.parser")
-            text = soup.get_text(separator="\n", strip=True)
-
-            if not text:
+            if not markdown:
                 return None
 
-            return f"# {title}\n\n{text}" if title else text
+            from bs4 import BeautifulSoup
+
+            title = BeautifulSoup(html, "html.parser").title
+            title_text = title.get_text(strip=True) if title else ""
+
+            return f"# {title_text}\n\n{markdown}" if title_text else markdown
 
     except Exception as exc:
         logger.debug("Readability fallback failed for %s: %s", url, exc)
