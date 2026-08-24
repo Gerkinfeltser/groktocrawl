@@ -11,7 +11,7 @@ services:
       retries: 20
 
   slopsearx:
-    image: ghcr.io/magnus919/slopsearx@sha256:c7fd83077bf5f189a0125b6377b367740068d012e9caeb48318401a23437711d
+    image: ghcr.io/magnus919/slopsearx@sha256:91194d146d205b1cf4688c1989da8f5f6b599a9627be23fd1ee7a4e488fda5b7
     restart: unless-stopped
     ports:
       - "8081:8080"
@@ -26,7 +26,7 @@ services:
       retries: 3
 
   slopsearx-mcp:
-    image: ghcr.io/magnus919/slopsearx@sha256:c7fd83077bf5f189a0125b6377b367740068d012e9caeb48318401a23437711d
+    image: ghcr.io/magnus919/slopsearx@sha256:91194d146d205b1cf4688c1989da8f5f6b599a9627be23fd1ee7a4e488fda5b7
     # The MCP companion must never run unauthenticated, but a required-token
     # guard using the Compose `:?` operator would abort a no-config
     # `docker compose up` at load time (Compose interpolates the whole file
