@@ -137,6 +137,9 @@ class _FixtureSeam:
             )
         if isinstance(response, BaseException):
             raise response
+        if response is None:
+            # Unrouted endpoint: answer 404 like the real origin would.
+            return _FakeResponse(status_code=404)
         if not isinstance(response, _FakeResponse):
             raise AssertionError(
                 f"seam route {kind!r} holds neither a response nor an "
@@ -573,14 +576,16 @@ async def test_registry_dispatch_falls_through_to_stub_adapter(monkeypatch):
     # Optional corroboration per VAL-GUTT-005: the dispatch-error counter
     # path executed for the failing gutenberg adapter, and the stub recorded
     # a hit — proving both dispatch outcomes were exercised end-to-end.
+    # Label-set presence (not absolute values): METRICS is a process-global
+    # singleton, so counter totals accumulate across tests in one pytest run.
     metrics_text = METRICS.generate_openmetrics()
     assert (
         'groktocrawl_adapter_dispatch_total{adapter_group="gutenberg",'
-        'outcome="error"} 1.0' in metrics_text
+        'outcome="error"}' in metrics_text
     )
     assert (
         'groktocrawl_adapter_dispatch_total{adapter_group="stub-generic",'
-        'outcome="hit"} 1.0' in metrics_text
+        'outcome="hit"}' in metrics_text
     )
 
 
