@@ -55,6 +55,19 @@ Internal services (browser-svc, scraper-svc, parse-svc) no longer publish
 ports to the host. They are only reachable through the agent API on port
 8080 via Docker's internal DNS.
 
+### Self-Hosted CI Runner Fork-PR Protection
+
+Pull requests from forks run workflows from the PR merge ref, so in-repo
+guards (fork conditions, detection steps) are defense in depth only — a
+workflow edit can strip them. The authoritative control is platform-level
+(org runner-group restriction and workflow-run approval). See
+[docs/runbooks/self-hosted-runner-fork-protection.md](docs/runbooks/self-hosted-runner-fork-protection.md)
+for the shipped in-repo controls (#562), the exact org-level remediation
+steps (`allows_public_repositories=false`, optional
+`restricted_to_workflows` + allowlist, "Require approval for all external
+contributors"), and the residual risk while those org-level settings are
+deferred.
+
 ## Supported Versions
 
 | Version | Supported |

@@ -779,6 +779,140 @@ def render_text(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# --- Read-only ruleset verification (--verify-rulesets, #562) ---------------
+
+EXPECTED_RULESET_IDS = {
+    "main review policy": 20314008,
+    "main required checks": 20314768,
+}
+
+
+def verify_rulesets(
+    api: GithubApi,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Read-only verification that both main rulesets are active + diff-clean.
+
+    Issues exclusively GET requests (list + per-id details), so a
+    repo-scoped token suffices and no admin:org scope is required. Returns
+    (verified, failures): each entry carries name/id/enforcement/diffs/ok.
+    A ruleset is ok only when it exists, reports enforcement == "active",
+    and its whitelist diff against the expected-state constant is empty.
+    """
+    verified: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    try:
+        summaries = api.list_rulesets()
+        by_name = {
+            summary.get("name"): summary.get("id")
+            for summary in summaries or []
+            if summary.get("name")
+        }
+    except EnforceError as exc:
+        return [], [{"name": None, "reason": f"could not list rulesets: {exc}"}]
+
+    for wanted in RULESETS:
+        name = wanted["name"]
+        ruleset_id = by_name.get(name)
+        if ruleset_id is None:
+            failures.append(
+                {"name": name, "reason": "missing from repository rulesets"}
+            )
+            continue
+        try:
+            actual = api.get_ruleset(int(ruleset_id))
+        except EnforceError as exc:
+            failures.append(
+                {
+                    "name": name,
+                    "id": ruleset_id,
+                    "reason": f"could not complete verification: {exc}",
+                }
+            )
+            continue
+        entry: dict[str, Any] = {
+            "name": name,
+            "id": int(ruleset_id),
+            "enforcement": actual.get("enforcement"),
+            "diffs": [],
+            "ok": False,
+        }
+        if EXPECTED_RULESET_IDS.get(name) not in (None, int(ruleset_id)):
+            entry["diffs"].append(
+                f"id: expected {EXPECTED_RULESET_IDS[name]}, got {ruleset_id}"
+            )
+        if actual.get("enforcement") != "active":
+            entry["diffs"].append(
+                f"enforcement: expected 'active', got {actual.get('enforcement')!r}"
+            )
+        diffs = ruleset_diff(wanted, actual)
+        if diffs:
+            entry["diffs"].extend(diffs)
+        entry["ok"] = not entry["diffs"]
+        if entry["ok"]:
+            verified.append(entry)
+        else:
+            failures.append(entry)
+    return verified, failures
+
+
+def render_verify_text(
+    owner: str,
+    repo: str,
+    branch: str,
+    auth_source: str,
+    verified: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+) -> str:
+    """Human-readable report for the --verify-rulesets mode."""
+    lines = [
+        f"repo: {owner}/{repo} branch: {branch}",
+        f"auth: {auth_source}",
+        "mode: verify-rulesets (read-only; GET requests only)",
+        "",
+    ]
+    for entry in verified:
+        lines.append(
+            f"[ok] {entry['name']} (id {entry['id']}) — enforcement: active, diff-clean"
+        )
+    for entry in failures:
+        if entry.get("name") is None or "diffs" not in entry:
+            lines.append(
+                f"[FAIL] {entry.get('name') or '<unknown>'}: {entry['reason']}"
+            )
+        elif "enforcement" in entry:
+            detail = "; ".join(entry["diffs"]) or "unknown drift"
+            lines.append(
+                f"[FAIL] {entry['name']} (id {entry['id']}) — enforcement: "
+                f"{entry['enforcement']!r}, differs from expected state: {detail}"
+            )
+        else:
+            lines.append(f"[FAIL] {entry['name']}: {entry['reason']}")
+    if failures:
+        lines.append("")
+        lines.append(
+            "RESULT: FAIL - verification could not complete cleanly (inactive, "
+            "missing, drifted, or partial data). Restore the failing rulesets "
+            "to their expected state via "
+            "scripts/enforce-branch-protection.py --apply (or the GitHub UI), "
+            "then re-run --verify-rulesets."
+        )
+    else:
+        lines.append("")
+        lines.append("RESULT: PASS - both main rulesets are active and match policy.")
+    return "\n".join(lines)
+
+
+def run_verify_rulesets(api: GithubApi) -> dict[str, Any]:
+    """Structured summary for the read-only verification mode."""
+    verified, failures = verify_rulesets(api)
+    return {
+        "mode": "verify-rulesets",
+        "verified": verified,
+        "failures": failures,
+        "ok": not failures,
+    }
+
+
 # --- CLI --------------------------------------------------------------------
 
 
@@ -825,6 +959,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="apply the policy: create/update rulesets, verify, remove classic protection",
     )
+    mode.add_argument(
+        "--verify-rulesets",
+        action="store_true",
+        help=(
+            "read-only check that both main rulesets are active and "
+            "diff-clean against the expected state (GET requests only; "
+            "exit 0 iff both pass)"
+        ),
+    )
     parser.add_argument("--owner", help="GitHub owner (default: from git remote)")
     parser.add_argument("--repo", help="GitHub repository (default: from git remote)")
     parser.add_argument(
@@ -864,9 +1007,28 @@ def main(argv: list[str] | None = None) -> int:
         repo = repo or remote[1]
 
     mode = "apply" if args.apply else "dry-run"
+    if args.verify_rulesets:
+        mode = "verify-rulesets"
     api = GithubApi(
         HttpTransport(token=token), owner=owner, repo=repo, branch=args.branch
     )
+
+    if mode == "verify-rulesets":
+        summary = run_verify_rulesets(api)
+        if args.json:
+            print(json.dumps(summary, indent=2, sort_keys=True))
+        else:
+            print(
+                render_verify_text(
+                    owner,
+                    repo,
+                    args.branch,
+                    auth_source,
+                    summary["verified"],
+                    summary["failures"],
+                )
+            )
+        return 0 if summary["ok"] else 1
 
     try:
         summary = run_orchestrator(

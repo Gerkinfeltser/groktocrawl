@@ -10,6 +10,7 @@ from `test_ci_change_classification.py`.
 from __future__ import annotations
 
 import contextlib
+import copy
 import importlib.util
 import io
 import json
@@ -687,6 +688,204 @@ class JsonOutputTests(unittest.TestCase):
         self.assertIn("main required checks", parsed["rulesets"])
         self.assertIn("no_changes", parsed)
         self.assertIn("safety_gate", parsed)
+
+
+# --- --verify-rulesets read-only mode (#562 / VAL-FORK-005) -----------------
+
+
+def _live_ruleset(expected: dict[str, Any], ruleset_id: int) -> dict[str, Any]:
+    """Shape the API's GET-ruleset response for an on-policy expected state."""
+    return {
+        **META,
+        "id": ruleset_id,
+        "name": expected["name"],
+        "enforcement": "active",
+        "target": expected["target"],
+        "conditions": copy.deepcopy(expected["conditions"]),
+        "bypass_actors": copy.deepcopy(expected.get("bypass_actors")),
+        "rules": copy.deepcopy(expected["rules"]),
+    }
+
+
+class VerifyRulesetsModeTests(unittest.TestCase):
+    """--verify-rulesets: read-only assert of the two main rulesets (#562).
+
+    The mode must be GET-only (repo-token sufficient, no admin:org), exit 0
+    when BOTH main rulesets are active and diff-clean against the
+    RULESET_A/RULESET_B constants, and non-zero on any inactive/missing/
+    drifted/partial outcome.
+    """
+
+    def setUp(self) -> None:
+        if MODULE is None:
+            self.skipTest(
+                "scripts/enforce-branch-protection.py not present in this environment"
+            )
+
+    def _run(self, transport: FakeTransport, argv: list[str]) -> tuple[int, str]:
+        original = MODULE.HttpTransport
+        MODULE.HttpTransport = fake_transport_factory(transport)
+        buf = io.StringIO()
+
+        def invoke() -> int:
+            with contextlib.redirect_stdout(buf):
+                return MODULE.main(argv)
+
+        try:
+            rc = with_github_token(invoke)
+        finally:
+            MODULE.HttpTransport = original
+        return rc, buf.getvalue()
+
+    def test_active_and_clean_reports_both_rulesets_and_exits_zero(self) -> None:
+        live = [
+            _live_ruleset(MODULE.RULESET_A, 20314008),
+            _live_ruleset(MODULE.RULESET_B, 20314768),
+        ]
+        rc, out = self._run(
+            FakeTransport(build_handlers(rulesets=live)),
+            [
+                "--verify-rulesets",
+                "--owner",
+                "groktopus",
+                "--repo",
+                "groktocrawl",
+            ],
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("main review policy", out)
+        self.assertIn("main required checks", out)
+        self.assertIn("active", out)
+
+    def test_issues_exclusively_get_requests(self) -> None:
+        live = [
+            _live_ruleset(MODULE.RULESET_A, 20314008),
+            _live_ruleset(MODULE.RULESET_B, 20314768),
+        ]
+        transport = FakeTransport(build_handlers(rulesets=live))
+        rc, _ = self._run(
+            transport,
+            ["--verify-rulesets", "--owner", "groktopus", "--repo", "groktocrawl"],
+        )
+        self.assertEqual(rc, 0)
+        methods = [call[0] for call in transport.calls]
+        self.assertEqual(len(methods), 3)  # list + two details
+        self.assertTrue(all(m == "GET" for m in methods))
+        mutating = [m for m in methods if m in ("POST", "PUT", "PATCH", "DELETE")]
+        self.assertEqual(mutating, [])
+
+    def test_inactive_ruleset_is_reported_as_failure(self) -> None:
+        drifted = _live_ruleset(MODULE.RULESET_A, 20314008)
+        drifted["enforcement"] = "inactive"
+        live = [drifted, _live_ruleset(MODULE.RULESET_B, 20314768)]
+        rc, out = self._run(
+            FakeTransport(build_handlers(rulesets=live)),
+            ["--verify-rulesets", "--owner", "groktopus", "--repo", "groktocrawl"],
+        )
+        self.assertNotEqual(rc, 0)
+        self.assertIn("inactive", out)
+
+    def test_missing_ruleset_fails_closed(self) -> None:
+        # Only Ruleset A exists: partial verification must NOT pass.
+        live = [_live_ruleset(MODULE.RULESET_A, 20314008)]
+        rc, out = self._run(
+            FakeTransport(build_handlers(rulesets=live)),
+            ["--verify-rulesets", "--owner", "groktopus", "--repo", "groktocrawl"],
+        )
+        self.assertNotEqual(rc, 0)
+        self.assertIn("missing", out.lower())
+
+    def test_drifted_but_active_ruleset_fails(self) -> None:
+        drifted = _live_ruleset(MODULE.RULESET_A, 20314008)
+        params = drifted["rules"][0]["parameters"]
+        params["required_approving_review_count"] = 2
+        live = [drifted, _live_ruleset(MODULE.RULESET_B, 20314768)]
+        rc, out = self._run(
+            FakeTransport(build_handlers(rulesets=live)),
+            ["--verify-rulesets", "--owner", "groktopus", "--repo", "groktocrawl"],
+        )
+        self.assertNotEqual(rc, 0)
+        self.assertIn("differs", out)
+
+    def test_partial_data_error_fails_rather_than_passing(self) -> None:
+        live = [
+            _live_ruleset(MODULE.RULESET_A, 20314008),
+            _live_ruleset(MODULE.RULESET_B, 20314768),
+        ]
+        handlers = build_handlers(rulesets=live)
+
+        def flaky_detail(path: str, _payload: Any) -> tuple[int, Any, dict[str, str]]:
+            raise MODULE.TransportError(f"GET {path} failed: connection reset")
+
+        # Break ONLY the per-id detail endpoint so the list succeeds but the
+        # verification cannot complete (partial-data guard).
+        original_get = handlers["GET"]
+
+        def get_handler(path: str, payload: Any) -> tuple[int, Any, dict[str, str]]:
+            if re.search(r"/rulesets/\d+$", path.split("?", maxsplit=1)[0]):
+                return flaky_detail(path, payload)
+            return original_get(path, payload)
+
+        handlers["GET"] = get_handler
+        rc, out = self._run(
+            FakeTransport(handlers),
+            ["--verify-rulesets", "--owner", "groktopus", "--repo", "groktocrawl"],
+        )
+        self.assertNotEqual(rc, 0)
+        self.assertIn("could not complete verification", out.lower())
+
+    def test_json_output_lists_per_ruleset_results(self) -> None:
+        live = [
+            _live_ruleset(MODULE.RULESET_A, 20314008),
+            _live_ruleset(MODULE.RULESET_B, 20314768),
+        ]
+        rc, out = self._run(
+            FakeTransport(build_handlers(rulesets=live)),
+            [
+                "--verify-rulesets",
+                "--json",
+                "--owner",
+                "groktopus",
+                "--repo",
+                "groktocrawl",
+            ],
+        )
+        self.assertEqual(rc, 0)
+        parsed = json.loads(out)
+        self.assertEqual(parsed["mode"], "verify-rulesets")
+        names = {entry["name"] for entry in parsed["verified"]}
+        self.assertEqual(names, {"main review policy", "main required checks"})
+        self.assertTrue(all(entry["ok"] for entry in parsed["verified"]))
+        self.assertEqual(parsed["failures"], [])
+
+    def test_verify_mode_does_not_run_safety_gate_or_change_plan(self) -> None:
+        # The verify mode is strictly ruleset-focused: check-runs must never
+        # be queried (that endpoint is irrelevant to ruleset enforcement).
+        live = [
+            _live_ruleset(MODULE.RULESET_A, 20314008),
+            _live_ruleset(MODULE.RULESET_B, 20314768),
+        ]
+
+        def get_handler(path: str, _payload: Any) -> tuple[int, Any, dict[str, str]]:
+            base = path.split("?", maxsplit=1)[0]
+            if base.endswith("/check-runs"):
+                raise AssertionError("--verify-rulesets must not query check-runs")
+            if base.endswith("/rulesets"):
+                return 200, live, {}
+            match = re.match(r".*/rulesets/(\d+)$", base)
+            if match:
+                ruleset_id = int(match.group(1))
+                for ruleset in live:
+                    if ruleset.get("id") == ruleset_id:
+                        return 200, ruleset, {}
+            raise AssertionError(f"unhandled GET {path}")
+
+        handlers = {"GET": get_handler}
+        rc, _ = self._run(
+            FakeTransport(handlers),
+            ["--verify-rulesets", "--owner", "groktopus", "--repo", "groktocrawl"],
+        )
+        self.assertEqual(rc, 0)
 
 
 if __name__ == "__main__":
