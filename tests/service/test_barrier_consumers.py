@@ -987,8 +987,29 @@ class TestAgentScrapeSurfaceRefusal:
 
 # ── VAL-BARR-008: scraper /scrape of the fixture never silent success ──
 
+# The pipeline tests below import ``scraper.fetch`` (via scraper.fetch's
+# module-level curl_cffi import). curl_cffi is a Fast-Tests-lane dependency —
+# the agent-svc container that hosts the integration lane does not have it
+# (repo precedent: test_lightweight_only.py lives under tests/unit for the
+# same reason). Governed per tests/conftest.py skipif rules.
+_curl_cffi_available = True
+try:
+    import curl_cffi  # noqa: F401
+except ModuleNotFoundError:
+    _curl_cffi_available = False
+
+_requires_curl_cffi = pytest.mark.skipif(
+    not _curl_cffi_available,
+    reason="scraper.fetch imports curl_cffi, unavailable in the agent container",
+    owner="repository-maintainer",
+    issue="#586",
+    classification="retained",
+    environment="agent-svc integration container lacks scraper-svc heavy deps",
+)
+
 
 class TestScraperPipelineFixtureOutcome:
+    @_requires_curl_cffi
     @pytest.mark.asyncio
     async def test_default_flow_served_fixture_is_flagged_never_bare_success(
         self, _barrier_scraper_loopback, served_challenge_url

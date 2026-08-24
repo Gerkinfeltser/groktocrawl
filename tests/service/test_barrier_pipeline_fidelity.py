@@ -49,6 +49,25 @@ CHALLENGE_PHRASES = (
     "please enable javascript to proceed",
 )
 
+# The smart_scrape tests below import ``scraper.fetch``, whose module-level
+# ``from curl_cffi import requests`` requires a Fast-Tests-lane dependency the
+# agent-svc container (integration lane host) does not ship. Skip-governed per
+# tests/conftest.py rules; same rationale as tests/unit/test_lightweight_only.py.
+_curl_cffi_available = True
+try:
+    import curl_cffi  # noqa: F401
+except ModuleNotFoundError:
+    _curl_cffi_available = False
+
+_requires_curl_cffi = pytest.mark.skipif(
+    not _curl_cffi_available,
+    reason="scraper.fetch imports curl_cffi, unavailable in the agent container",
+    owner="repository-maintainer",
+    issue="#586",
+    classification="retained",
+    environment="agent-svc integration container lacks scraper-svc heavy deps",
+)
+
 
 def _contains_challenge(text: str) -> bool:
     lowered = (text or "").lower()
@@ -245,6 +264,7 @@ class TestScrapeWithFallbackNegativeControlEndToEnd:
 
 
 class TestSmartScrapeOverServedFixture:
+    @_requires_curl_cffi
     @pytest.mark.asyncio
     async def test_default_flow_served_fixture_is_flagged_never_bare_success(
         self, served_challenge_url
@@ -273,6 +293,7 @@ class TestSmartScrapeOverServedFixture:
         # Never a bare success: the flag rides along with whatever payload ships.
         assert not (result.get("success", True) and not result.get("warning"))
 
+    @_requires_curl_cffi
     @pytest.mark.asyncio
     async def test_forced_browser_flow_preserves_tier3_barrier_provenance(
         self, served_challenge_url
@@ -336,6 +357,7 @@ class TestSmartScrapeOverServedFixture:
             "must never ship challenge content as unqualified success"
         )
 
+    @_requires_curl_cffi
     @pytest.mark.asyncio
     async def test_forced_browser_flow_bare_failure_stays_bare_without_barrier(
         self, served_challenge_url
