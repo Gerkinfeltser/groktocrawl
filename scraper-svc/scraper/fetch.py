@@ -438,8 +438,6 @@ async def smart_scrape(
         )
 
     # Log proxy status for debugging (per-scrape proxy identity logging)
-
-    # Log proxy status for debugging (per-scrape proxy identity logging)
     proxy_url = SCRAPER_PROXY_URL
     if proxy_url:
         logger.info("Proxy configured: %s", _redact_proxy_url(proxy_url))
