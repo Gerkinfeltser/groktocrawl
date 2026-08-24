@@ -36,6 +36,42 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Fork-PR workflow-edit guard (#562). A pull request from a fork that
+      # modifies .github/workflows/** runs from the PR MERGE REF, i.e. with
+      # this very file already rewritten by the fork — so no in-repo check can
+      # be trusted there. This step is DEFENSE IN DEPTH ONLY (ADR-0056): it
+      # fails fast so the required checks go red as a paper trail. The
+      # authoritative, non-bypassable control is PLATFORM-LEVEL and lives in
+      # the org settings (runner group [self-hosted, groktopus, docker] with
+      # allows_public_repositories=false; optional restricted_to_workflows +
+      # allowlist; "Require approval for all external contributors"). Those
+      # org-level controls are currently DEFERRED by maintainer decision with
+      # the residual risk accepted — exact remediation steps:
+      # docs/runbooks/self-hosted-runner-fork-protection.md
+      #
+      # The step lives inside this `changes` classification job whose `if`
+      # cannot skip classification, and its own always() guard means an
+      # earlier step failure cannot prevent its evaluation. A failing step
+      # fails the whole `changes` job, which trips runtime-gate's fail-closed
+      # branch ("Fail when change classification fails") — exactly the
+      # intended red paper trail. Null-guard note: head.repo.fork may render
+      # null (deleted forks). The condition is `!= false` so a null fork
+      # (NOT provably a same-repo PR) still reaches the seam, which treats
+      # null as fail-closed for detection; only a proven `fork == false`
+      # (same-repository PR) skips the step.
+      - name: Detect fork PR modifying GitHub workflows
+        id: fork_guard
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork != false
+        shell: bash
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_PR_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          merge_base=$(git merge-base "$CI_BASE_SHA" "$CI_HEAD_SHA")
+          git diff --name-only "$merge_base" "$CI_HEAD_SHA" | python3 scripts/ci_fork_pr_guard.py
+
       - name: Test change classifier
         run: python3 tests/service/test_ci_change_classification.py
 
@@ -256,6 +292,10 @@ jobs:
     # file could bypass the guard. The authoritative, non-bypassable control is
     # platform-level (deny fork PRs to the runner group / require workflow approval for
     # outside collaborators), which is outside this repo and must be configured there.
+    # See docs/runbooks/self-hosted-runner-fork-protection.md for the exact org-level
+    # remediation steps (currently DEFERRED by maintainer decision; residual risk
+    # accepted) and the `Detect fork PR modifying GitHub workflows` step in the
+    # `changes` job above for the in-repo detection paper trail (#562).
     if: >-
       always() && ((github.event_name == 'pull_request' && needs.changes.result == 'success' &&
       needs.changes.outputs.requires_full_runtime == 'true' &&

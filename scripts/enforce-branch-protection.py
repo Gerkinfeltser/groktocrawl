@@ -779,6 +779,168 @@ def render_text(summary: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# --- Read-only ruleset verification (--verify-rulesets, #562) ---------------
+
+# Canonical main-ruleset instance ids at documentation time. These are
+# API-assigned METADATA (deliberately ignored by the whitelist comparator):
+# deleting and re-applying a ruleset (e.g. via --apply after removal)
+# assigns a NEW id, so an id mismatch is reported as a WARNING, never a
+# verification failure. Name + policy diff + enforcement remain the drift
+# signal.
+EXPECTED_RULESET_IDS = {
+    "main review policy": 20314008,
+    "main required checks": 20314768,
+}
+
+
+def verify_rulesets(
+    api: GithubApi,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Read-only verification that both main rulesets are active + diff-clean.
+
+    Issues exclusively GET requests (list + per-id details), so a
+    repo-scoped token suffices and no admin:org scope is required. Returns
+    (verified, failures, warnings): each verified/failure entry carries
+    name/id/expected_id/enforcement/diffs/ok; warnings carry informational
+    observations that do NOT affect the exit code (currently: canonical-id
+    drift after a ruleset was recreated — ids are metadata, not policy).
+    A ruleset is ok only when it exists under its expected NAME, reports
+    enforcement == "active", and its whitelist diff against the
+    expected-state constant is empty.
+    """
+    verified: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    try:
+        summaries = api.list_rulesets()
+        by_name = {
+            summary.get("name"): summary.get("id")
+            for summary in summaries or []
+            if summary.get("name")
+        }
+    except EnforceError as exc:
+        return [], [{"name": None, "reason": f"could not list rulesets: {exc}"}], []
+
+    for wanted in RULESETS:
+        name = wanted["name"]
+        ruleset_id = by_name.get(name)
+        if ruleset_id is None:
+            failures.append(
+                {"name": name, "reason": "missing from repository rulesets"}
+            )
+            continue
+        try:
+            actual = api.get_ruleset(int(ruleset_id))
+        except EnforceError as exc:
+            failures.append(
+                {
+                    "name": name,
+                    "id": ruleset_id,
+                    "reason": f"could not complete verification: {exc}",
+                }
+            )
+            continue
+        diffs = ruleset_diff(wanted, actual)
+        if actual.get("enforcement") != "active":
+            diffs.append(
+                f"enforcement: expected 'active', got {actual.get('enforcement')!r}"
+            )
+        entry: dict[str, Any] = {
+            "name": name,
+            "id": int(ruleset_id),
+            "expected_id": EXPECTED_RULESET_IDS.get(name),
+            "enforcement": actual.get("enforcement"),
+            "diffs": diffs,
+            "ok": not diffs,
+        }
+        # Id drift is metadata-only (see EXPECTED_RULESET_IDS): warn loudly,
+        # keep verifying policy by name.
+        expected_id = EXPECTED_RULESET_IDS.get(name)
+        if expected_id is not None and expected_id != int(ruleset_id):
+            warnings.append(
+                {
+                    "name": name,
+                    "id": int(ruleset_id),
+                    "message": (
+                        f"canonical id drifted: expected {expected_id}, got "
+                        f"{ruleset_id} (ruleset likely recreated; policy "
+                        f"verification continues by name)"
+                    ),
+                }
+            )
+        if entry["ok"]:
+            verified.append(entry)
+        else:
+            failures.append(entry)
+    return verified, failures, warnings
+
+
+def render_verify_text(
+    owner: str,
+    repo: str,
+    branch: str,
+    auth_source: str,
+    verified: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+    warnings: list[dict[str, Any]] | None = None,
+) -> str:
+    """Human-readable report for the --verify-rulesets mode."""
+    lines = [
+        f"repo: {owner}/{repo} branch: {branch}",
+        f"auth: {auth_source}",
+        "mode: verify-rulesets (read-only; GET requests only)",
+        "",
+    ]
+    for entry in verified:
+        lines.append(
+            f"[ok] {entry['name']} (id {entry['id']}) — enforcement: active, diff-clean"
+        )
+    for entry in failures:
+        if entry.get("name") is None or "diffs" not in entry:
+            lines.append(
+                f"[FAIL] {entry.get('name') or '<unknown>'}: {entry['reason']}"
+            )
+        elif "enforcement" in entry:
+            detail = "; ".join(entry["diffs"]) or "unknown drift"
+            lines.append(
+                f"[FAIL] {entry['name']} (id {entry['id']}) — enforcement: "
+                f"{entry['enforcement']!r}, differs from expected state: {detail}"
+            )
+        else:
+            lines.append(f"[FAIL] {entry['name']}: {entry['reason']}")
+    for warning in warnings or []:
+        lines.append(f"[warn] {warning['name']}: {warning['message']}")
+    if failures:
+        lines.append("")
+        lines.append(
+            "RESULT: FAIL - verification could not complete cleanly (inactive, "
+            "missing, drifted, or partial data). Restore the failing rulesets "
+            "to their expected state via "
+            "scripts/enforce-branch-protection.py --apply (or the GitHub UI), "
+            "then re-run --verify-rulesets."
+        )
+    else:
+        lines.append("")
+        lines.append("RESULT: PASS - both main rulesets are active and match policy.")
+        if warnings:
+            lines.append(
+                "(warnings above are informational and do not affect the exit code)"
+            )
+    return "\n".join(lines)
+
+
+def run_verify_rulesets(api: GithubApi) -> dict[str, Any]:
+    """Structured summary for the read-only verification mode."""
+    verified, failures, warnings = verify_rulesets(api)
+    return {
+        "mode": "verify-rulesets",
+        "verified": verified,
+        "failures": failures,
+        "warnings": warnings,
+        "ok": not failures,
+    }
+
+
 # --- CLI --------------------------------------------------------------------
 
 
@@ -825,6 +987,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="apply the policy: create/update rulesets, verify, remove classic protection",
     )
+    mode.add_argument(
+        "--verify-rulesets",
+        action="store_true",
+        help=(
+            "read-only check that both main rulesets are active and "
+            "diff-clean against the expected state (GET requests only; "
+            "exit 0 iff both pass)"
+        ),
+    )
     parser.add_argument("--owner", help="GitHub owner (default: from git remote)")
     parser.add_argument("--repo", help="GitHub repository (default: from git remote)")
     parser.add_argument(
@@ -864,9 +1035,29 @@ def main(argv: list[str] | None = None) -> int:
         repo = repo or remote[1]
 
     mode = "apply" if args.apply else "dry-run"
+    if args.verify_rulesets:
+        mode = "verify-rulesets"
     api = GithubApi(
         HttpTransport(token=token), owner=owner, repo=repo, branch=args.branch
     )
+
+    if mode == "verify-rulesets":
+        summary = run_verify_rulesets(api)
+        if args.json:
+            print(json.dumps(summary, indent=2, sort_keys=True))
+        else:
+            print(
+                render_verify_text(
+                    owner,
+                    repo,
+                    args.branch,
+                    auth_source,
+                    summary["verified"],
+                    summary["failures"],
+                    summary["warnings"],
+                )
+            )
+        return 0 if summary["ok"] else 1
 
     try:
         summary = run_orchestrator(
