@@ -16,9 +16,15 @@ scenarios are runnable locally AND on CI:
 3. fork PR + non-workflow path      -> exit 0.
 
 A null/unknown fork flag is treated as NOT a same-repository PR (fail-closed
-for detection purposes). The tests also pin the workflow wiring: the guard
-step must live inside the ``changes`` classification job whose ``if`` cannot
-skip classification, and every changed path must flow into the guard.
+for detection purposes). The CI-side wiring must match: GHA loose equality
+coerces Null->0 and Boolean false->0, so the docker.yml step condition arms
+via the explicit disjunction ``fork == true || fork == null`` (a plain
+``!= false`` would evaluate FALSE for null and skip the detector), while the
+integration-tests gate admits only a string-rendered literal ``'false'``
+(``format('{0}', ...) == 'false'``), keeping deleted forks off the
+self-hosted lane. The tests also pin the workflow wiring: the guard step must
+live inside the ``changes`` classification job whose ``if`` cannot skip
+classification, and every changed path must flow into the guard.
 """
 
 from __future__ import annotations
@@ -31,6 +37,8 @@ import unittest
 from pathlib import Path
 
 import yaml
+
+from tests.service._gha_expr_sim import GhaScalar, gha_eval
 
 ROOT = Path(__file__).resolve().parents[2]
 SEAM = ROOT / "scripts" / "ci_fork_pr_guard.py"
@@ -198,7 +206,7 @@ class WorkflowWiringTests(unittest.TestCase):
             .split("\n  twin-contracts:", 1)[0]
         )
         # always() keeps the guard evaluated even if classification steps fail.
-        self.assertIn("if: always()", changes_block)
+        self.assertIn("if: >-\n          always()", changes_block)
 
     def test_guard_receives_all_changed_paths_as_input(self) -> None:
         changes_block = (
@@ -239,14 +247,136 @@ class WorkflowWiringTests(unittest.TestCase):
             .split("\n  twin-contracts:", 1)[0]
         )
         self.assertIn("github.event_name == 'pull_request'", changes_block)
-        # != false (not == true): a NULL head.repo.fork (deleted forks) must
-        # still reach the fail-closed seam instead of skipping the detector.
+        # GHA loose equality coerces Null->0 and Boolean false->0 (official
+        # expressions reference; actions/runner EvaluationResult.cs), so the
+        # once-shipped `!= false` evaluated FALSE for a null head.repo.fork
+        # (deleted forks) and silently SKIPPED the detector. The condition must
+        # arm on the explicit disjunction instead; under the same coercion
+        # `false == null` is also TRUE, so the step arms for every
+        # pull_request event and the seam trusts only a literal 'false'
+        # rendering (same-repository PR) — nulls stay fail-closed at the seam.
+        # The condition is written as a folded (>-) scalar, so match on its
+        # whitespace-normalized form.
+        normalized = " ".join(changes_block.split())
         self.assertIn(
-            "github.event.pull_request.head.repo.fork != false", changes_block
+            "github.event.pull_request.head.repo.fork == true "
+            "|| github.event.pull_request.head.repo.fork == null",
+            normalized,
         )
         self.assertNotIn(
-            "github.event.pull_request.head.repo.fork == true", changes_block
+            "github.event.pull_request.head.repo.fork != false", normalized
         )
+
+    def _fork_guard_condition(self) -> str:
+        parsed = yaml.safe_load(self._workflow_bytes())
+        steps = parsed["jobs"]["changes"]["steps"]
+        for step in steps:
+            if isinstance(step, dict) and step.get("id") == "fork_guard":
+                condition = step.get("if")
+                assert isinstance(condition, str)
+                return " ".join(condition.split())
+        raise AssertionError("fork_guard step not found in changes job")
+
+    def test_guard_condition_semantics_over_real_gha_loose_equality(self) -> None:
+        """Evaluate the ACTUAL step `if:` under GHA loose-equality semantics.
+
+        Regression guard for the #562 scrutiny round-1 blocking finding: PR
+        #604 shipped `... fork != false`, believing null reaches the seam, but
+        loose equality coerces Null->0 and false->0 so `null != false` is FALSE
+        and a deleted-fork PR skipped the detector. The pinned text above plus
+        this semantic evaluation over the real condition must both hold.
+        """
+        condition = self._fork_guard_condition()
+        condition = condition.replace("always()", "True")  # always() == True here
+
+        def eval_for(fork: object, event_name: str = "pull_request") -> bool:
+            ctx = {
+                "github": {
+                    "event_name": event_name,
+                    "event": {
+                        "pull_request": {
+                            # The rendered ${{ }} value: True/False/None (null).
+                            "head": {"repo": {"fork": GhaScalar(fork)}}
+                        }
+                    },
+                },
+            }
+            return bool(gha_eval(condition, ctx))
+
+        # Armed: proven forks and deleted forks (null). Under loose equality
+        # `false == null` is also TRUE, so the disjunction deliberately arms
+        # the step for EVERY pull_request event; the seam then trusts only the
+        # rendered literal 'false' (a proven same-repository PR), which keeps
+        # null forks fail-closed at detection time (pinned by SeamScenarioTests).
+        self.assertTrue(eval_for(True))
+        self.assertTrue(eval_for(None))
+        self.assertTrue(eval_for(False))
+        # Non-PR events never arm it.
+        self.assertFalse(eval_for(True, event_name="push"))
+
+    def test_integration_gate_excludes_null_forks_over_gha_semantics(self) -> None:
+        """The self-hosted lane gate must be fail-closed for null forks.
+
+        The pre-existing gate `... head.repo.fork == false` evaluated TRUE for
+        a deleted-fork PR (null coerces to 0 like false), ADMITTING exactly the
+        case #562 exists to stop. The hardened gate discriminates via string
+        rendering (format('{0}', ...) yields 'true'/'false'/'' for null), so
+        only a literal 'false' — a proven same-repository PR — is admitted.
+        """
+        workflow_text = self._workflow_bytes()
+        integration_block = workflow_text.split("\n  integration-tests:\n", 1)[1].split(
+            "\n  runtime-gate:\n", 1
+        )[0]
+        condition = (
+            integration_block.split("if: >-\n", 1)[1]
+            .split("\n    runs-on:", 1)[0]
+            .strip()
+        )
+        condition = " ".join(condition.split())
+        condition = condition.replace("always()", "True")
+
+        def runs_for(
+            *,
+            fork: object,
+            requires_full_runtime: str,
+            changes_result: str = "success",
+            build_result: str = "skipped",
+            event_name: str = "pull_request",
+        ) -> bool:
+            ctx: dict[str, object] = {
+                "github": {
+                    "event_name": event_name,
+                    "event": {
+                        "pull_request": {"head": {"repo": {"fork": GhaScalar(fork)}}}
+                    },
+                },
+                "needs": {
+                    "changes": {
+                        "result": changes_result,
+                        "outputs": {"requires_full_runtime": requires_full_runtime},
+                    },
+                    "build-and-push": {"result": build_result},
+                },
+            }
+            return bool(gha_eval(condition, ctx))
+
+        # Same-repo runtime PRs still run on the self-hosted lane...
+        self.assertTrue(runs_for(fork=False, requires_full_runtime="true"))
+        # ...and pushes still run after a successful build.
+        self.assertTrue(
+            runs_for(
+                fork=None,
+                requires_full_runtime="false",
+                build_result="success",
+                event_name="push",
+            )
+        )
+        # Deleted-fork PR (null) must NOT be admitted — fail closed.
+        self.assertFalse(runs_for(fork=None, requires_full_runtime="true"))
+        # Proven forks stay excluded.
+        self.assertFalse(runs_for(fork=True, requires_full_runtime="true"))
+        # Missing head.repo deref also renders null -> excluded.
+        self.assertFalse(runs_for(fork=None, requires_full_runtime="true"))
 
 
 class GuardMessagingTests(unittest.TestCase):

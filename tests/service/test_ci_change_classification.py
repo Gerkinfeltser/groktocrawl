@@ -330,12 +330,17 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
         self.assertEqual(set(MODULE.RUNTIME_SERVICES), self.build_matrix_services)
 
     def test_docs_only_pull_request_cannot_run_integration_tests(self) -> None:
+        # The fork admission term uses a STRING comparison on format('{0}', ...)
+        # rather than `fork == false`: loose equality coerces Null->0 and
+        # false->0, so `null == false` was TRUE and admitted deleted-fork PRs
+        # (head.repo.fork == null) onto the self-hosted lane. Rendering to
+        # 'true'/'false'/'' makes admission require a proven same-repository PR.
         self.assertEqual(
             self.integration_condition,
             "always() && ((github.event_name == 'pull_request' && "
             "needs.changes.result == 'success' && "
             "needs.changes.outputs.requires_full_runtime == 'true' && "
-            "github.event.pull_request.head.repo.fork == false) || "
+            "format('{0}', github.event.pull_request.head.repo.fork) == 'false') || "
             "(github.event_name == 'push' && needs.build-and-push.result == 'success'))",
         )
         self.assertFalse(
@@ -360,8 +365,11 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
         )
 
     def test_fork_pull_request_cannot_run_integration_tests(self) -> None:
+        # String-rendered comparison (see test_docs_only_pull_request...):
+        # `fork == false` loose-equals null, so the raw comparison admitted
+        # deleted forks; only a literal 'false' rendering may run on the lane.
         self.assertIn(
-            "github.event.pull_request.head.repo.fork == false",
+            "format('{0}', github.event.pull_request.head.repo.fork) == 'false'",
             self.integration_condition,
         )
         self.assertFalse(
@@ -372,6 +380,16 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
                 build_result="skipped",
                 fork=True,
             )
+        )
+        # Null fork (deleted fork / missing head.repo) must also be excluded:
+        # fail-closed off the self-hosted lane (#562 scrutiny round 1).
+        parsed = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        integration_if = parsed["jobs"]["integration-tests"]["if"]
+        assert isinstance(integration_if, str)
+        normalized = " ".join(integration_if.split())
+        self.assertIn(
+            "format('{0}', github.event.pull_request.head.repo.fork) == 'false'",
+            normalized,
         )
 
     def test_pull_request_classification_diffs_merge_base_to_head(self) -> None:
