@@ -581,6 +581,10 @@ async def smart_scrape(
                 "Barrier detected at Tier 3 for %s, falling through to FlareSolverr",
                 url,
             )
+            # Keep the envelope for the terminal error dict (#586): when every
+            # later tier also yields nothing, the barrier provenance must not
+            # be silently dropped (same as the force_browser fast path).
+            tier3_barrier = result
 
         markdown_text = result.get("markdown", "")
         raw_html = result.get("raw_html_start", "")
@@ -717,6 +721,12 @@ async def smart_scrape(
             "markdown": "",
             "source": "none",
             "url": url,
+            # Preserve the Tier 3 barrier provenance (#586): when the gate
+            # refused the page here, the envelope was consumed internally —
+            # without this the terminal dict is a bare "source: none"
+            # failure and operators lose the barrier signal. Non-barrier
+            # exhaustion stays bare (mirrors the force_browser fast path).
+            **({"barrier": tier3_barrier["barrier"]} if tier3_barrier else {}),
         },
         url,
     )
