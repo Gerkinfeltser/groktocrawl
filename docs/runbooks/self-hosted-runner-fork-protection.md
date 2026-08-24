@@ -25,26 +25,34 @@ On `pull_request` events GitHub runs workflows from the PR **merge ref**
 
 1. **Job-level fork guard** on `integration-tests` (`.github/workflows/
    docker.yml`): the self-hosted integration job runs only when
-   `github.event.pull_request.head.repo.hub.fork == false`
-   (`github.event.pull_request.head.repo.fork == false`) or the event is a
-   push to main/tag. Best-effort: bypassable by editing the workflow file.
+   `format('{0}', github.event.pull_request.head.repo.fork) == 'false'`
+   or the event is a push to main/tag. Best-effort: bypassable by editing
+   the workflow file. Null guard (corrected 2026-08-24, scrutiny round 1 on
+   #562): loose equality coerces Null->0 and Boolean false->0, so a plain
+   `fork == false` was TRUE for deleted forks (null), admitting them onto
+   the lane; the string rendering discriminates exactly ('true'/'false'/''),
+   keeping null fail-closed OFF the self-hosted runner.
 2. **Fail-fast workflow-edit detector** (#562): inside the unskippable
    `changes` classification job, the step
    `Detect fork PR modifying GitHub workflows` runs
-   `scripts/ci_fork_pr_guard.py` on every pull_request event whose
-   `head.repo.fork != false`. If any changed path is under
+   `scripts/ci_fork_pr_guard.py` on every pull_request event whose condition
+   arms via the explicit disjunction
+   `(head.repo.fork == true || head.repo.fork == null)` — required because
+   GHA loose equality makes `false == null` TRUE too, so the disjunction
+   matches every pull_request event and the SEAM does the trust decision:
+   it skips only when the rendered `CI_PR_FORK` is the literal string
+   "false" (a proven same-repository PR); a null fork renders as an empty
+   string and stays fail-closed. If any changed path is under
    `.github/workflows/**`, the script exits non-zero with an explanatory
    message, failing the classification job and tripping runtime-gate's
    fail-closed branch — the required checks go red as a paper trail.
-   - Null guard: `head.repo.fork` may render as null (deleted forks). The
-     step condition is deliberately `!= false`, so a null fork — not
-     provably a same-repo PR — still reaches the seam and a workflow edit
-     trips the detector; only a proven `fork == false` (same-repository PR)
-     skips the step.
 3. **Runtime-gate fail-closed handling**: a missing/skipped
    `integration-tests` result fails Runtime Gate for runtime PRs, and fork
    PRs get an explicit "integration skipped for security" summary instead of
-   silent success.
+   silent success. The summary/exclusion conditions use the string-rendered
+   comparison (`format('{0}', head.repo.fork) != 'false'`), so deleted forks
+   (null) get the same explicit treatment as proven forks rather than a
+   generic gate failure.
 
 The decision logic lives in an executable seam so the three scenarios can be
 simulated locally:
@@ -59,6 +67,9 @@ printf '.github/workflows/docker.yml\n' | python3 scripts/ci_fork_pr_guard.py \
 # 3. fork + non-workflow path -> exit 0
 printf 'agent-svc/agent/api.py\n' | python3 scripts/ci_fork_pr_guard.py \
   --event-name pull_request --fork true; echo "exit=$?"
+# 4. deleted fork (null renders empty) + workflow path -> exit 1 (fail closed)
+printf '.github/workflows/docker.yml\n' | python3 scripts/ci_fork_pr_guard.py \
+  --event-name pull_request --fork ''; echo "exit=$?"
 ```
 
 ## Platform-level remediation (AUTHORITATIVE control — currently DEFERRED)

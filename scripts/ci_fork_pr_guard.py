@@ -27,15 +27,27 @@ Inputs (environment or CLI flags, synthetic-friendly for local simulation):
   --event-name / CI_EVENT_NAME     : github.event_name (e.g. pull_request)
   --fork        / CI_PR_FORK       : "true"/"false" from
                    github.event.pull_request.head.repo.fork; empty/unset when
-                   the expression evaluated to null (deleted forks)
+                   the expression rendered as null (deleted forks)
   paths         / CI_CHANGED_PATHS : changed paths, one per line
 
 Decision table (exit codes):
   event != pull_request                          -> 0 (same-repo by definition)
   fork flag false (same-repository PR)           -> 0
-  workflow path changed AND fork not false       -> 1 (detection fires;
+  workflow path changed AND fork not "false"     -> 1 (detection fires;
                  includes null fork flags — null is NOT proof of same-repo)
   no workflow path changed                       -> 0
+
+CI wiring note (corrected 2026-08-24, scrutiny round 1 on #562): GitHub
+expressions use LOOSE equality with numeric coercion — Null->0 and Boolean
+false->0 (official expressions reference; actions/runner EvaluationResult.cs)
+— so `null == false` is TRUE and `null != false` is FALSE. The docker.yml
+step condition therefore arms on the explicit disjunction
+`(head.repo.fork == true || head.repo.fork == null)` for every pull_request
+event; because that disjunction also matches a proven same-repository PR
+(`false == null` is TRUE), THIS seam is what actually discriminates: it skips
+only when CI_PR_FORK carries the literal rendered string "false". A null fork
+renders as an empty string and stays fail-closed. Never rely on
+`X != literal` for null detection in GHA expressions.
 """
 
 from __future__ import annotations
@@ -169,10 +181,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    paths_text = sys.stdin.read()
     if args.paths_file:
+        # Non-interactive mode: never touch stdin (an interactive invocation
+        # would otherwise block on read before the flag is consulted).
         with open(args.paths_file, encoding="utf-8") as handle:
             paths_text = handle.read()
+    else:
+        paths_text = sys.stdin.read()
     return evaluate(
         event_name=args.event_name or "", fork_raw=args.fork, paths_text=paths_text
     )
