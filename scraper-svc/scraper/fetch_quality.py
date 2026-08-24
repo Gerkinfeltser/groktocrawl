@@ -359,7 +359,25 @@ def _add_quality(result: dict, html: str = "", title: str = "") -> dict:
     result["quality"] = quality
     volume_status = quality.get("checks", {}).get("volume")
     block_status = quality.get("checks", {}).get("block_detected")
-    if volume_status == "fail" and not result.get("warning"):
+    if block_status in ("warn", "fail") and not (
+        prior_warning and "Block-page content detected" in prior_warning
+    ):
+        # Challenge/interstitial text survived extraction (ADR-0015): surface
+        # an explicit warning so consumers refuse it — cache hits included.
+        # Block-page precedence (#586): this check runs FIRST so a poisoned
+        # entry that is also volume-fail carries the block-page warning, not
+        # the low-yield string — consumers key refusal on the block flag, and
+        # is_barrier_flagged() refuses any warning anyway.
+        result["warning"] = (
+            f"Block-page content detected (block_detected={block_status}); "
+            "the page may be a challenge or error interstitial."
+        )
+        logger.warning(
+            "Block-page content detected for %s (block_detected=%s)",
+            url or "<unknown>",
+            block_status,
+        )
+    elif volume_status == "fail" and not result.get("warning"):
         ratio = (len(markdown) / html_size) if html_size else 0.0
         result["warning"] = (
             f"Low yield: extracted {len(markdown)} chars from a "
@@ -371,22 +389,6 @@ def _add_quality(result: dict, html: str = "", title: str = "") -> dict:
             url or "<unknown>",
             len(markdown),
             html_size,
-        )
-    elif (
-        block_status in ("warn", "fail")
-        and not prior_warning
-        and not result.get("warning")
-    ):
-        # Challenge/interstitial text survived extraction (ADR-0015): surface
-        # an explicit warning so consumers refuse it — cache hits included.
-        result["warning"] = (
-            f"Block-page content detected (block_detected={block_status}); "
-            "the page may be a challenge or error interstitial."
-        )
-        logger.warning(
-            "Block-page content detected for %s (block_detected=%s)",
-            url or "<unknown>",
-            block_status,
         )
     return result
 

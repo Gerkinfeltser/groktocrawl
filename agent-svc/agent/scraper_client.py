@@ -253,8 +253,10 @@ class ScraperClient:
                 and (data.get("markdown", "").strip() or data.get("download"))
             ):
                 return result
-            # A warned CAPTCHA_UNRESOLVED payload is a typed refusal — pass it
-            # through so callers see the structured error, not a fake failure.
+            # A clean (unwarned) CAPTCHA_UNRESOLVED payload is a typed refusal
+            # — pass it through so callers see the structured error rather than
+            # a generic failure. A warned payload must NOT surface as success:
+            # the ``not warning`` guard keeps it in the failure path (#586).
             if result.get("error_code") == "CAPTCHA_UNRESOLVED" and not result.get(
                 "warning"
             ):
