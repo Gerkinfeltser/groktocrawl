@@ -55,12 +55,13 @@ jobs:
       # fails the whole `changes` job, which trips runtime-gate's fail-closed
       # branch ("Fail when change classification fails") — exactly the
       # intended red paper trail. Null-guard note: head.repo.fork may render
-      # null (deleted forks); the expression above deliberately skips for
-      # non-true values, and scripts/ci_fork_pr_guard.py treats null as
-      # NOT-a-same-repo-PR (fail-closed) when simulated locally.
+      # null (deleted forks). The condition is `!= false` so a null fork
+      # (NOT provably a same-repo PR) still reaches the seam, which treats
+      # null as fail-closed for detection; only a proven `fork == false`
+      # (same-repository PR) skips the step.
       - name: Detect fork PR modifying GitHub workflows
         id: fork_guard
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork != false
         shell: bash
         env:
           CI_EVENT_NAME: ${{ github.event_name }}

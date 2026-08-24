@@ -239,7 +239,14 @@ class WorkflowWiringTests(unittest.TestCase):
             .split("\n  twin-contracts:", 1)[0]
         )
         self.assertIn("github.event_name == 'pull_request'", changes_block)
-        self.assertIn("github.event.pull_request.head.repo.fork == true", changes_block)
+        # != false (not == true): a NULL head.repo.fork (deleted forks) must
+        # still reach the fail-closed seam instead of skipping the detector.
+        self.assertIn(
+            "github.event.pull_request.head.repo.fork != false", changes_block
+        )
+        self.assertNotIn(
+            "github.event.pull_request.head.repo.fork == true", changes_block
+        )
 
 
 class GuardMessagingTests(unittest.TestCase):

@@ -32,13 +32,15 @@ On `pull_request` events GitHub runs workflows from the PR **merge ref**
    `changes` classification job, the step
    `Detect fork PR modifying GitHub workflows` runs
    `scripts/ci_fork_pr_guard.py` on every pull_request event whose
-   `head.repo.fork == true`. If any changed path is under
+   `head.repo.fork != false`. If any changed path is under
    `.github/workflows/**`, the script exits non-zero with an explanatory
    message, failing the classification job and tripping runtime-gate's
    fail-closed branch — the required checks go red as a paper trail.
-   - Null guard: `head.repo.fork` may render as null (deleted forks); null is
-     treated as NOT-a-same-repo-PR, so a workflow edit still trips the
-     detector while non-workflow changes pass cleanly.
+   - Null guard: `head.repo.fork` may render as null (deleted forks). The
+     step condition is deliberately `!= false`, so a null fork — not
+     provably a same-repo PR — still reaches the seam and a workflow edit
+     trips the detector; only a proven `fork == false` (same-repository PR)
+     skips the step.
 3. **Runtime-gate fail-closed handling**: a missing/skipped
    `integration-tests` result fails Runtime Gate for runtime PRs, and fork
    PRs get an explicit "integration skipped for security" summary instead of

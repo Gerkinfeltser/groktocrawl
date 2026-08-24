@@ -781,6 +781,12 @@ def render_text(summary: dict[str, Any]) -> str:
 
 # --- Read-only ruleset verification (--verify-rulesets, #562) ---------------
 
+# Canonical main-ruleset instance ids at documentation time. These are
+# API-assigned METADATA (deliberately ignored by the whitelist comparator):
+# deleting and re-applying a ruleset (e.g. via --apply after removal)
+# assigns a NEW id, so an id mismatch is reported as a WARNING, never a
+# verification failure. Name + policy diff + enforcement remain the drift
+# signal.
 EXPECTED_RULESET_IDS = {
     "main review policy": 20314008,
     "main required checks": 20314768,
@@ -789,17 +795,22 @@ EXPECTED_RULESET_IDS = {
 
 def verify_rulesets(
     api: GithubApi,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Read-only verification that both main rulesets are active + diff-clean.
 
     Issues exclusively GET requests (list + per-id details), so a
     repo-scoped token suffices and no admin:org scope is required. Returns
-    (verified, failures): each entry carries name/id/enforcement/diffs/ok.
-    A ruleset is ok only when it exists, reports enforcement == "active",
-    and its whitelist diff against the expected-state constant is empty.
+    (verified, failures, warnings): each verified/failure entry carries
+    name/id/expected_id/enforcement/diffs/ok; warnings carry informational
+    observations that do NOT affect the exit code (currently: canonical-id
+    drift after a ruleset was recreated — ids are metadata, not policy).
+    A ruleset is ok only when it exists under its expected NAME, reports
+    enforcement == "active", and its whitelist diff against the
+    expected-state constant is empty.
     """
     verified: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
     try:
         summaries = api.list_rulesets()
         by_name = {
@@ -808,7 +819,7 @@ def verify_rulesets(
             if summary.get("name")
         }
     except EnforceError as exc:
-        return [], [{"name": None, "reason": f"could not list rulesets: {exc}"}]
+        return [], [{"name": None, "reason": f"could not list rulesets: {exc}"}], []
 
     for wanted in RULESETS:
         name = wanted["name"]
@@ -829,30 +840,39 @@ def verify_rulesets(
                 }
             )
             continue
+        diffs = ruleset_diff(wanted, actual)
+        if actual.get("enforcement") != "active":
+            diffs.append(
+                f"enforcement: expected 'active', got {actual.get('enforcement')!r}"
+            )
         entry: dict[str, Any] = {
             "name": name,
             "id": int(ruleset_id),
+            "expected_id": EXPECTED_RULESET_IDS.get(name),
             "enforcement": actual.get("enforcement"),
-            "diffs": [],
-            "ok": False,
+            "diffs": diffs,
+            "ok": not diffs,
         }
-        if EXPECTED_RULESET_IDS.get(name) not in (None, int(ruleset_id)):
-            entry["diffs"].append(
-                f"id: expected {EXPECTED_RULESET_IDS[name]}, got {ruleset_id}"
+        # Id drift is metadata-only (see EXPECTED_RULESET_IDS): warn loudly,
+        # keep verifying policy by name.
+        expected_id = EXPECTED_RULESET_IDS.get(name)
+        if expected_id is not None and expected_id != int(ruleset_id):
+            warnings.append(
+                {
+                    "name": name,
+                    "id": int(ruleset_id),
+                    "message": (
+                        f"canonical id drifted: expected {expected_id}, got "
+                        f"{ruleset_id} (ruleset likely recreated; policy "
+                        f"verification continues by name)"
+                    ),
+                }
             )
-        if actual.get("enforcement") != "active":
-            entry["diffs"].append(
-                f"enforcement: expected 'active', got {actual.get('enforcement')!r}"
-            )
-        diffs = ruleset_diff(wanted, actual)
-        if diffs:
-            entry["diffs"].extend(diffs)
-        entry["ok"] = not entry["diffs"]
         if entry["ok"]:
             verified.append(entry)
         else:
             failures.append(entry)
-    return verified, failures
+    return verified, failures, warnings
 
 
 def render_verify_text(
@@ -862,6 +882,7 @@ def render_verify_text(
     auth_source: str,
     verified: list[dict[str, Any]],
     failures: list[dict[str, Any]],
+    warnings: list[dict[str, Any]] | None = None,
 ) -> str:
     """Human-readable report for the --verify-rulesets mode."""
     lines = [
@@ -887,6 +908,8 @@ def render_verify_text(
             )
         else:
             lines.append(f"[FAIL] {entry['name']}: {entry['reason']}")
+    for warning in warnings or []:
+        lines.append(f"[warn] {warning['name']}: {warning['message']}")
     if failures:
         lines.append("")
         lines.append(
@@ -899,16 +922,21 @@ def render_verify_text(
     else:
         lines.append("")
         lines.append("RESULT: PASS - both main rulesets are active and match policy.")
+        if warnings:
+            lines.append(
+                "(warnings above are informational and do not affect the exit code)"
+            )
     return "\n".join(lines)
 
 
 def run_verify_rulesets(api: GithubApi) -> dict[str, Any]:
     """Structured summary for the read-only verification mode."""
-    verified, failures = verify_rulesets(api)
+    verified, failures, warnings = verify_rulesets(api)
     return {
         "mode": "verify-rulesets",
         "verified": verified,
         "failures": failures,
+        "warnings": warnings,
         "ok": not failures,
     }
 
@@ -1026,6 +1054,7 @@ def main(argv: list[str] | None = None) -> int:
                     auth_source,
                     summary["verified"],
                     summary["failures"],
+                    summary["warnings"],
                 )
             )
         return 0 if summary["ok"] else 1

@@ -857,6 +857,33 @@ class VerifyRulesetsModeTests(unittest.TestCase):
         self.assertEqual(names, {"main review policy", "main required checks"})
         self.assertTrue(all(entry["ok"] for entry in parsed["verified"]))
         self.assertEqual(parsed["failures"], [])
+        # Matching canonical ids produce no warnings.
+        self.assertEqual(parsed["warnings"], [])
+
+    def test_recreated_ruleset_id_drift_warns_but_still_passes(self) -> None:
+        # Ids are API-assigned metadata: after a delete + re-apply (the exact
+        # remediation the FAIL message recommends), the new id must NOT fail
+        # verification forever — policy drift is the failure signal.
+        recreated = _live_ruleset(MODULE.RULESET_A, 999999)
+        live = [recreated, _live_ruleset(MODULE.RULESET_B, 20314768)]
+        rc, out = self._run(
+            FakeTransport(build_handlers(rulesets=live)),
+            ["--verify-rulesets", "--owner", "groktopus", "--repo", "groktocrawl"],
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("[warn]", out)
+        self.assertIn("canonical id drifted", out)
+
+    def test_generic_repo_without_canonical_ids_passes_when_policy_clean(self) -> None:
+        # The mode is generically usable: ids are matched by NAME, so a repo
+        # whose rulesets have different instance ids still verifies cleanly.
+        other_a = _live_ruleset(MODULE.RULESET_A, 11111111)
+        other_b = _live_ruleset(MODULE.RULESET_B, 22222222)
+        rc, _out = self._run(
+            FakeTransport(build_handlers(rulesets=[other_a, other_b])),
+            ["--verify-rulesets", "--owner", "some-org", "--repo", "other-repo"],
+        )
+        self.assertEqual(rc, 0)
 
     def test_verify_mode_does_not_run_safety_gate_or_change_plan(self) -> None:
         # The verify mode is strictly ruleset-focused: check-runs must never
