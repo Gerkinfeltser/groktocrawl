@@ -115,13 +115,44 @@ gh api "repos/groktopus/groktocrawl/rulesets/${RULESET_A_ID}/history"
 gh api "repos/groktopus/groktocrawl/rulesets/${RULESET_B_ID}/history"
 ```
 
-The history endpoint records the actor and timestamp for each ruleset version (the disable and the restore both appear). Create a tracking issue:
+## Incident log (actual events)
 
-```bash
-gh issue create \
-  --title "Emergency branch protection bypass on main (rulesets disabled on $(date -u +%Y-%m-%d))" \
-  --body "Temporarily disabled 'main review policy' and 'main required checks' on main to merge a blocking change, then restored to active within 24h. Audit evidence: ruleset history for both ruleset ids (RULESET_A_ID / RULESET_B_ID)."
-```
+Actual uses of this procedure are recorded here (durable copy of each incident's tracking
+issue). Evidence for every entry is the ruleset history endpoint (see **Audit trail**),
+which is the authoritative audit trail for this org.
+
+### 2026-08-22 — Emergency bypass to merge PR #582 (Gutenberg external-test blocker)
+
+Tracking issue: [#583](https://github.com/groktopus/groktocrawl/issues/583).
+
+- **What happened:** Both `main` rulesets were temporarily disabled and then restored to
+  `active` on 2026-08-22:
+  - **Ruleset A** — id `20314008` ("main review policy"): disabled ~01:05Z, restored to
+    `active` ~01:06Z.
+  - **Ruleset B** — id `20314768` ("main required checks"): disabled ~01:05Z, restored to
+    `active` ~01:06Z.
+- **Actor:** `magnus919` (User id 942000) performed both the disable and the restore.
+- **Purpose:** unblock the merge of PR #582 (merge commit `bf0ca66`), which had three
+  consecutive Integration-Tests reruns failing on the pre-existing Gutenberg external-test
+  blocker (gutenberg.org serving 5xx) — an external outage outside the repo's control.
+- **Why the emergency path was required:** consistent with the 2026-08-03 maintainer
+  self-merge amendment above, this was NOT a review bypass — Ruleset A's bypass actors cover
+  only "main review policy", which alone would not have blocked this merge. The merge was
+  blocked by the failing required check on Ruleset B "main required checks", which has no
+  bypass actors, so the emergency path was the only way to land the change.
+- **Compliance:** restore-to-active occurred ~21 seconds after the disable
+  (~01:05Z → ~01:06Z) — far inside the Timeline step 5 requirement to restore both rulesets
+  to `active` within 24 hours.
+- **Evidence (ruleset-history version IDs):**
+  - Ruleset A (`20314008`): version `47285460` (disable, 01:05Z) → `47285477`
+    (restore, 01:06Z)
+  - Ruleset B (`20314768`): version `47285461` (disable, 01:05Z) → `47285479`
+    (restore, 01:06Z)
+- **Post-incident state:** re-verified 2026-08-24 via
+  `python3 scripts/enforce-branch-protection.py --owner groktopus --repo groktocrawl`
+  (default dry-run, GET-only): exit 0, safety gate verified, change plan "no changes" for
+  both rulesets, and `gh api repos/groktopus/groktocrawl/rulesets/{id}` reports
+  `main review policy: active` and `main required checks: active`.
 
 ## Audit trail
 
