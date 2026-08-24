@@ -59,7 +59,7 @@ def test_required_twin_images_are_immutable():
     compose = (root / "docker-compose.yml").read_text()
     assert (
         compose.count(
-            "ghcr.io/magnus919/slopsearx@sha256:c7fd83077bf5f189a0125b6377b367740068d012e9caeb48318401a23437711d"
+            "ghcr.io/magnus919/slopsearx@sha256:91194d146d205b1cf4688c1989da8f5f6b599a9627be23fd1ee7a4e488fda5b7"
         )
         == 2
     )

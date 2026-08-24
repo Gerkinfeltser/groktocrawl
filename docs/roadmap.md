@@ -15,9 +15,6 @@ Buckets:
 
 ## Now
 
-- **SlopSearX search fallback resilience.** Make the default DuckDuckGo search
-  backend more robust so the zero-config search path degrades gracefully
-  instead of failing ([#413](https://github.com/groktopus/groktocrawl/issues/413)).
 - **Contributor skills directory.** Add `.agent/skills/` with reusable,
   documented skills so contributors can pick up common tasks quickly
   ([#394](https://github.com/groktopus/groktocrawl/issues/394)).
