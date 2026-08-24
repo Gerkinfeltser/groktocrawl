@@ -17,6 +17,15 @@ Assertion conventions (per validation contract): the txt-tier chapter title
 is assembled as stripped-prefix + first content line, so tests assert on
 chapter COUNT, distinctive prose, and boilerplate absence — never on exact
 heading strings like ``## CHAPTER I``.
+
+Hardening conventions: every happy-path scrape goes through
+:func:`_scrape`, which asserts endpoint containment on the seam it used
+(``set(seam.requests) <= allowed fixture endpoints``); error-path tests
+call :func:`_assert_seam_contained` directly — hermeticity is enforced for
+every test rather than one dedicated containment test. The seam routes
+responses OR exception instances; routing is decided with ``isinstance(...,
+BaseException)`` plus an exact-type check so an exception CLASS can never
+be mistaken for a response object.
 """
 
 import re
@@ -33,6 +42,8 @@ from scraper.adapters.base import (
     AdapterResult,
     SiteAdapter,
 )
+
+from common.metrics import METRICS
 
 BOOK_ID = "11"
 
@@ -82,8 +93,11 @@ class _FixtureSeam:
     """Fake async-context client serving only the gutenberg fixture endpoints.
 
     Routes are keyed ``"epub"`` / ``"txt"`` / ``"gutendex"``; a route value
-    may be a ``_FakeResponse`` or an ``Exception`` instance (raised to
-    simulate transport failures). Unrouted endpoints answer 404.
+    may be a ``_FakeResponse`` or an exception INSTANCE (raised to simulate
+    transport failures). Unrouted endpoints answer 404. An exception class
+    is deliberately NOT accepted as a route value — dispatch checks
+    ``isinstance(response, BaseException)`` plus an exact-type guard, so a
+    misused class cannot silently pass through as a response object.
     """
 
     def __init__(self, book_id: str = BOOK_ID):
@@ -116,10 +130,21 @@ class _FixtureSeam:
         else:
             kind = "gutendex"
         response = self.routes.get(kind)
-        if isinstance(response, Exception):
+        if isinstance(response, type) and issubclass(response, BaseException):
+            raise AssertionError(
+                f"seam route {kind!r} holds an exception CLASS ({response!r}); "
+                "routes must hold response objects or exception instances"
+            )
+        if isinstance(response, BaseException):
             raise response
         if response is None:
-            response = _FakeResponse(status_code=404)
+            # Unrouted endpoint: answer 404 like the real origin would.
+            return _FakeResponse(status_code=404)
+        if not isinstance(response, _FakeResponse):
+            raise AssertionError(
+                f"seam route {kind!r} holds neither a response nor an "
+                f"exception instance: {type(response).__name__}"
+            )
         return response
 
 
@@ -199,6 +224,21 @@ def _build_book_text() -> str:
         "*** START OF THIS PROJECT GUTENBERG EBOOK "
         "ALICE'S ADVENTURES IN WONDERLAND ***\n\n"
     )
+    # License-preamble gutter filler, mirroring the real pg<id>.txt layout
+    # (that sentence opens the boilerplate between the START marker and the
+    # first chapter heading). It must stay strippable so the
+    # ``'Updated editions' not in md`` negative assertion has teeth: the
+    # chapter splitter drops all text preceding the first CHAPTER heading,
+    # so any regression leaking pre-heading gutter into the markdown fails
+    # the test. Deliberately NOT placed after the END marker — the adapter's
+    # known artifact appends post-END trailer text to the last chapter body,
+    # which would make the negative assertion permanently red.
+    license_preamble = (
+        '"Updated editions will replace the previous one—the old '
+        'editions will be renamed."\n'
+        "Please check the Project Gutenberg web pages of this eBook "
+        "for further details.\n\n"
+    )
     chapter_one = (
         "CHAPTER I\nDown the Rabbit-Hole\n\n"
         "Alice was beginning to get very tired of sitting by her sister on "
@@ -210,15 +250,22 @@ def _build_book_text() -> str:
         "'Curiouser and curiouser!' cried Alice she was much surprised.\n"
         f"The white rabbit ran close by her, and the {PROSE_CHAPTER_TWO}\n"
         "gleamed on the little glass table.\n\n"
-        # Post-END trailer filler. NOTE: the adapter's boilerplate stripper
-        # removes only up to (not including) the END marker, so this trailer
-        # is appended to the last chapter's body — a known artifact we must
-        # NOT pin in assertions; keep it out of the prose fixtures instead.
+        # No post-END trailer filler here: the adapter's boilerplate stripper
+        # removes only up to (not including) the END marker, so anything past
+        # it is appended to the last chapter's body — a known artifact we
+        # must NOT pin in assertions; keep the prose fixtures clean of it.
     )
     end_marker = (
         "*** END OF THIS PROJECT GUTENBERG EBOOK ALICE'S ADVENTURES IN WONDERLAND ***\n"
     )
-    return header_filler + start_marker + chapter_one + chapter_two + end_marker
+    return (
+        header_filler
+        + start_marker
+        + license_preamble
+        + chapter_one
+        + chapter_two
+        + end_marker
+    )
 
 
 def _build_boilerplate_only_text() -> str:
@@ -261,8 +308,36 @@ def _healthy_routes(epub_bytes: bytes | None = None) -> dict[str, Any]:
     }
 
 
-def _scrape(url: str) -> Any:
-    return gutenberg.GutenbergAdapter().scrape(url, AdapterContext())
+def _assert_seam_contained(seam: _FixtureSeam) -> None:
+    """Every recorded request stayed inside the fixture endpoints."""
+    assert set(seam.requests) <= seam.endpoint_urls(), (
+        f"seam contacted off-fixture endpoints: "
+        f"{set(seam.requests) - seam.endpoint_urls()}"
+    )
+
+
+def seam_requests(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Return the current seam's recorded requests (via the patched factory)."""
+    return getattr(monkeypatch, "_gutenberg_seam_requests", [])
+
+
+async def _scrape(url: str, monkeypatch: pytest.MonkeyPatch, **routes: Any) -> Any:
+    """Install the seam with ``routes`` and scrape ``url`` hermetically.
+
+    Asserts endpoint containment afterwards, so every scrape-driven test
+    (not just the dedicated containment test) verifies that no traffic left
+    the three fixture endpoints.
+    """
+    seam = _install_seam(monkeypatch, **routes)
+    monkeypatch.setattr(
+        monkeypatch,
+        "_gutenberg_seam_requests",
+        seam.requests,
+        raising=False,
+    )
+    result = await gutenberg.GutenbergAdapter().scrape(url, AdapterContext())
+    _assert_seam_contained(seam)
+    return result
 
 
 # ── Hermeticity containment ───────────────────────────────────────
@@ -270,7 +345,12 @@ def _scrape(url: str) -> Any:
 
 @pytest.mark.asyncio
 async def test_seam_serves_only_fixture_endpoints(monkeypatch):
-    """Every recorded request stays inside the three fixture endpoints."""
+    """Every recorded request stays inside the three fixture endpoints.
+
+    This dedicated test additionally asserts WHICH endpoints were touched;
+    endpoint containment itself is asserted for every scrape via
+    :func:`_scrape`, so no test can leak off-fixture traffic silently.
+    """
     txt = _FakeResponse(content=_build_book_text().encode())
     # One EPUB-hit scrape...
     seam = _install_seam(
@@ -279,7 +359,7 @@ async def test_seam_serves_only_fixture_endpoints(monkeypatch):
         gutendex=_FakeResponse(json_data=_gutendex_payload()),
         txt=txt,
     )
-    result = await _scrape(EBOOKS_URL)
+    result = await gutenberg.GutenbergAdapter().scrape(EBOOKS_URL, AdapterContext())
     assert result.success is True
     # ...plus one txt-tier fallback scrape (an EPUB hit short-circuits
     # before the txt tier, so both tiers need separate runs for coverage).
@@ -290,7 +370,7 @@ async def test_seam_serves_only_fixture_endpoints(monkeypatch):
             seam, epub=_FakeResponse(status_code=504), txt=txt
         ),
     )
-    result = await _scrape(EBOOKS_URL)
+    result = await gutenberg.GutenbergAdapter().scrape(EBOOKS_URL, AdapterContext())
     assert result.success is True
 
     endpoints = seam.endpoint_urls()
@@ -307,13 +387,12 @@ async def test_seam_serves_only_fixture_endpoints(monkeypatch):
 async def test_epub_tier_parses_metadata_and_chapters(monkeypatch):
     """A canned EPUB zip parses into OPF metadata + chapter-structured markdown."""
     # gutendex answers 500 here so the surviving metadata is pure OPF.
-    seam = _install_seam(
+    result = await _scrape(
+        EBOOKS_URL,
         monkeypatch,
         epub=_FakeResponse(content=_build_epub_bytes()),
         gutendex=_FakeResponse(status_code=500),
     )
-
-    result = await _scrape(EBOOKS_URL)
 
     assert result.success is True
     assert result.source == "gutenberg-epub"
@@ -329,9 +408,11 @@ async def test_epub_tier_parses_metadata_and_chapters(monkeypatch):
     assert result.metadata["gutenberg_id"] == 11
     assert isinstance(result.metadata["gutenberg_id"], int)
     chapters = result.metadata["chapters"]
-    assert "CHAPTER I Down the Rabbit-Hole" in chapters
-    assert "CHAPTER II The Pool of Tears" in chapters
-    assert seam.requests, "adapter never reached the seam"
+    assert chapters == [
+        "CHAPTER I Down the Rabbit-Hole",
+        "CHAPTER II The Pool of Tears",
+    ]
+    assert seam_requests(monkeypatch), "adapter never reached the seam"
 
 
 # ── Tier 2: plain-text fallback ───────────────────────────────────
@@ -340,14 +421,13 @@ async def test_epub_tier_parses_metadata_and_chapters(monkeypatch):
 @pytest.mark.asyncio
 async def test_txt_fallback_when_epub_returns_504(monkeypatch):
     """EPUB 504 (observed outage shape) recovers via the plaintext tier."""
-    _install_seam(
+    result = await _scrape(
+        EBOOKS_URL,
         monkeypatch,
         epub=_FakeResponse(status_code=504),
         txt=_FakeResponse(content=_build_book_text().encode()),
         gutendex=_FakeResponse(json_data=_gutendex_payload()),
     )
-
-    result = await _scrape(EBOOKS_URL)
 
     assert result.success is True
     assert result.source == "gutenberg-plaintext"
@@ -406,13 +486,12 @@ async def test_gutendex_author_formats_birth_death(
 async def test_gutendex_overrides_opf_metadata_on_epub_path(monkeypatch):
     """On the EPUB path the gutendex merge wins over differing OPF values."""
     payload = _gutendex_payload()
-    seam = _install_seam(
+    result = await _scrape(
+        EBOOKS_URL,
         monkeypatch,
         epub=_FakeResponse(content=_build_epub_bytes()),
         gutendex=_FakeResponse(json_data=payload),
     )
-
-    result = await _scrape(EBOOKS_URL)
 
     assert result.success is True
     assert result.source == "gutenberg-epub"
@@ -423,19 +502,18 @@ async def test_gutendex_overrides_opf_metadata_on_epub_path(monkeypatch):
     assert result.metadata["language"] == payload["languages"][0]
     assert result.metadata["subjects"] == payload["subjects"]
     assert result.metadata["download_count"] == 54321
-    assert seam.requests, "adapter never reached the seam"
+    assert seam_requests(monkeypatch), "adapter never reached the seam"
 
 
 @pytest.mark.asyncio
 async def test_gutendex_failure_is_nonfatal(monkeypatch):
     """A gutendex 500 degrades to OPF metadata without breaking the scrape."""
-    _install_seam(
+    result = await _scrape(
+        EBOOKS_URL,
         monkeypatch,
         epub=_FakeResponse(content=_build_epub_bytes()),
         gutendex=_FakeResponse(status_code=500),
     )
-
-    result = await _scrape(EBOOKS_URL)
 
     assert result.success is True
     assert result.source == "gutenberg-epub"
@@ -451,14 +529,16 @@ async def test_gutendex_failure_is_nonfatal(monkeypatch):
 @pytest.mark.asyncio
 async def test_both_tiers_dead_raises_adapter_error(monkeypatch):
     """EPUB and txt both failing raises a typed AdapterError."""
-    _install_seam(
+    seam = _install_seam(
         monkeypatch,
         epub=_FakeResponse(status_code=504),
         txt=_FakeResponse(status_code=504),
     )
 
     with pytest.raises(AdapterError, match="Could not extract content"):
-        await _scrape(EBOOKS_URL)
+        await gutenberg.GutenbergAdapter().scrape(EBOOKS_URL, AdapterContext())
+
+    _assert_seam_contained(seam)
 
 
 @pytest.mark.asyncio
@@ -493,6 +573,20 @@ async def test_registry_dispatch_falls_through_to_stub_adapter(monkeypatch):
     assert result.source == "generic-fallback"
     assert result.markdown == "generic pipeline markdown"
     assert result.url == EBOOKS_URL
+    # Optional corroboration per VAL-GUTT-005: the dispatch-error counter
+    # path executed for the failing gutenberg adapter, and the stub recorded
+    # a hit — proving both dispatch outcomes were exercised end-to-end.
+    # Label-set presence (not absolute values): METRICS is a process-global
+    # singleton, so counter totals accumulate across tests in one pytest run.
+    metrics_text = METRICS.generate_openmetrics()
+    assert (
+        'groktocrawl_adapter_dispatch_total{adapter_group="gutenberg",'
+        'outcome="error"}' in metrics_text
+    )
+    assert (
+        'groktocrawl_adapter_dispatch_total{adapter_group="stub-generic",'
+        'outcome="hit"}' in metrics_text
+    )
 
 
 # ── Invalid ids ───────────────────────────────────────────────────
@@ -504,9 +598,10 @@ async def test_invalid_book_id_errors_without_network(monkeypatch):
     seam = _install_seam(monkeypatch)
 
     with pytest.raises(AdapterError, match="Could not extract book ID"):
-        await _scrape(INVALID_ID_URL)
+        await gutenberg.GutenbergAdapter().scrape(INVALID_ID_URL, AdapterContext())
 
     assert seam.requests == []
+    _assert_seam_contained(seam)
 
 
 @pytest.mark.asyncio
@@ -517,13 +612,13 @@ async def test_nonexistent_book_id_deterministic(monkeypatch):
     results = []
     for _ in range(2):
         with pytest.raises(AdapterError) as excinfo:
-            await _scrape(NONEXISTENT_URL)
+            await gutenberg.GutenbergAdapter().scrape(NONEXISTENT_URL, AdapterContext())
         results.append((type(excinfo.value).__name__, str(excinfo.value)))
 
     assert results[0] == results[1]
     assert results[0][0] == "AdapterError"
     # Only fixture endpoints were attempted (and answered 404 by the seam).
-    assert set(seam.requests) <= seam.endpoint_urls()
+    _assert_seam_contained(seam)
 
 
 # ── EPUB acceptance gate ──────────────────────────────────────────
@@ -533,15 +628,14 @@ async def test_nonexistent_book_id_deterministic(monkeypatch):
 async def test_epub_tiny_payload_falls_through_to_txt(monkeypatch):
     """A 200 EPUB response at/below the 100-byte gate falls through to txt."""
     tiny = b"x" * 87  # accepted gate is strictly ">100 bytes"
-    _install_seam(
+    result = await _scrape(
+        EBOOKS_URL,
         monkeypatch,
         epub=_FakeResponse(status_code=200, content=tiny),
         txt=_FakeResponse(content=_build_book_text().encode()),
         gutendex=_FakeResponse(json_data=_gutendex_payload()),
     )
     assert len(tiny) <= 100
-
-    result = await _scrape(EBOOKS_URL)
 
     assert result.success is True
     assert result.source == "gutenberg-plaintext"
@@ -558,16 +652,13 @@ async def test_epub_tiny_payload_falls_through_to_txt(monkeypatch):
 )
 async def test_alternate_url_forms_dispatch_to_same_book_id(monkeypatch, label, url):
     """All three pattern families extract id 11 and succeed hermetically."""
-    seam = _install_seam(monkeypatch, **_healthy_routes())
+    result = await _scrape(url, monkeypatch, **_healthy_routes())
 
     assert gutenberg._extract_book_id(url) == BOOK_ID
-
-    result = await _scrape(url)
 
     assert result.success is True, f"{label} form failed"
     assert result.source == "gutenberg-epub"
     assert result.metadata["gutenberg_id"] == 11
-    assert set(seam.requests) <= seam.endpoint_urls()
 
 
 # ── Boilerplate-only plaintext ────────────────────────────────────
@@ -578,11 +669,13 @@ async def test_boilerplate_only_txt_raises_adapter_error(monkeypatch):
     """A txt payload with only PG boilerplate must not yield empty success."""
     raw = _build_boilerplate_only_text()
     assert len(raw) > 100  # clears the download gate, strips to nothing
-    _install_seam(
+    seam = _install_seam(
         monkeypatch,
         epub=_FakeResponse(status_code=504),
         txt=_FakeResponse(content=raw.encode()),
     )
 
     with pytest.raises(AdapterError):
-        await _scrape(EBOOKS_URL)
+        await gutenberg.GutenbergAdapter().scrape(EBOOKS_URL, AdapterContext())
+
+    _assert_seam_contained(seam)
