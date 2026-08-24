@@ -22,6 +22,7 @@ without a failing test.
 
 from __future__ import annotations
 
+import math
 import re
 from types import SimpleNamespace
 
@@ -58,7 +59,15 @@ class GhaScalar:
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, GhaScalar):
-            return self._as_number() == other._as_number()
+            mine = self._as_number()
+            theirs = other._as_number()
+            # NaN (coerced non-numeric strings, raw NaN) never equals anything
+            # — including another NaN. Python's IEEE `float ==` already
+            # provides this; the explicit guard keeps the contract independent
+            # of that accident (#562 round 2).
+            if math.isnan(mine) or math.isnan(theirs):
+                return False
+            return mine == theirs
         return NotImplemented
 
     def __ne__(self, other: object) -> bool:
@@ -68,11 +77,13 @@ class GhaScalar:
         return not equal
 
     def __bool__(self) -> bool:
+        # Runner IsTruthy falsifies only null, Boolean false, the EMPTY
+        # string, and number zero. Strings '0' and 'false' are TRUTHY
+        # (JavaScript-style string-zero falsiness is NOT GHA semantics;
+        # corrected #562 round 2).
         raw = self.raw
-        if raw is None or raw is False:
+        if raw is None or raw is False or raw == "":
             return False
-        if isinstance(raw, str):
-            return raw not in ("", "0")
         return bool(raw)
 
     def __hash__(self) -> int:

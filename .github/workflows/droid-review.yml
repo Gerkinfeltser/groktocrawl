@@ -36,7 +36,27 @@ jobs:
 
   droid-review:
     needs: assess-depth
-    if: github.event.pull_request.draft == false && github.actor != 'app/dependabot' && github.event.pull_request.head.repo.fork == false
+    # Fork gate hygiene (#562 round 2): mirrors docker.yml's integration-lane
+    # gate (PR #605). GHA loose equality coerces Null->0 and Boolean false->0,
+    # so the previous raw `head.repo.fork == false` evaluated TRUE for deleted
+    # forks (null) and admitted them onto automated AI review — low impact on
+    # this hosted, review-only lane, but it was the last raw-comparison fork
+    # gate under .github/workflows/. Direct expression arithmetic cannot
+    # separate null from false (both coerce to 0), so PR admission requires the
+    # STRING rendering to equal 'false' (format('{0}', ...) yields
+    # 'true'/'false'/'' for null; a missing head.repo property also renders
+    # ''). Deleted forks therefore fail closed OFF review.
+    #
+    # The explicit workflow_dispatch branch preserves manual runs of this
+    # workflow (its own declared trigger): on dispatch events the entire
+    # pull_request context is null, so under the OLD loose comparisons the job
+    # ran — keep that behavior instead of silently dropping the trigger.
+    if: >-
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false &&
+      github.actor != 'app/dependabot' &&
+      format('{0}', github.event.pull_request.head.repo.fork) == 'false') ||
+      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
