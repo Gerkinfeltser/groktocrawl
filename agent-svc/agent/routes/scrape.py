@@ -6,7 +6,12 @@ from datetime import datetime as _dt
 from fastapi import APIRouter, Request
 
 from ..barrier_guard import is_block_flagged, log_refusal
-from ..exceptions import CaptchaError, NotFoundError, ScrapeError
+from ..exceptions import (
+    BarrierDetectedError,
+    CaptchaError,
+    NotFoundError,
+    ScrapeError,
+)
 from ..models import (
     AgentCancelResponse,
     BatchScrapeErrorsResponse,
@@ -43,7 +48,7 @@ async def scrape(request: Request, body: ScrapeRequest) -> ScrapeResponse:
             checks = ((result.get("data") or {}).get("quality") or {}).get(
                 "checks"
             ) or {}
-            raise ScrapeError(
+            raise BarrierDetectedError(
                 detail=(
                     f"Barrier/challenge content detected for {body.url} "
                     f"(warning={result.get('warning')!r}, "
