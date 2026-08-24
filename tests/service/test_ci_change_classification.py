@@ -662,12 +662,25 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
             self.runtime_gate,
         )
         # Pin the fork exclusion to the fail-when-runtime-failed step
-        # specifically (the closing paren before `&&` only appears there, not in
-        # the summarize-fork step), so removing it regresses this test.
+        # specifically, so removing it regresses this test. The exclusion uses
+        # the string-rendered fork comparison: `fork == true` is FALSE for a
+        # deleted-fork PR (null), which would leave that PR failing Runtime
+        # Gate with only a generic message; rendering ('true'/''/'false')
+        # treats every untrusted fork state as excluded from required runtime.
         self.assertIn(
-            "github.event.pull_request.head.repo.fork == true) &&",
+            "format('{0}', github.event.pull_request.head.repo.fork) != 'false') &&",
             self.runtime_gate,
         )
+        # The summarize step must cover deleted forks (null) too — runbook
+        # point 3 promises an explicit skipped-for-security summary for forks.
+        summarize_fork = self.runtime_gate.split(
+            "- name: Summarize fork pull request (integration skipped)", 1
+        )[1].split("- name:", 1)[0]
+        self.assertIn(
+            "format('{0}', github.event.pull_request.head.repo.fork) != 'false'",
+            summarize_fork,
+        )
+        self.assertNotIn("head.repo.fork == true", summarize_fork)
 
     def test_runtime_gate_fails_when_classification_or_required_runtime_fails(
         self,

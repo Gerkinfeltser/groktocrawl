@@ -942,10 +942,17 @@ jobs:
         run: echo "Runtime integration was intentionally not needed for this docs-only pull request."
 
       - name: Summarize fork pull request (integration skipped)
+        # String-rendered comparison: covers proven forks ('true') AND
+        # deleted forks (head.repo.fork null renders '') — both are untrusted,
+        # both get the explicit skipped-for-security summary. Same-repo PRs
+        # render 'false' and never match (#562 scrutiny round 1 follow-up).
         if: >-
-          github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true &&
+          github.event_name == 'pull_request' &&
+          format('{0}', github.event.pull_request.head.repo.fork) != 'false' &&
           needs.changes.result == 'success'
-        run: 'echo "Fork pull request: self-hosted integration skipped for security."'
+        run: |-
+          echo "Fork pull request: self-hosted integration skipped for security."
+          echo "(Includes deleted forks whose head.repo.fork renders null.)"
 
       - name: Summarize successful runtime validation
         if: >-
@@ -968,7 +975,7 @@ jobs:
           !(github.event_name == 'pull_request' &&
           needs.changes.outputs.requires_full_runtime == 'false') &&
           !(github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.fork == true) &&
+          format('{0}', github.event.pull_request.head.repo.fork) != 'false') &&
           needs.integration-tests.result != 'success'
         run: |
           echo "Required runtime integration did not complete successfully."

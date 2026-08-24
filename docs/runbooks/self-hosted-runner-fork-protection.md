@@ -49,7 +49,10 @@ On `pull_request` events GitHub runs workflows from the PR **merge ref**
 3. **Runtime-gate fail-closed handling**: a missing/skipped
    `integration-tests` result fails Runtime Gate for runtime PRs, and fork
    PRs get an explicit "integration skipped for security" summary instead of
-   silent success.
+   silent success. The summary/exclusion conditions use the string-rendered
+   comparison (`format('{0}', head.repo.fork) != 'false'`), so deleted forks
+   (null) get the same explicit treatment as proven forks rather than a
+   generic gate failure.
 
 The decision logic lives in an executable seam so the three scenarios can be
 simulated locally:

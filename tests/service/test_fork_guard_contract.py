@@ -378,6 +378,63 @@ class WorkflowWiringTests(unittest.TestCase):
         # Missing head.repo deref also renders null -> excluded.
         self.assertFalse(runs_for(fork=None, requires_full_runtime="true"))
 
+    def test_runtime_gate_fork_handling_covers_deleted_forks(self) -> None:
+        """Summarize/exclude steps treat every untrusted fork state alike.
+
+        Runbook point 3 promises fork PRs an explicit "integration skipped for
+        security" summary; the pre-fix `fork == true` conditions were FALSE
+        for a deleted-fork PR (null), which would have failed Runtime Gate
+        with only a generic message. The string-rendered comparisons cover
+        null and proven forks identically while never matching same-repo PRs.
+        """
+        parsed = yaml.safe_load(self._workflow_bytes())
+        steps = parsed["jobs"]["runtime-gate"]["steps"]
+        summarize = next(
+            s
+            for s in steps
+            if isinstance(s, dict)
+            and str(s.get("name", "")).startswith("Summarize fork pull request")
+        )
+        fail_required = next(
+            s
+            for s in steps
+            if isinstance(s, dict)
+            and str(s.get("name", "")) == "Fail when required runtime validation fails"
+        )
+
+        def eval_step(step: dict, fork: object, **kw: object) -> bool:
+            condition = " ".join(str(step["if"]).split()).replace("always()", "True")
+            ctx: dict[str, object] = {
+                "github": {
+                    "event_name": kw.get("event_name", "pull_request"),
+                    "event": {
+                        "pull_request": {"head": {"repo": {"fork": GhaScalar(fork)}}}
+                    },
+                },
+                "needs": {
+                    "changes": {
+                        "result": kw.get("changes_result", "success"),
+                        "outputs": {"requires_full_runtime": kw.get("rt", "true")},
+                    },
+                    "integration-tests": {"result": kw.get("integration", "skipped")},
+                },
+            }
+            return bool(gha_eval(condition, ctx))
+
+        for fork in (True, None):  # proven fork AND deleted fork
+            self.assertTrue(eval_step(summarize, fork), repr(fork))
+            # Exclusion holds even when the skipped integration result exists.
+            self.assertFalse(
+                eval_step(fail_required, fork, integration="failure"), repr(fork)
+            )
+        # Same-repo PRs never match the fork branches...
+        self.assertFalse(eval_step(summarize, False))
+        # ...and still fail Runtime Gate when their required integration run fails.
+        self.assertTrue(
+            eval_step(fail_required, False, integration="failure"),
+            "same-repo runtime failure must fail the gate",
+        )
+
 
 class GuardMessagingTests(unittest.TestCase):
     """VAL-FORK-002: message names the platform control as authoritative."""
