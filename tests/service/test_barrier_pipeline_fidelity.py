@@ -10,7 +10,10 @@ Fastly-challenge fixture instead, per the M1 user-testing fidelity findings:
   * ``smart_scrape`` over an HTTP-served F1 (default flow) surfaces the
     block-page warning + block_detected "fail" — never a bare success.
   * ``smart_scrape`` over an HTTP-served F1 (forced-browser flow) keeps the
-    Tier 3 barrier envelope visible in its terminal outcome (#586 polish).
+    Tier 3 barrier envelope visible in its terminal outcome (#586 polish),
+    and the default flow's terminal dict does the same after full tier
+    exhaustion (corroborated challenges keep their provenance; plain
+    exhaustion stays bare).
   * A flagged CHILD page is attempted at most 3 times through ``CrawlEngine.run``
     (initial + bounded retries), then skipped.
   * A poisoned CRAWL-cache hit is refused end-to-end on a real engine run:
@@ -385,6 +388,142 @@ class TestSmartScrapeOverServedFixture:
             patch.object(recovery, "attempt_llm_recovery", no_recovery),
         ):
             result = await smart_scrape(served_challenge_url, force_browser=True)
+
+        assert result.get("error")
+        assert "barrier" not in result
+        assert result.get("source") == "none"
+
+    @_requires_curl_cffi
+    @pytest.mark.asyncio
+    async def test_default_flow_preserves_tier3_barrier_provenance(
+        self, served_challenge_url
+    ):
+        """Default flow: the corroborated Tier 3 envelope survives exhaustion.
+
+        The #586 provenance merge landed only on the force_browser fast path;
+        the default flow's terminal ``source: none`` dict still dropped the
+        Tier 3 barrier envelope when the gate refused the page and every
+        later tier yielded nothing. This drives the real default pipeline
+        (HEAD probe -> skipped Tiers 1-2 -> Tier 3 envelope -> dead
+        FlareSolverr -> no LLM recovery -> terminal assembly) with the tier
+        boundary patched hermetically (repo precedent:
+        test_barrier_consumers.TestScraperPipelineFixtureOutcome): the served
+        F1 HTML rides in ``raw_html_start`` so the re-classified challenge is
+        corroborated at confidence > 0.7 — exactly the shape that skips the
+        ``best_effort`` escape hatch and reaches the bare terminal dict.
+        """
+        import scraper.recovery as recovery
+        from scraper.fetch import smart_scrape
+
+        envelope = {
+            "error": "Barrier detected: barrier fastly (confidence: 0.95)",
+            "barrier": {
+                "detected": True,
+                "type": "fastly",
+                "provider": "fastly",
+                "confidence": 0.95,
+                "detail": "Definitive Fastly challenge signature (/_fs-ch-)",
+            },
+            "markdown": "",
+            "source": "barrier-detection",
+            "url": served_challenge_url,
+            # Corroboration payload: fetch_tiers keeps raw_html_start on
+            # rendered-but-refused pages; _classify_barrier re-runs over it.
+            "raw_html_start": F1_PATH.read_text(encoding="utf-8"),
+        }
+
+        async def gated_tier3(url):
+            return dict(envelope)
+
+        async def dead_flare(_url):
+            return None
+
+        async def no_recovery(_url, _content):
+            return None
+
+        async def allow(*_args, **_kwargs):
+            return True, None
+
+        async def shielded_probe(_url, _client):
+            return {
+                "shielded": True,
+                "redirect_url": _url,
+                "is_binary": False,
+                "is_empty": False,
+                "status_code": 403,
+                "content_type": "text/html",
+            }
+
+        async def no_cache(_url):
+            return None
+
+        with (
+            patch("scraper.fetch._politeness_check_and_delay", allow),
+            patch("scraper.fetch._head_probe", shielded_probe),
+            patch("scraper.fetch._check_cache", no_cache),
+            patch("scraper.fetch.fetch_via_playwright", gated_tier3),
+            patch("scraper.fetch.fetch_via_flaresolverr", dead_flare),
+            patch.object(recovery, "attempt_llm_recovery", no_recovery),
+        ):
+            result = await smart_scrape(served_challenge_url)
+
+        assert result.get("error"), f"expected terminal error payload, got {result!r}"
+        assert result.get("barrier") == envelope["barrier"], (
+            f"Tier 3 barrier provenance must survive into the default-flow "
+            f"terminal dict: {result!r}"
+        )
+        assert not (result.get("markdown") and not result.get("warning")), (
+            "must never ship challenge content as unqualified success"
+        )
+
+    @_requires_curl_cffi
+    @pytest.mark.asyncio
+    async def test_default_flow_bare_failure_stays_bare_without_barrier(
+        self, served_challenge_url
+    ):
+        """Non-barrier exhaustion keeps the legacy bare default-flow dict.
+
+        The default-flow twin of the forced-browser non-regression test: a
+        Tier 3 that yields nothing must not grow a ``barrier`` key on the
+        terminal error — plain unextractable pages fail exactly as before.
+        """
+        import scraper.recovery as recovery
+        from scraper.fetch import smart_scrape
+
+        async def empty_tier3(_url):
+            return None
+
+        async def dead_flare(_url):
+            return None
+
+        async def no_recovery(_url, _content):
+            return None
+
+        async def allow(*_args, **_kwargs):
+            return True, None
+
+        async def shielded_probe(_url, _client):
+            return {
+                "shielded": True,
+                "redirect_url": _url,
+                "is_binary": False,
+                "is_empty": False,
+                "status_code": 403,
+                "content_type": "text/html",
+            }
+
+        async def no_cache(_url):
+            return None
+
+        with (
+            patch("scraper.fetch._politeness_check_and_delay", allow),
+            patch("scraper.fetch._head_probe", shielded_probe),
+            patch("scraper.fetch._check_cache", no_cache),
+            patch("scraper.fetch.fetch_via_playwright", empty_tier3),
+            patch("scraper.fetch.fetch_via_flaresolverr", dead_flare),
+            patch.object(recovery, "attempt_llm_recovery", no_recovery),
+        ):
+            result = await smart_scrape(served_challenge_url)
 
         assert result.get("error")
         assert "barrier" not in result
