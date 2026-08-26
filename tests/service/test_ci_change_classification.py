@@ -702,10 +702,12 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
             self.assertRegex(env_block, rf'(?m)^\s+{name}: "\d{{5}}"$')
 
     def test_host_side_urls_interpolate_allocated_ports(self) -> None:
-        # Host-side callers must read the dynamically allocated ports. Shell
-        # contexts use "$VAR" expansion; quoted-delimiter heredocs (<<'PY')
-        # suppress shell expansion and therefore read os.environ directly.
-        # In-container service-DNS URLs stay literal by design.
+        # Host-side callers must read the dynamically allocated ports. Embedded
+        # python payloads are delivered through quoted-delimiter heredocs
+        # (<<'PY'), which pass the source to the interpreter verbatim, so they
+        # read the exported names from os.environ; only genuine shell contexts
+        # expand "$VAR"/"${VAR}" directly. In-container service-DNS URLs stay
+        # literal by design.
         host_literals = []
         for match in re.finditer(
             r"(?:localhost|127\.0\.0\.1):(\d{4,5})", self.integration_tests
@@ -717,23 +719,25 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
             f"host-side URL with hardcoded port leaked into the integration job: {host_literals}",
         )
         wait_urls = {
-            "Wait for services to be healthy": (
-                "$AGENT_PORT",
-                "/health",
-            ),
-            "Wait for semantic-svc": ("$SEMANTIC_HOST_PORT", "/health"),
-            "Wait for tier3-fixture": ("$TIER3_HOST_PORT", "/health"),
-            "Wait for test-site": ("$TEST_SITE_HOST_PORT", "/health"),
-            "Wait for slopsearx-fixture": ("$SLOPSEARX_FIXTURE_HOST_PORT", "/health"),
-            "Wait for agent-svc-fixture": ("$AGENT_FIXTURE_HOST_PORT", "/health"),
+            "Wait for services to be healthy": ("AGENT_PORT", "/health"),
+            "Wait for semantic-svc": ("SEMANTIC_HOST_PORT", "/health"),
+            "Wait for tier3-fixture": ("TIER3_HOST_PORT", "/health"),
+            "Wait for test-site": ("TEST_SITE_HOST_PORT", "/health"),
+            "Wait for slopsearx-fixture": ("SLOPSEARX_FIXTURE_HOST_PORT", "/health"),
+            "Wait for agent-svc-fixture": ("AGENT_FIXTURE_HOST_PORT", "/health"),
         }
+        steps = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"][
+            "integration-tests"
+        ]["steps"]
         for name, (var, path) in wait_urls.items():
-            steps = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"][
-                "integration-tests"
-            ]["steps"]
             run = next(step["run"] for step in steps if step.get("name") == name)
-            # Workflow form: 'http://localhost:'"$VAR"'/health'
-            self.assertIn(f"http://localhost:'\"{var}\"'{path}", run)
+            # Heredoc convention: quoted delimiter + os.environ-built URL.
+            self.assertIn("python3 - <<'PY'", run, f"{name} must use a <<'PY' heredoc")
+            self.assertIn(
+                f"url = f\"http://localhost:{{os.environ['{var}']}}{path}\"",
+                run,
+                f"{name} must build its URL from os.environ['{var}']",
+            )
         reset_run = next(
             step["run"]
             for step in yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"][
@@ -742,10 +746,11 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
             if step.get("name") == "Reset isolated test state"
         )
         self.assertIn(
-            "http://localhost:'\"$LLM_HOST_PORT\"'/diagnostics/reset?run_id=", reset_run
+            "base_url = f\"http://localhost:{os.environ['LLM_HOST_PORT']}/diagnostics/reset\"",
+            reset_run,
         )
         self.assertIn(
-            "http://localhost:'\"$SLOPSEARX_FIXTURE_HOST_PORT\"'/ledger/reset?run_id=",
+            "base_url = f\"http://localhost:{os.environ['SLOPSEARX_FIXTURE_HOST_PORT']}/ledger/reset\"",
             reset_run,
         )
         ledger_heredoc = next(
@@ -764,6 +769,68 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
             if step.get("name") == "Capture sanitized LLM fixture diagnostics"
         )
         self.assertIn("os.environ['LLM_HOST_PORT']", diagnostics_heredoc)
+
+    def test_no_shell_interpolation_inside_python_payloads(self) -> None:
+        # Negative regression guard for the CI failure introduced by d3a4a09:
+        # inside a python3 -c "<double-quoted>" payload, bash expands $VAR
+        # BEFORE python parses the source, so shell quote-concatenation like
+        # urlopen('http://localhost:'"$AGENT_PORT"'/health') reaches python as
+        # 'http://localhost:'18080'/health' — an illegal implicit string
+        # concatenation across two string literals and a number — and dies with
+        # "SyntaxError: invalid syntax". The convention enforced here: python
+        # code is delivered via quoted-delimiter heredocs (verbatim, no shell
+        # expansion) and reads dynamic values from os.environ; shell variable
+        # expansion may appear only outside python payloads.
+        steps = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"][
+            "integration-tests"
+        ]["steps"]
+        quote_concat_offenders = []
+        noncompiling_heredocs = []
+        for step in steps:
+            run = step.get("run")
+            if not isinstance(run, str):
+                continue
+            name = step.get("name", "<unnamed>")
+            # Shell/python quote-concatenation seams ('...'"$VAR"'...' and the
+            # brace form '...'"${VAR}"'...') are never valid in any context in
+            # this workflow: python receives garbage, and plain shell uses plain
+            # "$VAR".
+            if "'\"$" in run or "\"'$" in run:
+                quote_concat_offenders.append(name)
+            # Quoted heredocs deliver python verbatim, so their raw bodies must
+            # compile AND must contain no shell expansions at all.
+            lines = run.split("\n")
+            index = 0
+            while index < len(lines):
+                if "<<'" in lines[index]:
+                    delimiter = lines[index].split("<<'", 1)[1].split("'", 1)[0]
+                    body_lines = []
+                    index += 1
+                    while index < len(lines) and lines[index].rstrip() != delimiter:
+                        body_lines.append(lines[index])
+                        index += 1
+                    body = "\n".join(body_lines) + "\n"
+                    try:
+                        compile(body, name, "exec")
+                    except SyntaxError as exc:
+                        noncompiling_heredocs.append(f"{name}: {exc}")
+                    self.assertNotIn(
+                        "$",
+                        body.replace("$$", ""),
+                        f"{name}: quoted heredoc must not rely on shell expansion "
+                        "(read values from os.environ instead)",
+                    )
+                index += 1
+        self.assertEqual(
+            quote_concat_offenders,
+            [],
+            f"shell/python quote-concatenation leaked into steps: {quote_concat_offenders}",
+        )
+        self.assertEqual(
+            noncompiling_heredocs,
+            [],
+            f"heredoc python payloads failed to compile: {noncompiling_heredocs}",
+        )
 
     def test_failure_diagnostics_capture_port_collisions(self) -> None:
         # Future co-tenant collisions must be immediately attributable: the

@@ -517,12 +517,19 @@ jobs:
 
       - name: Wait for services to be healthy
         run: |
-          python3 -c "
-          import time, urllib.request
+          # Quoted heredoc: bash passes the payload to python verbatim, so the
+          # dynamically allocated port is read from the environment instead of
+          # interpolated by the shell.
+          python3 - <<'PY'
+          import os
+          import time
+          import urllib.request
+
+          url = f"http://localhost:{os.environ['AGENT_PORT']}/health"
           deadline = time.time() + 180
           while time.time() < deadline:
               try:
-                  r = urllib.request.urlopen('http://localhost:'"$AGENT_PORT"'/health', timeout=5)
+                  r = urllib.request.urlopen(url, timeout=5)
                   if r.status == 200:
                       print('Stack healthy')
                       break
@@ -531,19 +538,27 @@ jobs:
               time.sleep(3)
           else:
               raise RuntimeError('Timed out waiting for stack')
-          "
+          PY
 
       - name: Wait for semantic-svc
         run: |
-          # First check from host that the API is alive
-          python3 -c "
-          import time, urllib.request, urllib.error
+          # First check from host that the API is alive. Quoted heredoc: bash
+          # passes the payload to python verbatim, so the dynamically allocated
+          # port is read from the environment instead of interpolated by the
+          # shell.
+          python3 - <<'PY'
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+
+          url = f"http://localhost:{os.environ['SEMANTIC_HOST_PORT']}/health"
           deadline = time.time() + 300
           while time.time() < deadline:
               try:
-                  r = urllib.request.urlopen('http://localhost:'"$SEMANTIC_HOST_PORT"'/health', timeout=5)
+                  r = urllib.request.urlopen(url, timeout=5)
                   data = r.read().decode()
-                  if r.status == 200 and '\"ok\"' in data:
+                  if r.status == 200 and '"ok"' in data:
                       print('semantic-svc healthy on host')
                       break
               except urllib.error.HTTPError as e:
@@ -553,35 +568,45 @@ jobs:
               time.sleep(3)
           else:
               raise RuntimeError('Timed out waiting for semantic-svc on host')
-          "
-          # Verify Qdrant is reachable from inside agent-svc (where tests run)
-          python3 -c "
-          import time, subprocess
+          PY
+          # Verify Qdrant is reachable from inside agent-svc (where tests run).
+          # Service-DNS URL stays literal: no host-port interpolation needed.
+          python3 - <<'PY'
+          import subprocess
+          import time
+
           deadline = time.time() + 60
           while time.time() < deadline:
               r = subprocess.run(
                   ['docker', 'compose', 'exec', '-T', 'agent-svc',
                    'python3', '-c',
-                   'import urllib.request; u=urllib.request.urlopen(\"http://semantic-svc:8003/index/stats\", timeout=5); print(u.status)'],
+                   'import urllib.request; u=urllib.request.urlopen("http://semantic-svc:8003/index/stats", timeout=5); print(u.status)'],
                   capture_output=True, text=True, timeout=10
               )
               if r.returncode == 0 and '200' in r.stdout:
-                  print(f'Qdrant ready from agent-svc')
+                  print('Qdrant ready from agent-svc')
                   break
               print(f'  waiting from agent-svc (rc={r.returncode}): {r.stdout[:80]}')
               time.sleep(5)
           else:
               raise RuntimeError('Timed out waiting for Qdrant from agent-svc')
-          "
+          PY
 
       - name: Wait for tier3-fixture
         run: |
-          python3 -c "
-          import time, urllib.request
+          # Quoted heredoc: bash passes the payload to python verbatim, so the
+          # dynamically allocated port is read from the environment instead of
+          # interpolated by the shell.
+          python3 - <<'PY'
+          import os
+          import time
+          import urllib.request
+
+          url = f"http://localhost:{os.environ['TIER3_HOST_PORT']}/health"
           deadline = time.time() + 30
           while time.time() < deadline:
               try:
-                  r = urllib.request.urlopen('http://localhost:'"$TIER3_HOST_PORT"'/health', timeout=5)
+                  r = urllib.request.urlopen(url, timeout=5)
                   if r.status == 200:
                       print('tier3-fixture healthy')
                       break
@@ -590,16 +615,23 @@ jobs:
               time.sleep(2)
           else:
               raise RuntimeError('Timed out waiting for tier3-fixture')
-          "
+          PY
 
       - name: Wait for test-site
         run: |
-          python3 -c "
-          import time, urllib.request
+          # Quoted heredoc: bash passes the payload to python verbatim, so the
+          # dynamically allocated port is read from the environment instead of
+          # interpolated by the shell.
+          python3 - <<'PY'
+          import os
+          import time
+          import urllib.request
+
+          url = f"http://localhost:{os.environ['TEST_SITE_HOST_PORT']}/health"
           deadline = time.time() + 60
           while time.time() < deadline:
               try:
-                  r = urllib.request.urlopen('http://localhost:'"$TEST_SITE_HOST_PORT"'/health', timeout=5)
+                  r = urllib.request.urlopen(url, timeout=5)
                   if r.status == 200:
                       print('test-site healthy')
                       break
@@ -608,16 +640,23 @@ jobs:
               time.sleep(2)
           else:
               raise RuntimeError('Timed out waiting for test-site')
-          "
+          PY
 
       - name: Wait for slopsearx-fixture
         run: |
-          python3 -c "
-          import time, urllib.request
+          # Quoted heredoc: bash passes the payload to python verbatim, so the
+          # dynamically allocated port is read from the environment instead of
+          # interpolated by the shell.
+          python3 - <<'PY'
+          import os
+          import time
+          import urllib.request
+
+          url = f"http://localhost:{os.environ['SLOPSEARX_FIXTURE_HOST_PORT']}/health"
           deadline = time.time() + 60
           while time.time() < deadline:
               try:
-                  r = urllib.request.urlopen('http://localhost:'"$SLOPSEARX_FIXTURE_HOST_PORT"'/health', timeout=5)
+                  r = urllib.request.urlopen(url, timeout=5)
                   if r.status == 200:
                       print('slopsearx-fixture healthy')
                       break
@@ -626,16 +665,23 @@ jobs:
               time.sleep(2)
           else:
               raise RuntimeError('Timed out waiting for slopsearx-fixture')
-          "
+          PY
 
       - name: Wait for agent-svc-fixture
         run: |
-          python3 -c "
-          import time, urllib.request
+          # Quoted heredoc: bash passes the payload to python verbatim, so the
+          # dynamically allocated port is read from the environment instead of
+          # interpolated by the shell.
+          python3 - <<'PY'
+          import os
+          import time
+          import urllib.request
+
+          url = f"http://localhost:{os.environ['AGENT_FIXTURE_HOST_PORT']}/health"
           deadline = time.time() + 120
           while time.time() < deadline:
               try:
-                  r = urllib.request.urlopen('http://localhost:'"$AGENT_FIXTURE_HOST_PORT"'/health', timeout=5)
+                  r = urllib.request.urlopen(url, timeout=5)
                   if r.status == 200:
                       print('agent-svc-fixture healthy')
                       break
@@ -644,15 +690,33 @@ jobs:
               time.sleep(3)
           else:
               raise RuntimeError('Timed out waiting for agent-svc-fixture')
-          "
+          PY
 
       - name: Reset isolated test state
         run: |
           docker compose exec -T valkey valkey-cli -n 0 FLUSHDB
           docker compose exec -T valkey valkey-cli -n 1 FLUSHDB
-          run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:'"$LLM_HOST_PORT"'/diagnostics/reset?run_id=' + '${run_id}', data=b'', timeout=5)"
-          python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:'"$SLOPSEARX_FIXTURE_HOST_PORT"'/ledger/reset?run_id=' + '${run_id}', data=b'', timeout=5)"
+          # Quoted heredocs: bash passes each payload to python verbatim, so the
+          # dynamically allocated ports and the run id are read from the
+          # environment instead of interpolated by the shell.
+          run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" python3 - <<'PY'
+          import os
+          import urllib.request
+
+          base_url = f"http://localhost:{os.environ['LLM_HOST_PORT']}/diagnostics/reset"
+          urllib.request.urlopen(
+              f"{base_url}?run_id={os.environ['run_id']}", data=b"", timeout=5
+          )
+          PY
+          run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" python3 - <<'PY'
+          import os
+          import urllib.request
+
+          base_url = f"http://localhost:{os.environ['SLOPSEARX_FIXTURE_HOST_PORT']}/ledger/reset"
+          urllib.request.urlopen(
+              f"{base_url}?run_id={os.environ['run_id']}", data=b"", timeout=5
+          )
+          PY
 
       - name: Copy test files and source directories
         run: |
