@@ -622,7 +622,10 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
             self.integration_tests,
         )
         self.assertIn("--selection narrow", self.integration_tests)
-        self.assertIn("--http-smoke http://127.0.0.1:8084", self.integration_tests)
+        # The smoke URL hits agent-svc-fixture's PUBLISHED host port from the
+        # runner; the integration job pins all host ports to the private 18xxx
+        # range (shared-Docker-daemon co-tenant deconfliction).
+        self.assertIn("--http-smoke http://127.0.0.1:18084", self.integration_tests)
         self.assertIn("timeout-minutes: 5", self.integration_tests)
         eval_block = self.integration_tests.split(
             "Run narrow grounded-answer eval (in-process + HTTP smoke)", 1
