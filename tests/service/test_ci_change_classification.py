@@ -623,9 +623,15 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
         )
         self.assertIn("--selection narrow", self.integration_tests)
         # The smoke URL hits agent-svc-fixture's PUBLISHED host port from the
-        # runner; the integration job pins all host ports to the private 18xxx
-        # range (shared-Docker-daemon co-tenant deconfliction).
-        self.assertIn("--http-smoke http://127.0.0.1:18084", self.integration_tests)
+        # runner; the integration lane's host ports are allocated dynamically at
+        # run time (see test_integration_lane_allocates_host_ports_dynamically),
+        # so the flag must interpolate the exported variable rather than pin a
+        # literal port that any co-tenant could be squatting.
+        self.assertIn(
+            '--http-smoke "http://127.0.0.1:${AGENT_FIXTURE_HOST_PORT}"',
+            self.integration_tests,
+        )
+        self.assertNotIn("--http-smoke http://127.0.0.1:18084", self.integration_tests)
         self.assertIn("timeout-minutes: 5", self.integration_tests)
         eval_block = self.integration_tests.split(
             "Run narrow grounded-answer eval (in-process + HTTP smoke)", 1
@@ -643,6 +649,138 @@ class RuntimeGateWorkflowContractTests(unittest.TestCase):
                 "Run narrow grounded-answer eval (in-process + HTTP smoke)"
             ),
         )
+
+    def test_integration_lane_allocates_host_ports_dynamically(self) -> None:
+        # Shared self-hosted daemon deconfliction, round 2: a fixed 18xxx range
+        # still loses the race when a co-tenant squats exactly one port of the
+        # block (observed on 18081 while its neighbors stayed free), so the lane
+        # must allocate a free /100 block at run time via real bind probes and
+        # export it through $GITHUB_ENV (which overrides the job-level pins for
+        # every subsequent step). Host-side URLs interpolate the exported names;
+        # only the job-level fallback block may contain 180xx literals.
+        parsed = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        integration = parsed["jobs"]["integration-tests"]
+        steps = {step.get("name"): step for step in integration["steps"]}
+        self.assertIn("Allocate deconflicted host ports", steps)
+        allocator = steps["Allocate deconflicted host ports"]["run"]
+        start_index = self.integration_tests.index("Start the Docker stack")
+        env_block = self.integration_tests[:start_index]
+        self.assertLess(
+            self.integration_tests.index("Allocate deconflicted host ports"),
+            start_index,
+        )
+        # The allocator is stdlib-only python and bind-probes before committing;
+        # strip the shell heredoc wrapper before syntax-checking the payload.
+        allocator_body = allocator.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        compile(allocator_body, "docker.yml port allocator", "exec")
+        for token in ("socket.socket", 'bind(("0.0.0.0", port))', "GITHUB_ENV"):
+            self.assertIn(token, allocator_body)
+        # The logical slot map must stay aligned with the compose ${VAR:-default}
+        # interpolation set: one /100 block covers every published service port.
+        slots = {
+            "AGENT_PORT": 80,
+            "SCRAPER_HOST_PORT": 1,
+            "SEMANTIC_HOST_PORT": 3,
+            "TEST_SITE_HOST_PORT": 5,
+            "TIER3_HOST_PORT": 6,
+            "LLM_HOST_PORT": 11,
+            "SLOPSEARX_HOST_PORT": 81,
+            "PORTAL_HOST_PORT": 82,
+            "SLOPSEARX_FIXTURE_HOST_PORT": 83,
+            "AGENT_FIXTURE_HOST_PORT": 84,
+        }
+        for name, offset in slots.items():
+            self.assertIn(f'("{name}", {offset})', allocator_body)
+        # The full candidate sweep: /100 blocks from 18000 through 19900.
+        self.assertIn("range(18000, 19901, 100)", allocator_body)
+        # Fail-closed: exhausting candidates aborts instead of half-binding.
+        self.assertIn(
+            "No free /100 host-port block found in 18000-19900", allocator_body
+        )
+        # Every exported name is kept as a documented job-level fallback pin.
+        for name in slots:
+            self.assertRegex(env_block, rf'(?m)^\s+{name}: "\d{{5}}"$')
+
+    def test_host_side_urls_interpolate_allocated_ports(self) -> None:
+        # Host-side callers must read the dynamically allocated ports. Shell
+        # contexts use "$VAR" expansion; quoted-delimiter heredocs (<<'PY')
+        # suppress shell expansion and therefore read os.environ directly.
+        # In-container service-DNS URLs stay literal by design.
+        host_literals = []
+        for match in re.finditer(
+            r"(?:localhost|127\.0\.0\.1):(\d{4,5})", self.integration_tests
+        ):
+            host_literals.append(match.group(0))
+        self.assertEqual(
+            host_literals,
+            [],
+            f"host-side URL with hardcoded port leaked into the integration job: {host_literals}",
+        )
+        wait_urls = {
+            "Wait for services to be healthy": (
+                "$AGENT_PORT",
+                "/health",
+            ),
+            "Wait for semantic-svc": ("$SEMANTIC_HOST_PORT", "/health"),
+            "Wait for tier3-fixture": ("$TIER3_HOST_PORT", "/health"),
+            "Wait for test-site": ("$TEST_SITE_HOST_PORT", "/health"),
+            "Wait for slopsearx-fixture": ("$SLOPSEARX_FIXTURE_HOST_PORT", "/health"),
+            "Wait for agent-svc-fixture": ("$AGENT_FIXTURE_HOST_PORT", "/health"),
+        }
+        for name, (var, path) in wait_urls.items():
+            steps = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"][
+                "integration-tests"
+            ]["steps"]
+            run = next(step["run"] for step in steps if step.get("name") == name)
+            # Workflow form: 'http://localhost:'"$VAR"'/health'
+            self.assertIn(f"http://localhost:'\"{var}\"'{path}", run)
+        reset_run = next(
+            step["run"]
+            for step in yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"][
+                "integration-tests"
+            ]["steps"]
+            if step.get("name") == "Reset isolated test state"
+        )
+        self.assertIn(
+            "http://localhost:'\"$LLM_HOST_PORT\"'/diagnostics/reset?run_id=", reset_run
+        )
+        self.assertIn(
+            "http://localhost:'\"$SLOPSEARX_FIXTURE_HOST_PORT\"'/ledger/reset?run_id=",
+            reset_run,
+        )
+        ledger_heredoc = next(
+            step["run"]
+            for step in yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"][
+                "integration-tests"
+            ]["steps"]
+            if step.get("name") == "Capture sanitized search fixture ledger"
+        )
+        self.assertIn("os.environ['SLOPSEARX_FIXTURE_HOST_PORT']", ledger_heredoc)
+        diagnostics_heredoc = next(
+            step["run"]
+            for step in yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"][
+                "integration-tests"
+            ]["steps"]
+            if step.get("name") == "Capture sanitized LLM fixture diagnostics"
+        )
+        self.assertIn("os.environ['LLM_HOST_PORT']", diagnostics_heredoc)
+
+    def test_failure_diagnostics_capture_port_collisions(self) -> None:
+        # Future co-tenant collisions must be immediately attributable: the
+        # failure report records listening sockets plus every container's port
+        # map, right after the compose state listing.
+        report = self.integration_tests.split("Collect diagnostics on failure", 1)[
+            1
+        ].split("\n      - name:", 1)[0]
+        ps_index = report.index("=== docker compose ps -a ===")
+        sockets_index = report.index("=== listening TCP sockets ===")
+        ports_index = report.index("=== all containers with ports ===")
+        stats_index = report.index("=== docker stats --no-stream ===")
+        self.assertLess(ps_index, sockets_index)
+        self.assertLess(sockets_index, ports_index)
+        self.assertLess(ports_index, stats_index)
+        self.assertIn("ss -ltnp || netstat -tlnp || true", report)
+        self.assertIn("docker ps --format '{{.Names}}\\t{{.Ports}}' || true", report)
 
     def test_runtime_gate_only_bypasses_docs_only_pull_requests(self) -> None:
         self.assertIn("if: always()", self.runtime_gate)

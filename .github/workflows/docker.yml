@@ -330,6 +330,15 @@ jobs:
     # "Bind for 0.0.0.0:8080 failed: port is already allocated". The 18xxx
     # range is reserved for CI; operator defaults in docker-compose.yml are
     # unchanged, so every other workflow keeps today's behavior.
+    #
+    # These fixed 18xxx pins are a FALLBACK ONLY: the "Allocate deconflicted host
+    # ports" preflight step below bind-probes candidate /100 blocks at run time
+    # and exports the winning assignments via $GITHUB_ENV, which overrides these
+    # values for every subsequent step (commit 1b26623's static scheme still lost
+    # a run when an unknown co-tenant squatted exactly 18081 while its neighbors
+    # stayed free — any fixed range loses that race on a shared daemon). They are
+    # kept so the job env documents the port map and the stack still starts with
+    # sane defaults if the preflight step is ever removed or bypassed.
     env:
       AGENT_PORT: "18080"
       SCRAPER_HOST_PORT: "18001"
@@ -434,6 +443,65 @@ jobs:
           fi
         timeout-minutes: 10
 
+      # Dynamic host-port allocation for the shared self-hosted Docker daemon.
+      # A fixed range cannot win the race against unknown co-tenants (1b26623's
+      # static 18xxx pins failed when a squatter held exactly 18081 while its
+      # neighbors stayed free), so this step bind-probes candidate blocks at run
+      # time and exports the winning block via $GITHUB_ENV. GITHUB_ENV values
+      # override the job-level env pins above for every subsequent step; compose
+      # interpolates ${VAR:-default} from them and all later steps read the same
+      # names. Fail-closed: if no free /100 block exists in 18000-19900, fail
+      # loudly instead of starting a half-bound stack.
+      - name: Allocate deconflicted host ports
+        run: |
+          python3 - <<'PY'
+          import os
+          import socket
+
+          OFFSETS = [
+              ("AGENT_PORT", 80),
+              ("SCRAPER_HOST_PORT", 1),
+              ("SEMANTIC_HOST_PORT", 3),
+              ("TEST_SITE_HOST_PORT", 5),
+              ("TIER3_HOST_PORT", 6),
+              ("LLM_HOST_PORT", 11),
+              ("SLOPSEARX_HOST_PORT", 81),
+              ("PORTAL_HOST_PORT", 82),
+              ("SLOPSEARX_FIXTURE_HOST_PORT", 83),
+              ("AGENT_FIXTURE_HOST_PORT", 84),
+          ]
+
+          def is_free(port: int) -> bool:
+              sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              try:
+                  sock.bind(("0.0.0.0", port))
+              except OSError:
+                  return False
+              finally:
+                  sock.close()
+              return True
+
+          env_file = os.environ["GITHUB_ENV"]
+          lines = []
+          for base in range(18000, 19901, 100):
+              candidates = [(name, base + offset) for name, offset in OFFSETS]
+              if not all(is_free(port) for _, port in candidates):
+                  continue
+              lines = [f"{name}={port}" for name, port in candidates]
+              break
+          else:
+              raise SystemExit(
+                  "No free /100 host-port block found in 18000-19900 on the "
+                  "shared Docker host; refusing to start a partially bound "
+                  "stack. Free or identify the co-tenant holding these ranges."
+              )
+
+          with open(env_file, "a") as handle:
+              handle.write("\n".join(lines) + "\n")
+          for line in lines:
+              print(f"exported {line}")
+          PY
+
       - name: Start the Docker stack
         run: docker compose --profile indexing up -d
         timeout-minutes: 10
@@ -454,7 +522,7 @@ jobs:
           deadline = time.time() + 180
           while time.time() < deadline:
               try:
-                  r = urllib.request.urlopen('http://localhost:18080/health', timeout=5)
+                  r = urllib.request.urlopen('http://localhost:'"$AGENT_PORT"'/health', timeout=5)
                   if r.status == 200:
                       print('Stack healthy')
                       break
@@ -473,7 +541,7 @@ jobs:
           deadline = time.time() + 300
           while time.time() < deadline:
               try:
-                  r = urllib.request.urlopen('http://localhost:18003/health', timeout=5)
+                  r = urllib.request.urlopen('http://localhost:'"$SEMANTIC_HOST_PORT"'/health', timeout=5)
                   data = r.read().decode()
                   if r.status == 200 and '\"ok\"' in data:
                       print('semantic-svc healthy on host')
@@ -513,7 +581,7 @@ jobs:
           deadline = time.time() + 30
           while time.time() < deadline:
               try:
-                  r = urllib.request.urlopen('http://localhost:18006/health', timeout=5)
+                  r = urllib.request.urlopen('http://localhost:'"$TIER3_HOST_PORT"'/health', timeout=5)
                   if r.status == 200:
                       print('tier3-fixture healthy')
                       break
@@ -531,7 +599,7 @@ jobs:
           deadline = time.time() + 60
           while time.time() < deadline:
               try:
-                  r = urllib.request.urlopen('http://localhost:18005/health', timeout=5)
+                  r = urllib.request.urlopen('http://localhost:'"$TEST_SITE_HOST_PORT"'/health', timeout=5)
                   if r.status == 200:
                       print('test-site healthy')
                       break
@@ -549,7 +617,7 @@ jobs:
           deadline = time.time() + 60
           while time.time() < deadline:
               try:
-                  r = urllib.request.urlopen('http://localhost:18083/health', timeout=5)
+                  r = urllib.request.urlopen('http://localhost:'"$SLOPSEARX_FIXTURE_HOST_PORT"'/health', timeout=5)
                   if r.status == 200:
                       print('slopsearx-fixture healthy')
                       break
@@ -567,7 +635,7 @@ jobs:
           deadline = time.time() + 120
           while time.time() < deadline:
               try:
-                  r = urllib.request.urlopen('http://localhost:18084/health', timeout=5)
+                  r = urllib.request.urlopen('http://localhost:'"$AGENT_FIXTURE_HOST_PORT"'/health', timeout=5)
                   if r.status == 200:
                       print('agent-svc-fixture healthy')
                       break
@@ -583,8 +651,8 @@ jobs:
           docker compose exec -T valkey valkey-cli -n 0 FLUSHDB
           docker compose exec -T valkey valkey-cli -n 1 FLUSHDB
           run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:18011/diagnostics/reset?run_id=' + '${run_id}', data=b'', timeout=5)"
-          python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:18083/ledger/reset?run_id=' + '${run_id}', data=b'', timeout=5)"
+          python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:'"$LLM_HOST_PORT"'/diagnostics/reset?run_id=' + '${run_id}', data=b'', timeout=5)"
+          python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:'"$SLOPSEARX_FIXTURE_HOST_PORT"'/ledger/reset?run_id=' + '${run_id}', data=b'', timeout=5)"
 
       - name: Copy test files and source directories
         run: |
@@ -676,7 +744,7 @@ jobs:
         run: |
           uv run --no-sync python3 scripts/run_answer_evals.py --selection narrow \
             --output-dir eval-out/narrow \
-            --http-smoke http://127.0.0.1:18084
+            --http-smoke "http://127.0.0.1:${AGENT_FIXTURE_HOST_PORT}"
         timeout-minutes: 5
 
       - name: Upload answer-evals provenance
@@ -810,7 +878,7 @@ jobs:
           allowed = {"request_id", "schema_version", "fixture_version", "scenario", "scenario_version", "run_id", "status", "classification", "model", "stream"}
           try:
               run_id = f"{os.environ.get('GITHUB_RUN_ID', 'local')}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
-              with urllib.request.urlopen(f"http://localhost:18011/diagnostics?run_id={run_id}", timeout=5) as response:
+              with urllib.request.urlopen(f"http://localhost:{os.environ['LLM_HOST_PORT']}/diagnostics?run_id={run_id}", timeout=5) as response:
                   payload = json.load(response)
               entries = [{key: value for key, value in entry.items() if key in allowed} for entry in payload.get("entries", [])]
               output = {"schema_version": payload.get("schema_version"), "fixture_version": payload.get("fixture_version"), "entries": entries}
@@ -829,7 +897,7 @@ jobs:
           import urllib.request
           run_id = f"{os.environ.get('GITHUB_RUN_ID', 'local')}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
           try:
-              with urllib.request.urlopen(f"http://localhost:18083/ledger?run_id={run_id}", timeout=5) as response:
+              with urllib.request.urlopen(f"http://localhost:{os.environ['SLOPSEARX_FIXTURE_HOST_PORT']}/ledger?run_id={run_id}", timeout=5) as response:
                   payload = json.load(response)
               allowed = {"request_id", "scenario", "schema_version", "fixture_version", "status", "classification", "categories", "page", "result_count", "run_id"}
               output = {"schema_version": payload.get("schema_version"), "fixture_version": payload.get("fixture_version"), "entries": [{key: value for key, value in entry.items() if key in allowed} for entry in payload.get("entries", [])]}
@@ -919,6 +987,12 @@ jobs:
             echo
             echo "=== docker compose ps -a ==="
             docker compose ps -a || true
+            echo
+            echo "=== listening TCP sockets ==="
+            ss -ltnp || netstat -tlnp || true
+            echo
+            echo "=== all containers with ports ==="
+            docker ps --format '{{.Names}}\t{{.Ports}}' || true
             echo
             echo "=== docker stats --no-stream ==="
             docker stats --no-stream || true
