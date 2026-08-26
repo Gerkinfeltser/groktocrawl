@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .admission import get_admission
+from .barrier_guard import is_barrier_flagged, log_refusal
 from .cancel import JobCancelledError, raise_if_cancelled, set_token
 from .exceptions import RetryableRateLimitError
 from .metrics import METRICS
@@ -240,6 +241,7 @@ async def _process_agent_async(
     research_memory: Any = None,
     search_type: str = "deep",
     max_searches_per_request: int = 5,
+    max_credits: int | None = None,
     fingerprint: str | None = None,
     task_tracker: Any = None,
 ) -> None:
@@ -372,6 +374,7 @@ async def _process_agent_async(
                                 llm_model=llm_model,
                                 requested_model=requested_model,
                                 max_searches_per_request=max_searches_per_request,
+                                max_credits=max_credits,
                                 include_images=include_images,
                                 citation_style=cs,
                                 search_type=search_type,
@@ -472,6 +475,7 @@ async def _process_agent_async(
             citation_style=cs,
             search_type=search_type,
             max_searches_per_request=max_searches_per_request,
+            max_credits=max_credits,
         )
 
         job_meta = store.get_job(job_id)
@@ -873,7 +877,27 @@ async def _process_batch_scrape_async(
                         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     }
                 else:
-                    if result.get("success"):
+                    if is_barrier_flagged(result):
+                        # Barrier-flagged success (#586): challenge text must
+                        # not reach pages or index payloads.
+                        log_refusal(url, result)
+                        checks = ((result.get("data") or {}).get("quality") or {}).get(
+                            "checks"
+                        ) or {}
+                        errors_by_index[index] = {
+                            "url": url,
+                            "error": (
+                                f"Barrier/challenge content detected "
+                                f"(warning={result.get('warning')!r}, "
+                                f"block_detected={checks.get('block_detected')!r})"
+                            ),
+                            "error_type": "barrier_detected",
+                            "error_code": "BARRIER_DETECTED",
+                            "timestamp": time.strftime(
+                                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                            ),
+                        }
+                    elif result.get("success"):
                         data = result["data"]
                         pages_by_index[index] = {
                             "url": url,

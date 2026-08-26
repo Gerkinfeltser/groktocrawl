@@ -83,6 +83,40 @@ class TestAgentRequest:
         with pytest.raises(ValidationError):
             AgentRequest(prompt="x" * 100001)
 
+    def test_max_credits_must_be_positive_when_set(self):
+        """max_credits bounds the research budget — 0/negative are rejected."""
+        from agent.models import AgentRequest
+
+        with pytest.raises(ValidationError):
+            AgentRequest(prompt="x", max_credits=0)
+        with pytest.raises(ValidationError):
+            AgentRequest(prompt="x", max_credits=-5)
+
+    def test_positive_max_credits_accepted(self):
+        from agent.models import AgentRequest
+
+        r = AgentRequest(prompt="x", max_credits=3)
+        assert r.max_credits == 3
+
+    def test_max_credits_description_states_attempt_bounded_semantics(self):
+        """OpenAPI description must not promise success-guaranteed credits.
+
+        max_credits is attempt-bounded: discovery truncates candidate URLs
+        BEFORE scraping, so a budget of N bounds scrape attempts, not
+        successfully scraped pages (failures still consume budget).
+        """
+        from agent.models import AgentRequest
+
+        description = AgentRequest.model_fields["max_credits"].description or ""
+        assert "attempt" in description.lower(), (
+            "max_credits description must state attempt-bounded semantics, "
+            f"got: {description!r}"
+        )
+        assert "successfully scraped" not in description.lower(), (
+            "max_credits description must not promise success-guaranteed "
+            f"credits, got: {description!r}"
+        )
+
 
 class TestAgentCreateResponse:
     def test_minimal(self):
@@ -277,6 +311,46 @@ class TestCrawlRequest:
 
         r = CrawlRequest(url="https://example.com", verbose=True)
         assert r.verbose is True
+
+    def test_limit_must_be_positive_when_set(self):
+        """limit bounds the crawl (Firecrawl parity) — it must be >= 1."""
+        from agent.models import CrawlRequest
+
+        with pytest.raises(ValidationError):
+            CrawlRequest(url="https://example.com", limit=0)
+        with pytest.raises(ValidationError):
+            CrawlRequest(url="https://example.com", limit=-3)
+
+    def test_positive_limit_accepted(self):
+        from agent.models import CrawlRequest
+
+        r = CrawlRequest(url="https://example.com", limit=1)
+        assert r.limit == 1
+
+    def test_limit_description_matches_ge1_semantics(self):
+        """limit's description must not claim a plain alias of max_pages.
+
+        max_pages allows 0 (= unlimited) while limit is ge=1 (0 is a 422),
+        so "alias of max_pages" overstates the equivalence — the wording
+        must surface the ge=1 divergence.
+        """
+        from agent.models import CrawlRequest
+
+        description = CrawlRequest.model_fields["limit"].description or ""
+        assert "ge=1" in description, (
+            f"limit description must state the ge=1 constraint, got: {description!r}"
+        )
+        assert "0 = unlimited" in description or "unlimited" in description.lower(), (
+            f"limit description must contrast with max_pages' 0-unlimited "
+            f"semantics, got: {description!r}"
+        )
+
+    def test_limit_ge1_rejects_zero(self):
+        """The ge=1 constraint itself: 0 is a validation error, not unlimited."""
+        from agent.models import CrawlRequest
+
+        with pytest.raises(ValidationError):
+            CrawlRequest(url="https://example.com", limit=0)
 
 
 class TestBatchScrapeRequest:

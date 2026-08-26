@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 
+from ..barrier_guard import is_barrier_flagged, log_refusal
 from ..metrics import METRICS
 from ..scraper_client import ScraperClient
 from ..searxng_client import SearXNGClient
@@ -11,6 +12,18 @@ from .scoring import _filter_and_rank_urls, _is_video_platform_url
 from .sources import SourceArtifact, artifacts_to_documents_and_details
 
 logger = logging.getLogger(__name__)
+
+
+def _rerank_artifact_flagged(artifact: SourceArtifact) -> bool:
+    """Whether a rerank-reuse artifact carries barrier-flagged content.
+
+    Rerank artifacts lose the scraper's ``warning``/``quality`` envelope (only
+    markdown survives), so flagging is re-derived from the content itself via
+    the shared challenge-marker check in barrier_guard (#586).
+    """
+    from ..barrier_guard import markdown_is_challenge
+
+    return markdown_is_challenge(artifact.markdown)
 
 
 async def _scrape_single(
@@ -23,7 +36,8 @@ async def _scrape_single(
     """Scrape a single URL with a semaphore for concurrency control.
 
     Returns a ``SourceArtifact`` carrying the fetched Markdown, or None on
-    failure.
+    failure. Barrier-flagged payloads (success-with-warning or block-fail
+    quality) are refused — the source is never ingested (#586).
     """
     async with semaphore:
         try:
@@ -33,6 +47,9 @@ async def _scrape_single(
                 timeout=url_timeout,
             )
             if result.get("success") and result.get("data", {}).get("markdown"):
+                if is_barrier_flagged(result):
+                    log_refusal(url, result)
+                    return None
                 md = result["data"]["markdown"]
                 return SourceArtifact(
                     url=url,
@@ -164,6 +181,7 @@ async def _run_multi_query_discover_and_scrape(
     scraper: ScraperClient,
     max_searches_per_request: int = 5,
     scrape_options: dict | None = None,
+    max_credits: int | None = None,
 ) -> dict:
     """Search multiple sub-queries, deduplicate URLs, scrape, and merge context.
 
@@ -172,6 +190,10 @@ async def _run_multi_query_discover_and_scrape(
     (deduplicating by URL, keeping the first occurrence for richer metadata),
     then scrapes the union. Merges documents into a single context block
     organized by query.
+
+    When ``max_credits`` is set (1 credit ≈ one successfully scraped page),
+    the candidate list handed to the scraper is truncated to that budget so
+    discovery can never exceed the requested credit allowance.
 
     Returns the same dict shape as ``_run_research_discover_and_scrape()``:
         search_results, target_urls, documents, source_details, context
@@ -232,6 +254,8 @@ async def _run_multi_query_discover_and_scrape(
 
     # Score and rank URLs before scraping (F1: source pre-filtering)
     target_urls = _filter_and_rank_urls(target_urls, max_urls=20)
+    if max_credits is not None and max_credits >= 0:
+        target_urls = target_urls[:max_credits]
     artifacts = await _scrape_with_fallback(
         target_urls, scraper, min_sources=3, scrape_options=scrape_options
     )
@@ -254,12 +278,17 @@ async def _run_research_discover_and_scrape(
     scraper: ScraperClient,
     max_searches_per_request: int = 5,
     scrape_options: dict | None = None,
+    max_credits: int | None = None,
 ) -> dict:
     """Search → filter → scrape → context-building phase for research.
 
     Shared by ``run_research`` and ``run_research_stream``. Uses
     ``_scrape_urls()`` for batch scraping; the stream variant yields
     progress events from the returned source_details after the call.
+
+    When ``max_credits`` is set (1 credit ≈ one successfully scraped page),
+    the candidate list handed to the scraper is truncated to that budget so
+    discovery can never exceed the requested credit allowance.
     """
     target_urls = list(urls) if urls else []
     search_results: list[dict] = []
@@ -272,6 +301,8 @@ async def _run_research_discover_and_scrape(
 
     # Score and rank URLs before scraping (F1: source pre-filtering)
     target_urls = _filter_and_rank_urls(target_urls, max_urls=20)
+    if max_credits is not None and max_credits >= 0:
+        target_urls = target_urls[:max_credits]
     artifacts = await _scrape_with_fallback(
         target_urls, scraper, min_sources=3, scrape_options=scrape_options
     )
@@ -300,6 +331,10 @@ async def _scrape_answer_sources(
     when the ``num_sources`` quota is still unmet. Returns ordered artifacts
     (preferred in rank order, then any video fallback), deduplicated by URL
     and bounded to ``num_sources``.
+
+    Barrier-flagged rerank artifacts are dropped (#586): their markdown came
+    from bare ``scraper.scrape()`` calls that bypassed the shared refusal
+    seam, so they are re-gated here before reaching the answer context.
     """
     # Search results can repeat the same URL (keyword mode returns up to
     # 2x num_sources entries, many of them duplicates). Deduplicate first so
@@ -312,7 +347,20 @@ async def _scrape_answer_sources(
             deduped_urls.append(u)
     target_urls = deduped_urls
 
-    reused = {a.url: a for a in rerank_artifacts if a.markdown}
+    reused: dict[str, SourceArtifact] = {}
+    for artifact in rerank_artifacts:
+        if not artifact.markdown:
+            continue
+        if _rerank_artifact_flagged(artifact):
+            log_refusal(
+                artifact.url,
+                {
+                    "warning": None,
+                    "data": {"quality": {"checks": {"block_detected": "fail"}}},
+                },
+            )
+            continue
+        reused[artifact.url] = artifact
     dedup_counter = METRICS.counter(
         "fetches_deduped_total",
         "Total scrapes avoided by reusing already-fetched content",
@@ -341,9 +389,9 @@ async def _scrape_answer_sources(
     fresh_by_url = {a.url: a for a in fresh_preferred}
 
     preferred_artifacts = [
-        artifact
+        preferred_artifact
         for u in preferred
-        if (artifact := reused.get(u) or fresh_by_url.get(u)) is not None
+        if (preferred_artifact := reused.get(u) or fresh_by_url.get(u)) is not None
     ][:num_sources]
     artifacts = list(preferred_artifacts)
 
@@ -365,9 +413,9 @@ async def _scrape_answer_sources(
         for u in deprioritized:
             if len(artifacts) >= num_sources:
                 break
-            artifact = reused.get(u) or video_by_url.get(u)
-            if artifact is not None:
-                artifacts.append(artifact)
+            video_artifact = reused.get(u) or video_by_url.get(u)
+            if video_artifact is not None:
+                artifacts.append(video_artifact)
 
     return artifacts
 

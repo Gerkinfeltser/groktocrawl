@@ -5,7 +5,13 @@ from datetime import datetime as _dt
 
 from fastapi import APIRouter, Request
 
-from ..exceptions import CaptchaError, NotFoundError, ScrapeError
+from ..barrier_guard import is_block_flagged, log_refusal
+from ..exceptions import (
+    BarrierDetectedError,
+    CaptchaError,
+    NotFoundError,
+    ScrapeError,
+)
 from ..models import (
     AgentCancelResponse,
     BatchScrapeErrorsResponse,
@@ -32,6 +38,24 @@ async def scrape(request: Request, body: ScrapeRequest) -> ScrapeResponse:
     scrape_opts = {"formats": body.formats}
     result = await scraper.scrape(body.url, scrape_options=scrape_opts)
     if result.get("success"):
+        if is_block_flagged(result):
+            # Barrier-flagged scrape (#586): never presented as clean success
+            # and NEVER auto-indexed — the challenge text must not enter the
+            # vector index or any LLM context. Surfaced as a typed error.
+            # (Non-block warnings, e.g. the #587 low-yield diagnostic, keep
+            # their success+warning pass-through contract.)
+            log_refusal(body.url, result)
+            checks = ((result.get("data") or {}).get("quality") or {}).get(
+                "checks"
+            ) or {}
+            raise BarrierDetectedError(
+                detail=(
+                    f"Barrier/challenge content detected for {body.url} "
+                    f"(warning={result.get('warning')!r}, "
+                    f"block_detected={checks.get('block_detected')!r})"
+                ),
+                details={"error_code": "BARRIER_DETECTED"},
+            )
         scraper_data = result["data"]
         # Fire-and-forget index the page
         markdown = scraper_data.get("markdown", "")
@@ -46,10 +70,12 @@ async def scrape(request: Request, body: ScrapeRequest) -> ScrapeResponse:
                 markdown=scraper_data.get("markdown", ""),
                 metadata=scraper_data.get("metadata")
                 or {"source": scraper_data.get("source", "unknown")},
+                quality=scraper_data.get("quality"),
                 images=[ImageData(**img) for img in scraper_data.get("images", [])]
                 if scraper_data.get("images")
                 else None,
             ),
+            warning=result.get("warning"),
         )
     if result.get("error_code") == "CAPTCHA_UNRESOLVED":
         raise CaptchaError(

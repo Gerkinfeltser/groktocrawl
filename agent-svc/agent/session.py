@@ -8,6 +8,7 @@ a server-side artifact tree backed by ``SessionStore``.
 import logging
 from typing import Any
 
+from .barrier_guard import is_barrier_flagged, log_refusal
 from .llm import LLMClient
 from .scraper_client import ScraperClient
 from .searxng_client import SearXNGClient
@@ -350,8 +351,10 @@ class SessionManager:
                             ),
                             timeout=70,
                         )
-                        if result.get("success") and result.get("data", {}).get(
-                            "markdown"
+                        if (
+                            result.get("success")
+                            and result.get("data", {}).get("markdown")
+                            and not is_barrier_flagged(result)
                         ):
                             return {
                                 "url": url,
@@ -359,6 +362,8 @@ class SessionManager:
                                 "source": result["data"].get("source", "unknown"),
                                 "char_count": len(result["data"]["markdown"]),
                             }
+                        if result.get("success") and is_barrier_flagged(result):
+                            log_refusal(url, result)
                         return None
                     except Exception as e:
                         logger.warning("Scrape failed for %s: %s", url, e)
@@ -648,8 +653,10 @@ class SessionManager:
                             scraper.scrape_with_fallback(url),
                             timeout=70,
                         )
-                        if result.get("success") and result.get("data", {}).get(
-                            "markdown"
+                        if (
+                            result.get("success")
+                            and result.get("data", {}).get("markdown")
+                            and not is_barrier_flagged(result)
                         ):
                             return {
                                 "url": url,
@@ -657,6 +664,8 @@ class SessionManager:
                                 "source": result["data"].get("source", "unknown"),
                                 "char_count": len(result["data"]["markdown"]),
                             }
+                        if result.get("success") and is_barrier_flagged(result):
+                            log_refusal(url, result)
                         return None
                     except Exception as e:
                         logger.warning("Deepen scrape failed for %s: %s", url, e)

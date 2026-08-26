@@ -115,6 +115,7 @@ async def stream_research_live(
     include_images: bool,
     citation_style: CitationStyle,
     search_type: str = "deep",
+    max_credits: int | None = None,
     research_memory: Any = None,
     user_id: str | None = None,
     fingerprint: str | None = None,
@@ -143,6 +144,7 @@ async def stream_research_live(
         include_images=include_images,
         citation_style=citation_style,
         search_type=search_type,
+        max_credits=max_credits,
     ):
         if event["type"] in _content_events:
             timing.on_first_event()

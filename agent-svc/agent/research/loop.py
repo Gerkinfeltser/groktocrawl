@@ -63,6 +63,7 @@ async def _run_research_events(
     llm_model: str | None = None,
     requested_model: str | None = None,
     max_searches_per_request: int = 5,
+    max_credits: int | None = None,
     include_images: bool = False,
     citation_style: Any = None,
     search_type: str = "deep",
@@ -126,6 +127,7 @@ async def _run_research_events(
                         scraper=scraper,
                         max_searches_per_request=max_searches_per_request,
                         scrape_options=scrape_opts,
+                        max_credits=max_credits,
                     )
                 else:
                     query = queries[0] if queries else prompt
@@ -135,6 +137,7 @@ async def _run_research_events(
                         searxng=searxng,
                         scraper=scraper,
                         scrape_options=scrape_opts,
+                        max_credits=max_credits,
                     )
             else:
                 # ── Pass 2: gap-focused discovery ─────────────────
@@ -147,6 +150,11 @@ async def _run_research_events(
                         len(gap_topics), max_searches_per_request
                     ),
                     scrape_options=scrape_opts,
+                    max_credits=(
+                        max_credits - len(all_source_details)
+                        if max_credits is not None
+                        else None
+                    ),
                 )
 
             context = discovered["context"]
@@ -274,8 +282,15 @@ async def _run_research_events(
 
             # ── Gap detection after pass 1 ─────────────────────────
             if pass_count == 1:
-                gap_topics = await _detect_gaps(
-                    combined_context, llm, original_query=prompt
+                budget_spent = (
+                    max_credits is not None and len(all_source_details) >= max_credits
+                )
+                gap_topics = (
+                    []
+                    if budget_spent
+                    else await _detect_gaps(
+                        combined_context, llm, original_query=prompt
+                    )
                 )
                 if not gap_topics:
                     break  # Coverage is adequate, done
@@ -314,6 +329,7 @@ async def run_research(
     llm_model: str | None = None,
     requested_model: str | None = None,
     max_searches_per_request: int = 5,
+    max_credits: int | None = None,
     include_images: bool = False,
     citation_style: Any = None,
     search_type: str = "deep",
@@ -330,6 +346,7 @@ async def run_research(
         llm_model,
         requested_model,
         max_searches_per_request,
+        max_credits,
         include_images,
         citation_style,
         search_type,
@@ -362,6 +379,7 @@ async def run_research_stream(
     llm_model: str | None = None,
     requested_model: str | None = None,
     max_searches_per_request: int = 5,
+    max_credits: int | None = None,
     include_images: bool = False,
     citation_style: Any = None,
     search_type: str = "deep",
@@ -378,6 +396,7 @@ async def run_research_stream(
         llm_model,
         requested_model,
         max_searches_per_request,
+        max_credits,
         include_images,
         citation_style,
         search_type,

@@ -2,6 +2,7 @@ import logging
 import os
 import subprocess
 import time
+from pathlib import Path
 
 import httpx
 import pytest
@@ -2586,6 +2587,49 @@ def test_crawl_cli_json_output():
             raise AssertionError(
                 f"CLI --json output is not valid JSON: {e}\nOutput: {stdout[:200]}"
             ) from e
+
+
+@require_docker
+def test_crawl_cli_default_invocation_no_limit():
+    """Plain `groktocrawl crawl <url>` (no --limit) starts a crawl.
+
+    Regression for the PR #597 follow-up finding: the CLI historically
+    serialized its ``limit=0`` sentinel, but server-side validation now
+    requires ``limit >= 1``, so the DEFAULT invocation deterministically
+    failed with HTTP 422 INVALID_REQUEST. The client must OMIT the field
+    when unset. The lone pre-existing CLI crawl tests pass explicit
+    ``--limit`` and therefore never exercised this path.
+    """
+    import json as _json
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "groktocrawl",
+            "--json",
+            "crawl",
+            TEST_SITE + "/",
+            "--no-poll",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    assert result.returncode == 0, (
+        f"Default CLI crawl failed ({result.returncode}): {result.stderr}"
+    )
+    payload = _json.loads(result.stdout.strip())
+    assert payload["job_id"], f"No job ID in default-crawl output: {payload}"
+
+    # The created job must be a real, running/completed crawl — i.e. the
+    # server ACCEPTED the request instead of answering 422 INVALID_REQUEST.
+    status = httpx.get(AGENT + f"/v2/crawl/{payload['job_id']}", timeout=30)
+    assert status.status_code == 200, (
+        f"Crawl job {payload['job_id']} not found: {status.status_code}"
+    )
 
 
 # ── VAL-CROSS-008: Batch scrape vs Crawl coexistence ────────────

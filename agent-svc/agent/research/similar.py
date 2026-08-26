@@ -5,6 +5,7 @@ import math
 
 import httpx
 
+from ..barrier_guard import is_barrier_flagged, log_refusal
 from ..exceptions import SemanticError
 from ..scraper_client import ScraperClient
 from ..searxng_client import SearXNGClient
@@ -63,6 +64,11 @@ async def _run_find_similar_qdrant(
         # 1. Scrape the URL to get content
         scraped = await scraper.scrape(url)
         if not scraped.get("success"):
+            return []
+        if is_barrier_flagged(scraped):
+            # Barrier-flagged query URL (#586): refuse rather than embed
+            # challenge text as the similarity query.
+            log_refusal(url, scraped)
             return []
         markdown = scraped.get("data", {}).get("markdown", "")
         title = scraped.get("data", {}).get("metadata", {}).get("title", "")

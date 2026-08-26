@@ -40,6 +40,20 @@ class ScrapeError(GroktoCrawlError):
     detail = "Scrape failed"
 
 
+class BarrierDetectedError(ScrapeError):
+    """The scraped page is barrier/challenge content (#586, ADR-0015).
+
+    Subclass of :class:`ScrapeError` so existing ``except ScrapeError``
+    handlers keep working; the dedicated class-level ``error_code`` keeps
+    the rendered top-level body field consistent with
+    ``details.error_code`` instead of relying on the handler to dig the
+    specific code out of ``details``.
+    """
+
+    error_code = "BARRIER_DETECTED"
+    detail = "Barrier or challenge content detected"
+
+
 class CaptchaError(GroktoCrawlError):
     status_code = 502
     error_code = "CAPTCHA_UNRESOLVED"

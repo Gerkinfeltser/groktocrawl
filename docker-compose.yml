@@ -11,7 +11,7 @@ services:
       retries: 20
 
   slopsearx:
-    image: ghcr.io/magnus919/slopsearx@sha256:c7fd83077bf5f189a0125b6377b367740068d012e9caeb48318401a23437711d
+    image: ghcr.io/magnus919/slopsearx@sha256:91194d146d205b1cf4688c1989da8f5f6b599a9627be23fd1ee7a4e488fda5b7
     restart: unless-stopped
     ports:
       - "8081:8080"
@@ -26,7 +26,7 @@ services:
       retries: 3
 
   slopsearx-mcp:
-    image: ghcr.io/magnus919/slopsearx@sha256:c7fd83077bf5f189a0125b6377b367740068d012e9caeb48318401a23437711d
+    image: ghcr.io/magnus919/slopsearx@sha256:91194d146d205b1cf4688c1989da8f5f6b599a9627be23fd1ee7a4e488fda5b7
     # The MCP companion must never run unauthenticated, but a required-token
     # guard using the Compose `:?` operator would abort a no-config
     # `docker compose up` at load time (Compose interpolates the whole file
@@ -194,6 +194,15 @@ services:
       - EMBED_MODEL_NAME=${EMBED_MODEL_NAME:-BAAI/bge-m3}
       - EMBED_DIM=${EMBED_DIM:-1024}
       - ACTIVE_EMBED_MODEL=${ACTIVE_EMBED_MODEL:-v_bge-m3}
+      # Qdrant timeout tuning must pass through from .env or operator
+      # overrides are silently ignored (#588 follow-up). app.py parses
+      # both vars with float() at import time, so the fallbacks must stay
+      # non-empty numeric values equal to today's effective defaults — an
+      # empty ${VAR:-} fallback would inject "" and crash-loop the service.
+      # Drift watch: each '10' fallback duplicates semantic-svc/app.py's
+      # own getenv default; bump both sides together.
+      - QDRANT_QUERY_TIMEOUT=${QDRANT_QUERY_TIMEOUT:-10}
+      - QDRANT_CLIENT_TIMEOUT=${QDRANT_CLIENT_TIMEOUT:-10}
     volumes:
       - hf-cache:/root/.cache/huggingface
     depends_on:

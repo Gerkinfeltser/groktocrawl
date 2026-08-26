@@ -120,9 +120,7 @@ class TestFilterSections:
 
     def test_exclude_nav_and_footer(self):
         """Excluding nav and footer should strip those sections."""
-        result = filter_sections(
-            FULL_PAGE_HTML, exclude=["navigation", "footer"]
-        )
+        result = filter_sections(FULL_PAGE_HTML, exclude=["navigation", "footer"])
         assert result, "Should produce output"
         assert "Main Article Title" in result, "Body content should remain"
         assert "Copyright" not in result, "Footer content should be excluded"
@@ -180,9 +178,7 @@ class TestFilterSections:
 
     def test_include_nonexistent_section(self):
         """Including a nonexistent section should still work."""
-        result = filter_sections(
-            FULL_PAGE_HTML, include=["body", "nonexistent"]
-        )
+        result = filter_sections(FULL_PAGE_HTML, include=["body", "nonexistent"])
         assert "Main Article Title" in result, "Body should remain"
         assert "Site Header" not in result, "Header should be excluded"
 
@@ -208,7 +204,7 @@ class TestExtractExtras:
         links = result["links"]
         assert len(links) >= 2, f"Expected at least 2 links, got {links}"
         # Should include relative URLs
-        has_relative = any("/relative" in l for l in links)
+        has_relative = any("/relative" in link for link in links)
         assert has_relative, "Should include relative URLs"
         # Should NOT include mailto, javascript, hash, tel
         for link in links:
@@ -217,7 +213,7 @@ class TestExtractExtras:
                 f"Should exclude javascript: {link}"
             )
             assert not link.startswith("tel:"), f"Should exclude tel: {link}"
-            assert link != "#", f"Should exclude bare hash link"
+            assert link != "#", "Should exclude bare hash link"
 
     def test_extract_links_limit(self):
         """Should respect the links limit."""
@@ -258,9 +254,7 @@ class TestExtractExtras:
         """Should respect the codeBlocks limit."""
         opts = FakeExtrasOptions(codeBlocks=1)
         result = extract_extras(CODE_BLOCK_HTML, opts)
-        assert len(result.get("codeBlocks", [])) <= 1, (
-            "Should respect codeBlocks limit"
-        )
+        assert len(result.get("codeBlocks", [])) <= 1, "Should respect codeBlocks limit"
 
     def test_extract_empty_html(self):
         """Empty HTML should return empty dict."""

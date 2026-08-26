@@ -128,12 +128,28 @@ agent-svc/models.py (modified):
     "checks": {
       "boilerplate": "pass",
       "completeness": "pass",
-      "block_detected": "pass"
+      "block_detected": "pass",
+      "volume": "pass"
     },
     "detail": "all checks passed"
   }
 }
 ```
+
+### Volume-Comparison Gate (#587)
+
+A fourth, additive check compares extracted output volume against the
+source HTML size. When a large source (>= `MIN_LOW_YIELD_SOURCE_CHARS`,
+10,000 chars) yields fewer than `VOLUME_MIN_OUTPUT_CHARS` (2,048 chars)
+absolute or less than `VOLUME_YIELD_RATIO_FLOOR` (2%) of its size as text,
+the `volume` check fails and the scrape result carries a top-level
+`warning` describing the low yield — a truncation never presents as an
+unqualified success. The same predicate (`extract.is_low_yield_text`)
+drives the in-extractor low-yield recovery in `fetch_quality.py`, so
+pages recovered by the full-page fallback (e.g. card-directory layouts
+whose every card sits under a parent anchor) yield above the floor and
+do NOT warn. The check passes (no opinion) when no source-size
+information is available or the source is below the minimum size.
 
 ### Default Thresholds
 
@@ -142,6 +158,9 @@ agent-svc/models.py (modified):
 | `MIN_CONTENT_CHARS` | 200 | Via env var |
 | `MIN_TITLE_CHARS` | 10 | Via env var |
 | `MAX_BOILERPLATE_RATIO` | 0.7 | Via env var |
+| `MIN_LOW_YIELD_SOURCE_CHARS` | 10000 | Constant |
+| `VOLUME_MIN_OUTPUT_CHARS` | 2048 | Constant |
+| `VOLUME_YIELD_RATIO_FLOOR` | 0.02 | Constant |
 
 ### Positive Consequences
 

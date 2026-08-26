@@ -9,6 +9,7 @@ from typing import Any
 
 from common.stage_metrics import StreamTiming
 
+from ..barrier_guard import is_barrier_flagged, log_refusal
 from ..llm import LLMClient
 from ..scraper_client import ScraperClient
 from ..searxng_client import SearXNGClient
@@ -172,7 +173,11 @@ async def run_rich_search(
                 continue
             try:
                 resp = await scraper.scrape(url)
-                if resp.get("success") and resp.get("data", {}).get("markdown"):
+                if (
+                    resp.get("success")
+                    and resp.get("data", {}).get("markdown")
+                    and not is_barrier_flagged(resp)
+                ):
                     content = resp["data"]["markdown"][:3000]  # Trim to 3K chars
                     enriched.append(
                         {
@@ -182,6 +187,11 @@ async def run_rich_search(
                         }
                     )
                 else:
+                    if resp.get("success") and is_barrier_flagged(resp):
+                        # Barrier-flagged scrape (#586): the challenge text is
+                        # never placed into the enrichment context — fall back
+                        # to the search result's description instead.
+                        log_refusal(url, resp)
                     enriched.append(
                         {
                             "url": url,
@@ -439,7 +449,11 @@ async def run_search_stream(
                 async with semaphore:
                     try:
                         resp = await asyncio.wait_for(scraper.scrape(url), timeout=20)
-                        if resp.get("success") and resp.get("data", {}).get("markdown"):
+                        if (
+                            resp.get("success")
+                            and resp.get("data", {}).get("markdown")
+                            and not is_barrier_flagged(resp)
+                        ):
                             md = resp["data"]["markdown"][:3000]
                             await queue.put(
                                 {
@@ -456,6 +470,11 @@ async def run_search_stream(
                                 }
                             )
                             return
+                        if resp.get("success") and is_barrier_flagged(resp):
+                            # Barrier-flagged scrape (#586): no scrape_result
+                            # SSE event may carry challenge markdown — fall
+                            # back to the description like any failed scrape.
+                            log_refusal(url, resp)
                     except Exception:
                         pass
                     await queue.put(

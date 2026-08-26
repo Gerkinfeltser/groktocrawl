@@ -216,12 +216,22 @@ class ScraperClient:
         A generic result that carries a ``warning`` key is degraded content
         (below the scraper's quality threshold, e.g. JS-only shells, cookie
         walls, or nav-only pages) and is treated as insufficient so the
-        forced-browser retry still runs.
+        forced-browser retry still runs. The browser stage applies the same
+        guard (#586): a warned browser result (e.g. a challenge interstitial)
+        is never returned as a successful scrape.
+
+        Barrier-flagged results are refused at both stages (#586): a payload
+        with a ``warning`` key OR ``data.quality.checks.block_detected`` in
+        {"warn", "fail"} never passes as success — if both stages yield only
+        flagged content, an explicit failure dict is returned instead of the
+        flagged payload (barrier text must not reach LLM-feeding consumers).
 
         Returns the first successful result dict (with ``success``, ``data`` keys)
         or a failure dict.
         """
         import asyncio as _asyncio
+
+        from .barrier_guard import is_barrier_flagged
 
         last_failure: dict | None = None
 
@@ -239,11 +249,17 @@ class ScraperClient:
             data = result.get("data") or {}
             if (
                 result.get("success")
-                and not result.get("warning")
+                and not is_barrier_flagged(result)
                 and (data.get("markdown", "").strip() or data.get("download"))
             ):
                 return result
-            if result.get("error_code") == "CAPTCHA_UNRESOLVED":
+            # A clean (unwarned) CAPTCHA_UNRESOLVED payload is a typed refusal
+            # — pass it through so callers see the structured error rather than
+            # a generic failure. A warned payload must NOT surface as success:
+            # the ``not warning`` guard keeps it in the failure path (#586).
+            if result.get("error_code") == "CAPTCHA_UNRESOLVED" and not result.get(
+                "warning"
+            ):
                 return result
             last_failure = result
         except TimeoutError:
@@ -275,17 +291,44 @@ class ScraperClient:
                 timeout=browser_timeout,
             )
             data = result.get("data") or {}
-            if result.get("success") and (
-                data.get("markdown", "").strip() or data.get("download")
+            # The same ``not warning`` guard the generic stage applies (#586):
+            # a browser-rendered challenge interstitial must not be surfaced
+            # as a successful result. The block-fail check catches payloads
+            # flagged via quality only (no warning key).
+            if (
+                result.get("success")
+                and not is_barrier_flagged(result)
+                and (data.get("markdown", "").strip() or data.get("download"))
             ):
                 return result
-            if result.get("error_code") == "CAPTCHA_UNRESOLVED":
+            if result.get("error_code") == "CAPTCHA_UNRESOLVED" and not result.get(
+                "warning"
+            ):
                 return result
             last_failure = result
         except TimeoutError:
             logger.warning("Browser fallback also timed out for %s", url)
         except Exception as e:
             logger.warning("Browser fallback failed for %s: %s", url, e)
+
+        if last_failure is not None and is_barrier_flagged(last_failure):
+            # Both stages yielded only barrier-flagged content (#586): refuse
+            # with an explicit failure rather than returning the challenge
+            # payload as a (flagged) success.
+            logger.info(
+                "All scrape methods returned barrier-flagged content for %s "
+                "(warning=%r) — refusing",
+                url,
+                last_failure.get("warning"),
+            )
+            return {
+                "success": False,
+                "error": (
+                    f"Barrier/challenge content detected for {url} "
+                    f"(warning={last_failure.get('warning')!r})"
+                ),
+                "error_code": "BARRIER_DETECTED",
+            }
 
         return last_failure or {
             "success": False,

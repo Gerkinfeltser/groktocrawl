@@ -36,6 +36,51 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Fork-PR workflow-edit guard (#562). A pull request from a fork that
+      # modifies .github/workflows/** runs from the PR MERGE REF, i.e. with
+      # this very file already rewritten by the fork — so no in-repo check can
+      # be trusted there. This step is DEFENSE IN DEPTH ONLY (ADR-0056): it
+      # fails fast so the required checks go red as a paper trail. The
+      # authoritative, non-bypassable control is PLATFORM-LEVEL and lives in
+      # the org settings (runner group [self-hosted, groktopus, docker] with
+      # allows_public_repositories=false; optional restricted_to_workflows +
+      # allowlist; "Require approval for all external contributors"). Those
+      # org-level controls are currently DEFERRED by maintainer decision with
+      # the residual risk accepted — exact remediation steps:
+      # docs/runbooks/self-hosted-runner-fork-protection.md
+      #
+      # The step lives inside this `changes` classification job whose `if`
+      # cannot skip classification, and its own always() guard means an
+      # earlier step failure cannot prevent its evaluation. A failing step
+      # fails the whole `changes` job, which trips runtime-gate's fail-closed
+      # branch ("Fail when change classification fails") — exactly the
+      # intended red paper trail. Null-guard note (corrected 2026-08-24,
+      # scrutiny round 1 on #562): GitHub expressions use LOOSE equality with
+      # numeric coercion (official expressions reference; actions/runner
+      # EvaluationResult.cs) — Null->0 and Boolean false->0, so `fork == null`
+      # and `fork == false` are BOTH true, and the once-shipped `fork != false`
+      # evaluated FALSE for a null fork (deleted forks), silently SKIPPING this
+      # detector. The condition is therefore an explicit disjunction that arms
+      # for every pull_request event; under the same coercion a proven
+      # same-repository PR (`fork == false`) also matches, and the seam then
+      # trusts only the rendered literal "false" in CI_PR_FORK (null renders as
+      # an empty string), keeping deleted forks fail-closed.
+      - name: Detect fork PR modifying GitHub workflows
+        id: fork_guard
+        if: >-
+          always() && github.event_name == 'pull_request' &&
+          (github.event.pull_request.head.repo.fork == true ||
+          github.event.pull_request.head.repo.fork == null)
+        shell: bash
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_PR_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          merge_base=$(git merge-base "$CI_BASE_SHA" "$CI_HEAD_SHA")
+          git diff --name-only "$merge_base" "$CI_HEAD_SHA" | python3 scripts/ci_fork_pr_guard.py
+
       - name: Test change classifier
         run: python3 tests/service/test_ci_change_classification.py
 
@@ -256,10 +301,24 @@ jobs:
     # file could bypass the guard. The authoritative, non-bypassable control is
     # platform-level (deny fork PRs to the runner group / require workflow approval for
     # outside collaborators), which is outside this repo and must be configured there.
+    # See docs/runbooks/self-hosted-runner-fork-protection.md for the exact org-level
+    # remediation steps (currently DEFERRED by maintainer decision; residual risk
+    # accepted) and the `Detect fork PR modifying GitHub workflows` step in the
+    # `changes` job above for the in-repo detection paper trail (#562).
+    #
+    # Null-guard note (corrected 2026-08-24, scrutiny round 1 on #562): loose
+    # equality coerces Null->0 and Boolean false->0, so a plain
+    # `head.repo.fork == false` was TRUE for deleted forks (null) — admitting
+    # exactly the PRs this guard exists to stop onto the self-hosted lane.
+    # Direct expression arithmetic cannot separate null from false (both are 0),
+    # so admission requires the STRING rendering to equal 'false'
+    # (format('{0}', ...) yields 'true'/'false'/'' for null; a missing
+    # head.repo property also renders ''). Deleted forks are therefore
+    # fail-closed OFF the lane.
     if: >-
       always() && ((github.event_name == 'pull_request' && needs.changes.result == 'success' &&
       needs.changes.outputs.requires_full_runtime == 'true' &&
-      github.event.pull_request.head.repo.fork == false) ||
+      format('{0}', github.event.pull_request.head.repo.fork) == 'false') ||
       (github.event_name == 'push' && needs.build-and-push.result == 'success'))
     runs-on: [self-hosted, groktopus, docker]
     concurrency:
@@ -889,10 +948,17 @@ jobs:
         run: echo "Runtime integration was intentionally not needed for this docs-only pull request."
 
       - name: Summarize fork pull request (integration skipped)
+        # String-rendered comparison: covers proven forks ('true') AND
+        # deleted forks (head.repo.fork null renders '') — both are untrusted,
+        # both get the explicit skipped-for-security summary. Same-repo PRs
+        # render 'false' and never match (#562 scrutiny round 1 follow-up).
         if: >-
-          github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true &&
+          github.event_name == 'pull_request' &&
+          format('{0}', github.event.pull_request.head.repo.fork) != 'false' &&
           needs.changes.result == 'success'
-        run: 'echo "Fork pull request: self-hosted integration skipped for security."'
+        run: |-
+          echo "Fork pull request: self-hosted integration skipped for security."
+          echo "(Includes deleted forks whose head.repo.fork renders null.)"
 
       - name: Summarize successful runtime validation
         if: >-
@@ -915,7 +981,7 @@ jobs:
           !(github.event_name == 'pull_request' &&
           needs.changes.outputs.requires_full_runtime == 'false') &&
           !(github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.fork == true) &&
+          format('{0}', github.event.pull_request.head.repo.fork) != 'false') &&
           needs.integration-tests.result != 'success'
         run: |
           echo "Required runtime integration did not complete successfully."
