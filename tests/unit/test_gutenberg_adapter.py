@@ -26,6 +26,13 @@ every test rather than one dedicated containment test. The seam routes
 responses OR exception instances; routing is decided with ``isinstance(...,
 BaseException)`` plus an exact-type check so an exception CLASS can never
 be mistaken for a response object.
+
+Base-URL override coverage (grafted from the standalone #581 branch): the
+``Base-URL override contract`` section pins the ADAPTER_GUTENBERG_CACHE_BASE /
+ADAPTER_GUTENDEX_API_BASE behavior — unset targets the real internet,
+overrides rewrite URLs exactly (trailing slashes normalized, empty treated
+as unset), and the gutendex override is exercised through the production
+fetch path, not just the URL builders.
 """
 
 import re
@@ -106,11 +113,17 @@ class _FixtureSeam:
         self.routes: dict[str, Any] = {}
 
     def endpoint_urls(self) -> set[str]:
+        # Derived from the adapter's own URL builders so the allowlist tracks
+        # the active base configuration: under the autouse env reset this is
+        # exactly the three real-internet fixture URLs; under an explicit
+        # ADAPTER_*_BASE override (override-contract tests below) it is the
+        # twin host those tests assert on. Containment stays meaningful in
+        # both modes: nothing may leave the configured fixture set.
         bid = self.book_id
         return {
-            f"https://www.gutenberg.org/cache/epub/{bid}/pg{bid}-images-3.epub",
-            f"https://www.gutenberg.org/cache/epub/{bid}/pg{bid}.txt",
-            f"https://gutendex.com/books/{bid}",
+            gutenberg._epub_url(bid),
+            gutenberg._txt_url(bid),
+            f"{gutenberg._gutendex_base() or 'https://gutendex.com'}/books/{bid}",
         }
 
     async def __aenter__(self) -> "_FixtureSeam":
@@ -162,6 +175,19 @@ def _install_routes(seam: _FixtureSeam, **routes: Any) -> _FixtureSeam:
     """Update a seam's routes in place and return it (for re-patching)."""
     seam.routes.update(routes)
     return seam
+
+
+@pytest.fixture(autouse=True)
+def _clean_base_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate every test from ambient base-URL overrides (#581).
+
+    CI and developer shells may export ADAPTER_GUTENBERG_CACHE_BASE /
+    ADAPTER_GUTENDEX_API_BASE to point the adapter at the test-site twin;
+    without this reset the seam's fixture-endpoint allowlist (hardcoded to
+    the real-internet hosts) would reject every request those tests make.
+    """
+    monkeypatch.delenv("ADAPTER_GUTENBERG_CACHE_BASE", raising=False)
+    monkeypatch.delenv("ADAPTER_GUTENDEX_API_BASE", raising=False)
 
 
 # ── In-test fixture builders ──────────────────────────────────────
@@ -338,6 +364,94 @@ async def _scrape(url: str, monkeypatch: pytest.MonkeyPatch, **routes: Any) -> A
     result = await gutenberg.GutenbergAdapter().scrape(url, AdapterContext())
     _assert_seam_contained(seam)
     return result
+
+
+# ── Base-URL override contract (#581) ─────────────────────────────
+# Graft of the standalone branch's override tests, rewritten against the
+# seam/monkeypatch conventions above. URL assertions go through the
+# production builders (gutenberg._epub_url / _txt_url / _cache_base /
+# _gutendex_base) with EXACT string equality, so they fail if normalization
+# or defaulting regresses.
+
+
+def test_default_base_urls_target_real_internet():
+    """With both overrides unset, the production helpers target live origins."""
+    assert gutenberg._cache_base() == ""
+    assert gutenberg._gutendex_base() == ""
+    assert gutenberg._epub_url(BOOK_ID) == (
+        f"https://www.gutenberg.org/cache/epub/{BOOK_ID}/pg{BOOK_ID}-images-3.epub"
+    )
+    assert gutenberg._txt_url(BOOK_ID) == (
+        f"https://www.gutenberg.org/cache/epub/{BOOK_ID}/pg{BOOK_ID}.txt"
+    )
+
+
+def test_cache_base_override_rewrites_download_urls(monkeypatch):
+    """The cache-base override rewrites both download URLs exactly."""
+    monkeypatch.setenv("ADAPTER_GUTENBERG_CACHE_BASE", "http://test-site:8000")
+    assert gutenberg._epub_url(BOOK_ID) == (
+        f"http://test-site:8000/cache/epub/{BOOK_ID}/pg{BOOK_ID}-images-3.epub"
+    )
+    assert gutenberg._txt_url(BOOK_ID) == (
+        f"http://test-site:8000/cache/epub/{BOOK_ID}/pg{BOOK_ID}.txt"
+    )
+    # gutendex metadata must NOT be touched by the cache-base override.
+    assert gutenberg._gutendex_base() == ""
+
+
+def test_trailing_slash_in_override_is_normalized(monkeypatch):
+    """A trailing slash on the override is stripped before URL assembly.
+
+    Exact-equality assertions: a broken rstrip('/') produces a double slash
+    and fails these comparisons outright.
+    """
+    monkeypatch.setenv("ADAPTER_GUTENBERG_CACHE_BASE", "http://test-site:8000/")
+    assert gutenberg._cache_base() == "http://test-site:8000"
+    assert gutenberg._epub_url(BOOK_ID) == (
+        f"http://test-site:8000/cache/epub/{BOOK_ID}/pg{BOOK_ID}-images-3.epub"
+    )
+    monkeypatch.setenv("ADAPTER_GUTENDEX_API_BASE", "http://test-site:8005/")
+    assert gutenberg._gutendex_base() == "http://test-site:8005"
+
+
+def test_empty_override_means_unset(monkeypatch):
+    """An empty-string override (compose ${VAR:-} interpolation) behaves as unset."""
+    monkeypatch.setenv("ADAPTER_GUTENBERG_CACHE_BASE", "")
+    monkeypatch.setenv("ADAPTER_GUTENDEX_API_BASE", "")
+    assert gutenberg._epub_url(BOOK_ID) == (
+        f"https://www.gutenberg.org/cache/epub/{BOOK_ID}/pg{BOOK_ID}-images-3.epub"
+    )
+    assert gutenberg._txt_url(BOOK_ID) == (
+        f"https://www.gutenberg.org/cache/epub/{BOOK_ID}/pg{BOOK_ID}.txt"
+    )
+    assert gutenberg._cache_base() == ""
+    assert gutenberg._gutendex_base() == ""
+
+
+@pytest.mark.asyncio
+async def test_gutendex_override_reaches_production_fetch(monkeypatch):
+    """Drives a full _scrape so the gutendex override reaches production code.
+
+    The EPUB tier serves valid bytes; the gutendex enrichment call must be
+    issued to the OVERRIDE base URL (exact string), proving the override is
+    read by the fetch path — not just by the URL builder.
+    """
+    monkeypatch.setenv("ADAPTER_GUTENDEX_API_BASE", "http://test-site:8005")
+    result = await _scrape(
+        EBOOKS_URL,
+        monkeypatch,
+        epub=_FakeResponse(content=_build_epub_bytes()),
+        gutendex=_FakeResponse(json_data=_gutendex_payload()),
+    )
+
+    assert result.success is True
+    assert result.source == "gutenberg-epub"
+    requests = seam_requests(monkeypatch)
+    assert requests, "adapter never reached the seam"
+    assert f"http://test-site:8005/books/{BOOK_ID}" in requests
+    assert not any(u.startswith("https://gutendex.com/") for u in requests), (
+        "override ignored: request leaked to live gutendex.com"
+    )
 
 
 # ── Hermeticity containment ───────────────────────────────────────

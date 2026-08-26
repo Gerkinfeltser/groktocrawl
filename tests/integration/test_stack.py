@@ -1635,12 +1635,27 @@ def test_gutenberg_adapter_cache_url():
 
 @pytest.mark.external
 def test_gutenberg_adapter_invalid_id():
-    """Non-existent book ID should gracefully fall through or return error."""
+    """Non-existent book ID yields a well-formed envelope from the scraper.
+
+    Assertion contract: a well-formed envelope regardless of third-party
+    uptime. After the adapter correctly declines a nonexistent book ID, the
+    generic tier fetches the live gutenberg.org catalog page, so neither the
+    HTTP status nor the success/error split is deterministic here — exactly
+    the third-party coupling issue #581 forbids pinning in the required
+    lane. We therefore accept any status, tolerate non-JSON bodies as a
+    degraded-upstream outcome, and only require envelope shape when the
+    body does parse.
+    """
     r = httpx.post(SCRAPER + "/scrape", json={"url": GUTENBERG_INVALID}, timeout=180)
-    payload = r.json()
-    # Either the adapter fails gracefully and the generic pipeline handles it,
-    # or the generic pipeline also fails — either way, no crash
-    assert not payload.get("error") or payload.get("success") is not None
+    try:
+        payload = r.json()
+    except ValueError:
+        # Non-JSON body: acceptable degraded-upstream outcome.
+        return
+    if payload.get("success"):
+        assert isinstance(payload.get("data", {}).get("markdown"), str)
+    else:
+        assert payload.get("error"), "failure must carry an error payload"
 
 
 # ── Error response tests ──────────────────────────────────────────
