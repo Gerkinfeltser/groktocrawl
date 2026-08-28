@@ -281,7 +281,7 @@ async def parse_file(file: UploadFile, ocr: str = "local"):
     parser = PARSERS[ext]
     try:
         if ext == "pdf":
-            result = parser(content, file.filename, ocr=ocr)
+            result = _parse_pdf(content, file.filename, ocr=ocr)
         else:
             result = parser(content, file.filename)
         md = result.get("markdown", "")
