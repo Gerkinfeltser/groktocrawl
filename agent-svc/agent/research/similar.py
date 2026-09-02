@@ -5,6 +5,8 @@ import math
 
 import httpx
 
+from ..barrier_guard import is_barrier_flagged, log_refusal
+from ..exceptions import SemanticError
 from ..scraper_client import ScraperClient
 from ..searxng_client import SearXNGClient
 
@@ -63,6 +65,11 @@ async def _run_find_similar_qdrant(
         scraped = await scraper.scrape(url)
         if not scraped.get("success"):
             return []
+        if is_barrier_flagged(scraped):
+            # Barrier-flagged query URL (#586): refuse rather than embed
+            # challenge text as the similarity query.
+            log_refusal(url, scraped)
+            return []
         markdown = scraped.get("data", {}).get("markdown", "")
         title = scraped.get("data", {}).get("metadata", {}).get("title", "")
 
@@ -75,19 +82,19 @@ async def _run_find_similar_qdrant(
         try:
             vector_results = await semantic.search_vector(query_text, limit=limit)
         except httpx.HTTPError as e:
-            # Vector index unavailable or slow (503, timeout, connection
-            # error). Degrade gracefully to no similar results rather than
-            # surfacing a 500 to the caller.
+            # Vector index unavailable or slow (503, 500, timeout, connection
+            # error). Surface a structured 502 instead of masking the backend
+            # failure as an empty success result (issue #588).
             response = getattr(e, "response", None)
             status = (
                 getattr(response, "status_code", None) if response is not None else None
             )
             detail = f" (HTTP {status})" if status else f" ({type(e).__name__})"
-            logger.warning(
-                "find_similar: semantic vector search failed%s; returning no results",
+            logger.error(
+                "find_similar: semantic vector search failed%s",
                 detail,
             )
-            return []
+            raise SemanticError(f"Semantic vector search failed{detail}") from e
 
         return [
             {

@@ -117,6 +117,8 @@ The configuration inventory follows `.env.sample`; unlisted implementation-only 
 - ADAPTER_ASHBY_API_KEY
 - ADAPTER_CENSYS_API_ID
 - ADAPTER_CENSYS_API_SECRET
+- ADAPTER_GUTENBERG_CACHE_BASE
+- ADAPTER_GUTENDEX_API_BASE
 - ADAPTER_HIBP_API_KEY
 - ADAPTER_NVD_API_KEY
 - ADAPTER_OTX_API_KEY
@@ -155,6 +157,7 @@ The configuration inventory follows `.env.sample`; unlisted implementation-only 
 - JOB_RETRY_MAX_WAIT_SECONDS
 - LLM_API_KEY
 - LLM_BASE_URL
+- LLM_CALL_TIMEOUT
 - LLM_ENABLE_THINKING
 - LLM_LLAMA_CPP_DISABLE_THINKING
 - LLM_MODEL
@@ -169,6 +172,8 @@ The configuration inventory follows `.env.sample`; unlisted implementation-only 
 - MCP_TARGETED_SENSITIVE_ALLOWED
 - NEAR_DUP_MODE
 - NEAR_DUP_THRESHOLD
+- QDRANT_CLIENT_TIMEOUT
+- QDRANT_QUERY_TIMEOUT
 - QDRANT_URL
 - PARSE_MAX_SIZE_MB
 - QA_MAX_BOILERPLATE_RATIO

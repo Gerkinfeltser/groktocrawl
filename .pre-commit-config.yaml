@@ -16,9 +16,13 @@ repos:
       - id: trailing-whitespace
         name: trailing whitespace
         description: "Trim trailing whitespace"
+        # Raw saved page snapshots are byte-fidelity references; never rewrite them.
+        exclude: ^tests/fixtures/html/hardware-page-live\.html$
       - id: end-of-file-fixer
         name: end of file fixer
         description: "Ensure files end with a newline"
+        # Raw saved page snapshots are byte-fidelity references; never rewrite them.
+        exclude: ^tests/fixtures/html/hardware-page-live\.html$
       - id: check-yaml
         name: check yaml
         description: "Check YAML files for syntax errors"

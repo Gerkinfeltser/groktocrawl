@@ -180,7 +180,11 @@ class MetricsCollector:
         lines.append("")
 
         # Counters
-        for name, (safe_counter, help_text, label_names) in self._counters.items():
+        for name, (
+            safe_counter,
+            help_text,
+            _label_names,
+        ) in self._counters.items():
             lines.append(f"# HELP {name} {help_text}")
             lines.append(f"# TYPE {name} counter")
             for key, value in safe_counter._collect():
@@ -195,8 +199,8 @@ class MetricsCollector:
         for name, (
             safe_hist,
             help_text,
-            label_names,
-            buckets,
+            _label_names,
+            _buckets,
         ) in self._histograms.items():
             lines.append(f"# HELP {name} {help_text}")
             lines.append(f"# TYPE {name} histogram")
@@ -221,7 +225,11 @@ class MetricsCollector:
             lines.append("")
 
         # Gauges
-        for name, (safe_gauge, help_text, label_names) in self._gauges.items():
+        for name, (
+            safe_gauge,
+            help_text,
+            _label_names,
+        ) in self._gauges.items():
             lines.append(f"# HELP {name} {help_text}")
             lines.append(f"# TYPE {name} gauge")
             for key, value in safe_gauge._collect():

@@ -142,18 +142,34 @@ class TestClientAuthentication:
 class TestClientCrawl:
     """Tests for Client.crawl() parameter mapping."""
 
-    def test_basic_crawl_sends_correct_data(self, client):
-        """Basic crawl sends url, limit, and max_depth."""
+    def test_basic_crawl_omits_limit_by_default(self, client):
+        """Default crawl sends NO limit field (server rejects limit=0, #597 regression).
+
+        The server-side CrawlRequest tightened ``limit`` to ``ge=1``; a
+        serialized ``limit: 0`` sentinel therefore fails validation with
+        HTTP 422. Omission means "unlimited" server-side.
+        """
 
         def _fake_request(method, path, json_data=None, params=None, **kwargs):
             assert json_data["url"] == "http://example.com"
-            assert json_data["limit"] == 0
+            assert "limit" not in json_data
             assert json_data["max_depth"] == 2
             return {"success": True, "id": "crawl-1234-uuid"}
 
         client._request = _fake_request
         result = client.crawl(url="http://example.com")
         assert result["id"] == "crawl-1234-uuid"
+
+    def test_crawl_sends_explicit_limit(self, client):
+        """An explicit --limit N is still sent as limit=N."""
+
+        def _fake_request(method, path, json_data=None, params=None, **kwargs):
+            assert json_data["limit"] == 25
+            return {"success": True, "id": "job-limit-25"}
+
+        client._request = _fake_request
+        result = client.crawl(url="http://example.com", limit=25)
+        assert result["id"] == "job-limit-25"
 
     def test_crawl_sends_include_paths(self, client):
         """include_paths is passed as include_paths."""
@@ -268,6 +284,99 @@ class TestClientCrawl:
             max_pages=5,
         )
         assert result["id"] == "job-1"
+
+
+# ── Default-invocation payload regression (PR #597 follow-up) ────────────────
+
+
+class TestCrawlDefaultInvocationPayload:
+    """The DEFAULT `groktocrawl crawl <url>` payload must carry no limit field.
+
+    PR #597 tightened the server-side ``CrawlRequest.limit`` to ``ge=1``,
+    but the CLI still serialized its historical ``limit=0`` sentinel, so
+    the plain default invocation deterministically failed with HTTP 422
+    INVALID_REQUEST. These tests drive the REAL parser + cmd_crawl +
+    Client.crawl pipeline (not just Client.crawl in isolation) so a
+    future sentinel reintroduction at any layer is caught.
+    """
+
+    def _run_default_crawl(self, monkeypatch):
+        """Drive `crawl <url>` (no flags) through parser → cmd → client.
+
+        Patches ``requests.request`` so the full CLI pipeline runs against
+        a mocked HTTP transport, and returns the JSON body the CLI put on
+        the wire. Uses ``--no-poll`` only to skip the polling loop; the
+        crawl-creation request payload is unaffected by it.
+        """
+        captured: dict = {}
+
+        def _fake_request(method, url=None, params=None, json=None, **kwargs):
+            captured["method"] = method
+            captured["url"] = url
+            captured["json"] = json
+            response = MagicMock()
+            response.status_code = 200
+            response.json.return_value = {"success": True, "id": "job-default-1"}
+            response.headers = {}
+            response.url = url
+            return response
+
+        monkeypatch.setattr("requests.request", _fake_request)
+
+        make_parser = _cli_ns["make_parser"]
+        cmd_crawl = _cli_ns["cmd_crawl"]
+        client_cls = _cli_ns["Client"]
+        parser = make_parser()
+        args = parser.parse_args(["crawl", "http://example.com", "--no-poll"])
+        client = client_cls(server="http://test-server:8080", dry_run=False)
+        _capture_stdout(cmd_crawl, client, args)
+
+        assert captured["method"] == "POST", f"expected POST, got {captured}"
+        assert captured["url"].endswith("/v2/crawl"), captured["url"]
+        payload = captured["json"]
+        assert payload["url"] == "http://example.com"
+        return payload
+
+    def test_default_invocation_sends_no_limit_field(self, monkeypatch):
+        """`groktocrawl crawl <url>` sends a payload WITHOUT 'limit'."""
+        payload = self._run_default_crawl(monkeypatch)
+        assert "limit" not in payload, (
+            f"default invocation must not serialize limit; got {payload}"
+        )
+
+    def test_default_invocation_keeps_unlimited_semantics(self, monkeypatch):
+        """No limit field means the server-side default: unlimited crawl."""
+        payload = self._run_default_crawl(monkeypatch)
+        assert payload["max_depth"] == 2
+        assert "max_pages" not in payload
+        assert "limit" not in payload
+
+    def test_explicit_limit_flag_still_serialized(self, monkeypatch):
+        """`groktocrawl crawl <url> --limit 3` still sends limit=3."""
+        captured: dict = {}
+
+        def _fake_request(method, url=None, params=None, json=None, **kwargs):
+            captured["json"] = json
+            response = MagicMock()
+            response.status_code = 200
+            response.json.return_value = {"success": True, "id": "job-limit-3"}
+            response.headers = {}
+            response.url = url
+            return response
+
+        monkeypatch.setattr("requests.request", _fake_request)
+
+        make_parser = _cli_ns["make_parser"]
+        cmd_crawl = _cli_ns["cmd_crawl"]
+        client_cls = _cli_ns["Client"]
+        parser = make_parser()
+        args = parser.parse_args(
+            ["crawl", "http://example.com", "--limit", "3", "--no-poll"]
+        )
+        client = client_cls(server="http://test-server:8080", dry_run=False)
+        _capture_stdout(cmd_crawl, client, args)
+
+        assert captured["json"]["limit"] == 3
 
 
 # ── Connection error handling ────────────────────────────────────────────────
@@ -561,6 +670,32 @@ class TestCrawlParser:
         args = parser.parse_args(["crawl", "http://example.com", "--limit", "10"])
         assert args.limit == 10
 
+    def test_parse_crawl_args_limit_defaults_none(self):
+        """--limit defaults to None (field omitted → unlimited server-side).
+
+        The historical default was the 0 sentinel, which PR #597's
+        server-side ``limit: ge=1`` validation turned into a guaranteed
+        HTTP 422 on every plain `groktocrawl crawl <url>`.
+        """
+        make_parser = _cli_ns["make_parser"]
+        parser = make_parser()
+        args = parser.parse_args(["crawl", "http://example.com"])
+        assert args.limit is None
+
+    def test_crawl_help_does_not_claim_zero_is_unlimited(self):
+        """crawl --help must not present limit=0 as the unlimited default."""
+        parser = _cli_ns["make_parser"]()
+
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        stdout = StringIO()
+        with pytest.raises(SystemExit):
+            with redirect_stdout(stdout):
+                parser.parse_args(["crawl", "--help"])
+        help_text = stdout.getvalue()
+        assert "(default: unlimited)" not in help_text
+
     def test_global_help_shows_crawl(self):
         """Top-level --help lists the crawl subcommand."""
         make_parser = _cli_ns["make_parser"]
@@ -735,7 +870,35 @@ class TestCmdBatchScrape:
 
 
 class TestClientParseUpload:
-    """Tests for Client.parse_upload_file() and Client.parse_with_upload_id()."""
+    """Tests for direct and staged parse client requests."""
+
+    def test_parse_file_sends_explicit_hosted_ocr_mode(self, client, tmp_path):
+        """parse_file sends the opt-in OCR mode as multipart form data."""
+        document = tmp_path / "scan.pdf"
+        document.write_bytes(b"%PDF-1.4 fake scan")
+
+        def _fake_post(url, files=None, data=None, timeout=None):
+            assert "/parse" in url
+            assert files is not None
+            assert data == {"ocr": "hosted"}
+
+            class FakeResp:
+                status_code = 200
+
+                def json(self):
+                    return {
+                        "success": True,
+                        "data": {"markdown": "# Hosted scan"},
+                    }
+
+            return FakeResp()
+
+        import requests as _requests_module
+
+        with patch.object(_requests_module, "post", side_effect=_fake_post):
+            result = client.parse_file(str(document), ocr="hosted")
+
+        assert result["data"]["markdown"] == "# Hosted scan"
 
     def test_parse_upload_file_sends_correct_data(self, client):
         """parse_upload_file sends PUT with correct URL, headers, and body."""

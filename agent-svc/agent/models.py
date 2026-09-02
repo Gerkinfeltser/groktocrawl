@@ -448,6 +448,10 @@ class ScrapeResponse(BaseModel):
     success: bool
     data: ScrapeData | None = None
     error: str | None = None
+    # Extraction-quality diagnostic mirrored from scraper-svc (#587): set
+    # when the final markdown is anomalously thin relative to its source
+    # so a truncation never presents as an unqualified success.
+    warning: str | None = None
 
 
 class AgentRequest(BaseModel):
@@ -471,7 +475,16 @@ class AgentRequest(BaseModel):
         default=None,
         description="Agent mode: None (default agent pipeline), 'plan' (plan-only, no execution)",
     )
-    max_credits: int | None = None
+    max_credits: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Attempt-bounded research budget: discovery stops admitting "
+            "scrape attempts once this many candidates have been scraped "
+            "(candidates are truncated before scraping, so failed scrapes "
+            "still consume budget — credits are not success-guaranteed)."
+        ),
+    )
     webhook: dict[str, Any] | None = None
     strict_constrain_to_urls: bool = False
     stream: bool = Field(default=False, description="SSE streaming response")
@@ -575,7 +588,16 @@ class CrawlRequest(BaseModel):
     max_depth: int = Field(
         default=2, ge=0, description="Maximum link-follow depth, must be >= 0"
     )
-    limit: int | None = None
+    limit: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Maximum number of pages to crawl (Firecrawl v2 parity). "
+            "Like max_pages but ge=1: unlike max_pages, 0 is rejected "
+            "rather than meaning unlimited; when both are set the "
+            "stricter cap wins."
+        ),
+    )
     ignore_sitemap: bool = False
     sitemap: str = Field(
         default="include",

@@ -968,7 +968,7 @@ class Client:
     def crawl(
         self,
         url: str,
-        limit: int = 0,
+        limit: int | None = 0,
         max_depth: int = 2,
         include_paths: list[str] | None = None,
         exclude_paths: list[str] | None = None,
@@ -977,11 +977,21 @@ class Client:
         retry: bool = False,
         **extra: Any,
     ) -> dict[str, Any]:
+        """Start a crawl job.
+
+        ``limit`` caps the number of pages crawled (Firecrawl v2
+        parity). ``0``/``None`` mean "unlimited": the field is OMITTED
+        from the request payload so the server applies its own default,
+        mirroring the ``max_pages=None`` handling below. It must not be
+        serialized as a ``0`` sentinel — server-side validation rejects
+        ``limit < 1``.
+        """
         data: dict[str, Any] = {
             "url": url,
-            "limit": limit,
             "max_depth": max_depth,
         }
+        if limit:
+            data["limit"] = limit
         if max_pages is not None:
             data["max_pages"] = max_pages
         if include_paths:
@@ -1187,14 +1197,20 @@ class Client:
 
     # ---- Parse ----
 
-    def parse_file(self, filepath):
+    def parse_file(self, filepath, ocr="local"):
         import requests
 
         url = self._url("/parse")
         if self.dry_run:
-            return {"dry_run": True, "method": "POST", "url": url, "file": filepath}
+            return {
+                "dry_run": True,
+                "method": "POST",
+                "url": url,
+                "file": filepath,
+                "ocr": ocr,
+            }
         with open(filepath, "rb") as f:
-            resp = requests.post(url, files={"file": f}, timeout=120)
+            resp = requests.post(url, files={"file": f}, data={"ocr": ocr}, timeout=120)
         if resp.status_code >= 400:
             try:
                 body = resp.json()
@@ -2587,7 +2603,7 @@ def cmd_parse(client: Client, args: argparse.Namespace) -> None:
         die(f"File not found: {args.filepath}")
 
     try:
-        result = client.parse_file(args.filepath)
+        result = client.parse_file(args.filepath, ocr=args.ocr)
     except ApiError as e:
         die(e)
 
@@ -2832,8 +2848,8 @@ def make_parser() -> argparse.ArgumentParser:
         "--limit",
         "-l",
         type=int,
-        default=0,
-        help="Max pages to crawl (default: unlimited)",
+        default=None,
+        help="Max pages to crawl (omit for unlimited; must be >= 1 when set)",
     )
     p_crawl.add_argument(
         "--max-pages",
@@ -3028,6 +3044,12 @@ def make_parser() -> argparse.ArgumentParser:
         "-o", "--output", help="Write output to file instead of stdout"
     )
     p_parse.add_argument("--upload-id", help="Parse a pre-uploaded file by upload ID")
+    p_parse.add_argument(
+        "--ocr",
+        choices=["local", "hosted"],
+        default="local",
+        help="OCR mode for scanned PDFs; hosted uploads the whole document to Parse",
+    )
 
     # --- Parse Upload ---
     p_parse_upload = subparsers.add_parser(

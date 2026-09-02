@@ -367,18 +367,61 @@ async def _playwright_fetch_unbounded(
                     markdown = html_to_markdown(html)
                     if markdown and len(markdown) > 50:
                         barrier = _classify_barrier(title, url, markdown, html)
-                        if (
+                        # Post-extraction block-page gate (#586): a challenge
+                        # interstitial whose markdown matches >=2
+                        # BLOCK_PAGE_PATTERNS scores blocking "fail" — refuse
+                        # it here so it can never ship as healthy page content.
+                        # The gate requires challenge corroboration (a barrier-
+                        # provider hit or an explicit challenge marker in the
+                        # text) so ordinary pages that happen to co-occur with
+                        # two generic block patterns (cookie banner + paywall,
+                        # say) are not refused (#586 review).
+                        from .extract import BLOCK_PAGE_PATTERNS, _check_block_page
+
+                        block_status, _ = _check_block_page(markdown)
+                        matched_patterns = [
+                            pattern.pattern
+                            for pattern in BLOCK_PAGE_PATTERNS
+                            if pattern.search(markdown.lower())
+                        ]
+                        challenge_corroborated = (
+                            barrier.detected or barrier.provider is not None
+                        ) or any(
+                            marker in markdown.lower()
+                            for marker in (
+                                "javascript is disabled",
+                                "enable javascript",
+                                "javascript is required",
+                                "couldn't load",
+                                "couldn’t load",
+                                "/_fs-ch-",
+                                "verify you are",
+                            )
+                        )
+                        block_fail_refusal = (
+                            block_status == "fail"
+                            and len(matched_patterns) >= 2
+                            and challenge_corroborated
+                        )
+                        barrier_hit = (
                             barrier.detected
                             and not (
                                 captcha_resolved and barrier.barrier_type == "captcha"
                             )
                             and barrier.confidence > 0.7
-                        ):
+                        )
+                        if barrier_hit or block_fail_refusal:
+                            reason = (
+                                f"barrier {barrier.barrier_type} "
+                                f"(confidence: {barrier.confidence:.2f})"
+                                if barrier.detected
+                                else "blocking interstitial (block_detected: fail)"
+                            )
                             return {
-                                "error": f"Barrier detected: {barrier.barrier_type} (confidence: {barrier.confidence:.2f})",
+                                "error": f"Barrier detected: {reason}",
                                 "barrier": {
                                     "detected": True,
-                                    "type": barrier.barrier_type,
+                                    "type": barrier.barrier_type or "suspicious",
                                     "provider": barrier.provider,
                                     "confidence": barrier.confidence,
                                     "detail": barrier.detail,
@@ -464,7 +507,7 @@ async def fetch_via_content_negotiation(
             # Standard markdown detection
             if _looks_like_markdown(resp.text):
                 logger.info("Tier 2 hit: content negotiation for %s", url)
-                result = {
+                result: dict = {
                     "markdown": resp.text,
                     "source": "content-negotiation",
                     "url": url,
@@ -491,6 +534,10 @@ async def fetch_via_content_negotiation(
                         "markdown": markdown,
                         "source": "content-negotiation",
                         "url": url,
+                        # Volume gate input: lets the quality assessment flag
+                        # anomalously thin output relative to the source (#587).
+                        # Stored as a native int — consumers read it directly.
+                        "source_html_size": len(resp.text),
                     }
                     # Pass through ETag/Last-Modified for intelligent caching
                     etag = resp.headers.get("etag")

@@ -2,6 +2,7 @@ import logging
 import os
 import subprocess
 import time
+from pathlib import Path
 
 import httpx
 import pytest
@@ -1634,12 +1635,27 @@ def test_gutenberg_adapter_cache_url():
 
 @pytest.mark.external
 def test_gutenberg_adapter_invalid_id():
-    """Non-existent book ID should gracefully fall through or return error."""
+    """Non-existent book ID yields a well-formed envelope from the scraper.
+
+    Assertion contract: a well-formed envelope regardless of third-party
+    uptime. After the adapter correctly declines a nonexistent book ID, the
+    generic tier fetches the live gutenberg.org catalog page, so neither the
+    HTTP status nor the success/error split is deterministic here — exactly
+    the third-party coupling issue #581 forbids pinning in the required
+    lane. We therefore accept any status, tolerate non-JSON bodies as a
+    degraded-upstream outcome, and only require envelope shape when the
+    body does parse.
+    """
     r = httpx.post(SCRAPER + "/scrape", json={"url": GUTENBERG_INVALID}, timeout=180)
-    payload = r.json()
-    # Either the adapter fails gracefully and the generic pipeline handles it,
-    # or the generic pipeline also fails — either way, no crash
-    assert not payload.get("error") or payload.get("success") is not None
+    try:
+        payload = r.json()
+    except ValueError:
+        # Non-JSON body: acceptable degraded-upstream outcome.
+        return
+    if payload.get("success"):
+        assert isinstance(payload.get("data", {}).get("markdown"), str)
+    else:
+        assert payload.get("error"), "failure must carry an error payload"
 
 
 # ── Error response tests ──────────────────────────────────────────
@@ -2578,6 +2594,49 @@ def test_crawl_cli_json_output():
             raise AssertionError(
                 f"CLI --json output is not valid JSON: {e}\nOutput: {stdout[:200]}"
             ) from e
+
+
+@require_docker
+def test_crawl_cli_default_invocation_no_limit():
+    """Plain `groktocrawl crawl <url>` (no --limit) starts a crawl.
+
+    Regression for the PR #597 follow-up finding: the CLI historically
+    serialized its ``limit=0`` sentinel, but server-side validation now
+    requires ``limit >= 1``, so the DEFAULT invocation deterministically
+    failed with HTTP 422 INVALID_REQUEST. The client must OMIT the field
+    when unset. The lone pre-existing CLI crawl tests pass explicit
+    ``--limit`` and therefore never exercised this path.
+    """
+    import json as _json
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "groktocrawl",
+            "--json",
+            "crawl",
+            TEST_SITE + "/",
+            "--no-poll",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    assert result.returncode == 0, (
+        f"Default CLI crawl failed ({result.returncode}): {result.stderr}"
+    )
+    payload = _json.loads(result.stdout.strip())
+    assert payload["job_id"], f"No job ID in default-crawl output: {payload}"
+
+    # The created job must be a real, running/completed crawl — i.e. the
+    # server ACCEPTED the request instead of answering 422 INVALID_REQUEST.
+    status = httpx.get(AGENT + f"/v2/crawl/{payload['job_id']}", timeout=30)
+    assert status.status_code == 200, (
+        f"Crawl job {payload['job_id']} not found: {status.status_code}"
+    )
 
 
 # ── VAL-CROSS-008: Batch scrape vs Crawl coexistence ────────────

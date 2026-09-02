@@ -11,10 +11,13 @@ services:
       retries: 20
 
   slopsearx:
-    image: ghcr.io/magnus919/slopsearx@sha256:c7fd83077bf5f189a0125b6377b367740068d012e9caeb48318401a23437711d
+    image: ghcr.io/magnus919/slopsearx@sha256:91194d146d205b1cf4688c1989da8f5f6b599a9627be23fd1ee7a4e488fda5b7
     restart: unless-stopped
+    # SLOPSEARX_HOST_PORT moves only the published HOST side; the container
+    # stays on 8080. Lets co-tenant compose stacks on a shared Docker host
+    # (e.g. the CI runner) avoid fixed-port collisions without edits.
     ports:
-      - "8081:8080"
+      - "${SLOPSEARX_HOST_PORT:-8081}:8080"
     environment:
       - ENGINE_BRAVE_API_KEY=${BRAVE_API_KEY}
       - VALKEY_URL=redis://valkey:6379/0
@@ -26,7 +29,7 @@ services:
       retries: 3
 
   slopsearx-mcp:
-    image: ghcr.io/magnus919/slopsearx@sha256:c7fd83077bf5f189a0125b6377b367740068d012e9caeb48318401a23437711d
+    image: ghcr.io/magnus919/slopsearx@sha256:91194d146d205b1cf4688c1989da8f5f6b599a9627be23fd1ee7a4e488fda5b7
     # The MCP companion must never run unauthenticated, but a required-token
     # guard using the Compose `:?` operator would abort a no-config
     # `docker compose up` at load time (Compose interpolates the whole file
@@ -79,8 +82,10 @@ services:
       context: .
       dockerfile: llm-svc/Dockerfile
     restart: unless-stopped
+    # LLM_HOST_PORT moves only the published HOST side; the container stays
+    # on 8011 (see slopsearx note above re: shared-host port collisions).
     ports:
-      - "8011:8011"
+      - "${LLM_HOST_PORT:-8011}:8011"
     profiles:
       - fixture
 
@@ -88,8 +93,10 @@ services:
     build:
       context: ./test-site
     restart: unless-stopped
+    # TEST_SITE_HOST_PORT moves only the published HOST side; the container
+    # stays on 8000 (see slopsearx note above re: shared-host collisions).
     ports:
-      - "8005:8000"
+      - "${TEST_SITE_HOST_PORT:-8005}:8000"
     profiles:
       - fixture
     environment:
@@ -103,8 +110,10 @@ services:
       context: .
       dockerfile: slopsearx-fixture/Dockerfile
     restart: unless-stopped
+    # SLOPSEARX_FIXTURE_HOST_PORT moves only the published HOST side; the
+    # container stays on 8080 (see slopsearx note re: shared-host collisions).
     ports:
-      - "8083:8080"
+      - "${SLOPSEARX_FIXTURE_HOST_PORT:-8083}:8080"
     profiles:
       - fixture
     environment:
@@ -123,8 +132,10 @@ services:
     build:
       context: ./test-site
     restart: unless-stopped
+    # TIER3_HOST_PORT moves only the published HOST side; the container stays
+    # on 8000 (see slopsearx note above re: shared-host collisions).
     ports:
-      - "8006:8000"
+      - "${TIER3_HOST_PORT:-8006}:8000"
     profiles:
       - fixture
     environment:
@@ -143,8 +154,10 @@ services:
       dockerfile: scraper-svc/Dockerfile
     image: ghcr.io/groktopus/groktocrawl-scraper
     restart: unless-stopped
+    # SCRAPER_HOST_PORT moves only the published HOST side; the container
+    # stays on 8001 (see slopsearx note re: shared-host port collisions).
     ports:
-      - "8001:8001"
+      - "${SCRAPER_HOST_PORT:-8001}:8001"
     env_file:
       - .env
     environment:
@@ -186,14 +199,25 @@ services:
     restart: unless-stopped
     profiles:
       - indexing
+    # SEMANTIC_HOST_PORT moves only the published HOST side; the container
+    # stays on 8003 (see slopsearx note re: shared-host collisions).
     ports:
-      - "8003:8003"
+      - "${SEMANTIC_HOST_PORT:-8003}:8003"
     environment:
       - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
       - VECTOR_INDEX_MAX_DOCS=${VECTOR_INDEX_MAX_DOCS:-250000}
       - EMBED_MODEL_NAME=${EMBED_MODEL_NAME:-BAAI/bge-m3}
       - EMBED_DIM=${EMBED_DIM:-1024}
       - ACTIVE_EMBED_MODEL=${ACTIVE_EMBED_MODEL:-v_bge-m3}
+      # Qdrant timeout tuning must pass through from .env or operator
+      # overrides are silently ignored (#588 follow-up). app.py parses
+      # both vars with float() at import time, so the fallbacks must stay
+      # non-empty numeric values equal to today's effective defaults — an
+      # empty ${VAR:-} fallback would inject "" and crash-loop the service.
+      # Drift watch: each '10' fallback duplicates semantic-svc/app.py's
+      # own getenv default; bump both sides together.
+      - QDRANT_QUERY_TIMEOUT=${QDRANT_QUERY_TIMEOUT:-10}
+      - QDRANT_CLIENT_TIMEOUT=${QDRANT_CLIENT_TIMEOUT:-10}
     volumes:
       - hf-cache:/root/.cache/huggingface
     depends_on:
@@ -238,6 +262,8 @@ services:
       dockerfile: agent-svc/Dockerfile
     image: ghcr.io/groktopus/groktocrawl-agent
     restart: unless-stopped
+    # AGENT_PORT moves only the published HOST side; the container stays on
+    # 8080 (see slopsearx note re: shared-host port collisions).
     ports:
       - "${AGENT_PORT:-8080}:8080"
     env_file:
@@ -271,8 +297,10 @@ services:
     restart: unless-stopped
     profiles:
       - fixture
+    # AGENT_FIXTURE_HOST_PORT moves only the published HOST side; the
+    # container stays on 8080 (see slopsearx note re: shared-host collisions).
     ports:
-      - "8084:8080"
+      - "${AGENT_FIXTURE_HOST_PORT:-8084}:8080"
     env_file:
       - .env
     depends_on:
@@ -312,8 +340,10 @@ services:
       dockerfile: portal-svc/Dockerfile
     image: ghcr.io/groktopus/groktocrawl-portal
     restart: unless-stopped
+    # PORTAL_HOST_PORT moves only the published HOST side; the container
+    # stays on 8081 (see slopsearx note re: shared-host port collisions).
     ports:
-      - "8082:8081"
+      - "${PORTAL_HOST_PORT:-8082}:8081"
     environment:
       - AGENT_BASE_URL=http://agent-svc:8080
 

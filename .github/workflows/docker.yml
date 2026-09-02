@@ -36,6 +36,51 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Fork-PR workflow-edit guard (#562). A pull request from a fork that
+      # modifies .github/workflows/** runs from the PR MERGE REF, i.e. with
+      # this very file already rewritten by the fork — so no in-repo check can
+      # be trusted there. This step is DEFENSE IN DEPTH ONLY (ADR-0056): it
+      # fails fast so the required checks go red as a paper trail. The
+      # authoritative, non-bypassable control is PLATFORM-LEVEL and lives in
+      # the org settings (runner group [self-hosted, groktopus, docker] with
+      # allows_public_repositories=false; optional restricted_to_workflows +
+      # allowlist; "Require approval for all external contributors"). Those
+      # org-level controls are currently DEFERRED by maintainer decision with
+      # the residual risk accepted — exact remediation steps:
+      # docs/runbooks/self-hosted-runner-fork-protection.md
+      #
+      # The step lives inside this `changes` classification job whose `if`
+      # cannot skip classification, and its own always() guard means an
+      # earlier step failure cannot prevent its evaluation. A failing step
+      # fails the whole `changes` job, which trips runtime-gate's fail-closed
+      # branch ("Fail when change classification fails") — exactly the
+      # intended red paper trail. Null-guard note (corrected 2026-08-24,
+      # scrutiny round 1 on #562): GitHub expressions use LOOSE equality with
+      # numeric coercion (official expressions reference; actions/runner
+      # EvaluationResult.cs) — Null->0 and Boolean false->0, so `fork == null`
+      # and `fork == false` are BOTH true, and the once-shipped `fork != false`
+      # evaluated FALSE for a null fork (deleted forks), silently SKIPPING this
+      # detector. The condition is therefore an explicit disjunction that arms
+      # for every pull_request event; under the same coercion a proven
+      # same-repository PR (`fork == false`) also matches, and the seam then
+      # trusts only the rendered literal "false" in CI_PR_FORK (null renders as
+      # an empty string), keeping deleted forks fail-closed.
+      - name: Detect fork PR modifying GitHub workflows
+        id: fork_guard
+        if: >-
+          always() && github.event_name == 'pull_request' &&
+          (github.event.pull_request.head.repo.fork == true ||
+          github.event.pull_request.head.repo.fork == null)
+        shell: bash
+        env:
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_PR_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          merge_base=$(git merge-base "$CI_BASE_SHA" "$CI_HEAD_SHA")
+          git diff --name-only "$merge_base" "$CI_HEAD_SHA" | python3 scripts/ci_fork_pr_guard.py
+
       - name: Test change classifier
         run: python3 tests/service/test_ci_change_classification.py
 
@@ -256,15 +301,55 @@ jobs:
     # file could bypass the guard. The authoritative, non-bypassable control is
     # platform-level (deny fork PRs to the runner group / require workflow approval for
     # outside collaborators), which is outside this repo and must be configured there.
+    # See docs/runbooks/self-hosted-runner-fork-protection.md for the exact org-level
+    # remediation steps (currently DEFERRED by maintainer decision; residual risk
+    # accepted) and the `Detect fork PR modifying GitHub workflows` step in the
+    # `changes` job above for the in-repo detection paper trail (#562).
+    #
+    # Null-guard note (corrected 2026-08-24, scrutiny round 1 on #562): loose
+    # equality coerces Null->0 and Boolean false->0, so a plain
+    # `head.repo.fork == false` was TRUE for deleted forks (null) — admitting
+    # exactly the PRs this guard exists to stop onto the self-hosted lane.
+    # Direct expression arithmetic cannot separate null from false (both are 0),
+    # so admission requires the STRING rendering to equal 'false'
+    # (format('{0}', ...) yields 'true'/'false'/'' for null; a missing
+    # head.repo property also renders ''). Deleted forks are therefore
+    # fail-closed OFF the lane.
     if: >-
       always() && ((github.event_name == 'pull_request' && needs.changes.result == 'success' &&
       needs.changes.outputs.requires_full_runtime == 'true' &&
-      github.event.pull_request.head.repo.fork == false) ||
+      format('{0}', github.event.pull_request.head.repo.fork) == 'false') ||
       (github.event_name == 'push' && needs.build-and-push.result == 'success'))
     runs-on: [self-hosted, groktopus, docker]
     concurrency:
       group: groktocrawl-integration-${{ github.repository }}
       cancel-in-progress: false
+    # Host-port deconfliction for the shared self-hosted Docker daemon: co-tenant
+    # compose projects (e.g. grokval copies of this stack) publish the same
+    # default ports, so four consecutive runs failed with
+    # "Bind for 0.0.0.0:8080 failed: port is already allocated". The 18xxx
+    # range is reserved for CI; operator defaults in docker-compose.yml are
+    # unchanged, so every other workflow keeps today's behavior.
+    #
+    # These fixed 18xxx pins are a FALLBACK ONLY: the "Allocate deconflicted host
+    # ports" preflight step below bind-probes candidate /100 blocks at run time
+    # and exports the winning assignments via $GITHUB_ENV, which overrides these
+    # values for every subsequent step (commit 1b26623's static scheme still lost
+    # a run when an unknown co-tenant squatted exactly 18081 while its neighbors
+    # stayed free — any fixed range loses that race on a shared daemon). They are
+    # kept so the job env documents the port map and the stack still starts with
+    # sane defaults if the preflight step is ever removed or bypassed.
+    env:
+      AGENT_PORT: "18080"
+      SCRAPER_HOST_PORT: "18001"
+      SLOPSEARX_HOST_PORT: "18081"
+      PORTAL_HOST_PORT: "18082"
+      SEMANTIC_HOST_PORT: "18003"
+      LLM_HOST_PORT: "18011"
+      TEST_SITE_HOST_PORT: "18005"
+      TIER3_HOST_PORT: "18006"
+      SLOPSEARX_FIXTURE_HOST_PORT: "18083"
+      AGENT_FIXTURE_HOST_PORT: "18084"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -287,6 +372,12 @@ jobs:
           echo "CAPTCHA_VISION_API_KEY=fixture-only" >> .env
           echo "CAPTCHA_VISION_MODEL=fixture-model" >> .env
           echo "SCRAPER_PRIVATE_URL_ALLOWLIST=test-site,tier3-fixture" >> .env
+          # Gutenberg digital twin (#581): point the gutenberg adapter's
+          # EPUB/plain-text downloads and Gutendex enrichment at the
+          # deterministic test-site fixture so the integration lane never
+          # depends on third-party uptime.
+          echo "ADAPTER_GUTENBERG_CACHE_BASE=http://test-site:8000" >> .env
+          echo "ADAPTER_GUTENDEX_API_BASE=http://test-site:8000" >> .env
           echo "AGENT_SEARCH_RATE_LIMIT=1000/1s" >> .env
           # mcp-svc DNS-rebinding allowlist: include the compose service name
           # so the integration lane exercises a real non-loopback Host path.
@@ -352,6 +443,65 @@ jobs:
           fi
         timeout-minutes: 10
 
+      # Dynamic host-port allocation for the shared self-hosted Docker daemon.
+      # A fixed range cannot win the race against unknown co-tenants (1b26623's
+      # static 18xxx pins failed when a squatter held exactly 18081 while its
+      # neighbors stayed free), so this step bind-probes candidate blocks at run
+      # time and exports the winning block via $GITHUB_ENV. GITHUB_ENV values
+      # override the job-level env pins above for every subsequent step; compose
+      # interpolates ${VAR:-default} from them and all later steps read the same
+      # names. Fail-closed: if no free /100 block exists in 18000-19900, fail
+      # loudly instead of starting a half-bound stack.
+      - name: Allocate deconflicted host ports
+        run: |
+          python3 - <<'PY'
+          import os
+          import socket
+
+          OFFSETS = [
+              ("AGENT_PORT", 80),
+              ("SCRAPER_HOST_PORT", 1),
+              ("SEMANTIC_HOST_PORT", 3),
+              ("TEST_SITE_HOST_PORT", 5),
+              ("TIER3_HOST_PORT", 6),
+              ("LLM_HOST_PORT", 11),
+              ("SLOPSEARX_HOST_PORT", 81),
+              ("PORTAL_HOST_PORT", 82),
+              ("SLOPSEARX_FIXTURE_HOST_PORT", 83),
+              ("AGENT_FIXTURE_HOST_PORT", 84),
+          ]
+
+          def is_free(port: int) -> bool:
+              sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              try:
+                  sock.bind(("0.0.0.0", port))
+              except OSError:
+                  return False
+              finally:
+                  sock.close()
+              return True
+
+          env_file = os.environ["GITHUB_ENV"]
+          lines = []
+          for base in range(18000, 19901, 100):
+              candidates = [(name, base + offset) for name, offset in OFFSETS]
+              if not all(is_free(port) for _, port in candidates):
+                  continue
+              lines = [f"{name}={port}" for name, port in candidates]
+              break
+          else:
+              raise SystemExit(
+                  "No free /100 host-port block found in 18000-19900 on the "
+                  "shared Docker host; refusing to start a partially bound "
+                  "stack. Free or identify the co-tenant holding these ranges."
+              )
+
+          with open(env_file, "a") as handle:
+              handle.write("\n".join(lines) + "\n")
+          for line in lines:
+              print(f"exported {line}")
+          PY
+
       - name: Start the Docker stack
         run: docker compose --profile indexing up -d
         timeout-minutes: 10
@@ -367,12 +517,19 @@ jobs:
 
       - name: Wait for services to be healthy
         run: |
-          python3 -c "
-          import time, urllib.request
+          # Quoted heredoc: bash passes the payload to python verbatim, so the
+          # dynamically allocated port is read from the environment instead of
+          # interpolated by the shell.
+          python3 - <<'PY'
+          import os
+          import time
+          import urllib.request
+
+          url = f"http://localhost:{os.environ['AGENT_PORT']}/health"
           deadline = time.time() + 180
           while time.time() < deadline:
               try:
-                  r = urllib.request.urlopen('http://localhost:8080/health', timeout=5)
+                  r = urllib.request.urlopen(url, timeout=5)
                   if r.status == 200:
                       print('Stack healthy')
                       break
@@ -381,19 +538,27 @@ jobs:
               time.sleep(3)
           else:
               raise RuntimeError('Timed out waiting for stack')
-          "
+          PY
 
       - name: Wait for semantic-svc
         run: |
-          # First check from host that the API is alive
-          python3 -c "
-          import time, urllib.request, urllib.error
+          # First check from host that the API is alive. Quoted heredoc: bash
+          # passes the payload to python verbatim, so the dynamically allocated
+          # port is read from the environment instead of interpolated by the
+          # shell.
+          python3 - <<'PY'
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+
+          url = f"http://localhost:{os.environ['SEMANTIC_HOST_PORT']}/health"
           deadline = time.time() + 300
           while time.time() < deadline:
               try:
-                  r = urllib.request.urlopen('http://localhost:8003/health', timeout=5)
+                  r = urllib.request.urlopen(url, timeout=5)
                   data = r.read().decode()
-                  if r.status == 200 and '\"ok\"' in data:
+                  if r.status == 200 and '"ok"' in data:
                       print('semantic-svc healthy on host')
                       break
               except urllib.error.HTTPError as e:
@@ -403,35 +568,45 @@ jobs:
               time.sleep(3)
           else:
               raise RuntimeError('Timed out waiting for semantic-svc on host')
-          "
-          # Verify Qdrant is reachable from inside agent-svc (where tests run)
-          python3 -c "
-          import time, subprocess
+          PY
+          # Verify Qdrant is reachable from inside agent-svc (where tests run).
+          # Service-DNS URL stays literal: no host-port interpolation needed.
+          python3 - <<'PY'
+          import subprocess
+          import time
+
           deadline = time.time() + 60
           while time.time() < deadline:
               r = subprocess.run(
                   ['docker', 'compose', 'exec', '-T', 'agent-svc',
                    'python3', '-c',
-                   'import urllib.request; u=urllib.request.urlopen(\"http://semantic-svc:8003/index/stats\", timeout=5); print(u.status)'],
+                   'import urllib.request; u=urllib.request.urlopen("http://semantic-svc:8003/index/stats", timeout=5); print(u.status)'],
                   capture_output=True, text=True, timeout=10
               )
               if r.returncode == 0 and '200' in r.stdout:
-                  print(f'Qdrant ready from agent-svc')
+                  print('Qdrant ready from agent-svc')
                   break
               print(f'  waiting from agent-svc (rc={r.returncode}): {r.stdout[:80]}')
               time.sleep(5)
           else:
               raise RuntimeError('Timed out waiting for Qdrant from agent-svc')
-          "
+          PY
 
       - name: Wait for tier3-fixture
         run: |
-          python3 -c "
-          import time, urllib.request
+          # Quoted heredoc: bash passes the payload to python verbatim, so the
+          # dynamically allocated port is read from the environment instead of
+          # interpolated by the shell.
+          python3 - <<'PY'
+          import os
+          import time
+          import urllib.request
+
+          url = f"http://localhost:{os.environ['TIER3_HOST_PORT']}/health"
           deadline = time.time() + 30
           while time.time() < deadline:
               try:
-                  r = urllib.request.urlopen('http://localhost:8006/health', timeout=5)
+                  r = urllib.request.urlopen(url, timeout=5)
                   if r.status == 200:
                       print('tier3-fixture healthy')
                       break
@@ -440,16 +615,23 @@ jobs:
               time.sleep(2)
           else:
               raise RuntimeError('Timed out waiting for tier3-fixture')
-          "
+          PY
 
       - name: Wait for test-site
         run: |
-          python3 -c "
-          import time, urllib.request
+          # Quoted heredoc: bash passes the payload to python verbatim, so the
+          # dynamically allocated port is read from the environment instead of
+          # interpolated by the shell.
+          python3 - <<'PY'
+          import os
+          import time
+          import urllib.request
+
+          url = f"http://localhost:{os.environ['TEST_SITE_HOST_PORT']}/health"
           deadline = time.time() + 60
           while time.time() < deadline:
               try:
-                  r = urllib.request.urlopen('http://localhost:8005/health', timeout=5)
+                  r = urllib.request.urlopen(url, timeout=5)
                   if r.status == 200:
                       print('test-site healthy')
                       break
@@ -458,16 +640,23 @@ jobs:
               time.sleep(2)
           else:
               raise RuntimeError('Timed out waiting for test-site')
-          "
+          PY
 
       - name: Wait for slopsearx-fixture
         run: |
-          python3 -c "
-          import time, urllib.request
+          # Quoted heredoc: bash passes the payload to python verbatim, so the
+          # dynamically allocated port is read from the environment instead of
+          # interpolated by the shell.
+          python3 - <<'PY'
+          import os
+          import time
+          import urllib.request
+
+          url = f"http://localhost:{os.environ['SLOPSEARX_FIXTURE_HOST_PORT']}/health"
           deadline = time.time() + 60
           while time.time() < deadline:
               try:
-                  r = urllib.request.urlopen('http://localhost:8083/health', timeout=5)
+                  r = urllib.request.urlopen(url, timeout=5)
                   if r.status == 200:
                       print('slopsearx-fixture healthy')
                       break
@@ -476,16 +665,23 @@ jobs:
               time.sleep(2)
           else:
               raise RuntimeError('Timed out waiting for slopsearx-fixture')
-          "
+          PY
 
       - name: Wait for agent-svc-fixture
         run: |
-          python3 -c "
-          import time, urllib.request
+          # Quoted heredoc: bash passes the payload to python verbatim, so the
+          # dynamically allocated port is read from the environment instead of
+          # interpolated by the shell.
+          python3 - <<'PY'
+          import os
+          import time
+          import urllib.request
+
+          url = f"http://localhost:{os.environ['AGENT_FIXTURE_HOST_PORT']}/health"
           deadline = time.time() + 120
           while time.time() < deadline:
               try:
-                  r = urllib.request.urlopen('http://localhost:8084/health', timeout=5)
+                  r = urllib.request.urlopen(url, timeout=5)
                   if r.status == 200:
                       print('agent-svc-fixture healthy')
                       break
@@ -494,15 +690,33 @@ jobs:
               time.sleep(3)
           else:
               raise RuntimeError('Timed out waiting for agent-svc-fixture')
-          "
+          PY
 
       - name: Reset isolated test state
         run: |
           docker compose exec -T valkey valkey-cli -n 0 FLUSHDB
           docker compose exec -T valkey valkey-cli -n 1 FLUSHDB
-          run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8011/diagnostics/reset?run_id=' + '${run_id}', data=b'', timeout=5)"
-          python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8083/ledger/reset?run_id=' + '${run_id}', data=b'', timeout=5)"
+          # Quoted heredocs: bash passes each payload to python verbatim, so the
+          # dynamically allocated ports and the run id are read from the
+          # environment instead of interpolated by the shell.
+          run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" python3 - <<'PY'
+          import os
+          import urllib.request
+
+          base_url = f"http://localhost:{os.environ['LLM_HOST_PORT']}/diagnostics/reset"
+          urllib.request.urlopen(
+              f"{base_url}?run_id={os.environ['run_id']}", data=b"", timeout=5
+          )
+          PY
+          run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" python3 - <<'PY'
+          import os
+          import urllib.request
+
+          base_url = f"http://localhost:{os.environ['SLOPSEARX_FIXTURE_HOST_PORT']}/ledger/reset"
+          urllib.request.urlopen(
+              f"{base_url}?run_id={os.environ['run_id']}", data=b"", timeout=5
+          )
+          PY
 
       - name: Copy test files and source directories
         run: |
@@ -535,7 +749,7 @@ jobs:
           docker cp mcp-svc/. "$svc:/app/mcp-svc/"
 
       - name: Install critical test dependencies
-        run: docker compose exec -T agent-svc pip install pytest pytest-asyncio pytest-cov pytest-timeout jinja2 tabulate markdownify==1.2.3 readability-lxml==0.8.4.1 firecrawl-anydoc==0.1.9 pypdf -q
+        run: docker compose exec -T agent-svc pip install pytest pytest-asyncio pytest-cov pytest-timeout jinja2 tabulate markdownify==1.2.3 readability-lxml==0.8.4.1 firecrawl-anydoc==0.2.4 pypdf -q
 
       - name: Verify LLM fixture contract and agent routing
         run: |
@@ -594,7 +808,7 @@ jobs:
         run: |
           uv run --no-sync python3 scripts/run_answer_evals.py --selection narrow \
             --output-dir eval-out/narrow \
-            --http-smoke http://127.0.0.1:8084
+            --http-smoke "http://127.0.0.1:${AGENT_FIXTURE_HOST_PORT}"
         timeout-minutes: 5
 
       - name: Upload answer-evals provenance
@@ -647,7 +861,7 @@ jobs:
 
       - name: Run integration tests
         run: |
-          docker compose exec -T agent-svc pip install pytest pytest-asyncio pytest-cov pytest-xdist pytest-timeout jinja2 tabulate markdownify==1.2.3 readability-lxml==0.8.4.1 firecrawl-anydoc==0.1.9 pypdf PyYAML -q
+          docker compose exec -T agent-svc pip install pytest pytest-asyncio pytest-cov pytest-xdist pytest-timeout jinja2 tabulate markdownify==1.2.3 readability-lxml==0.8.4.1 firecrawl-anydoc==0.2.4 pypdf PyYAML -q
           docker compose exec -T agent-svc mkdir -p /app/coverage
           set +e
           docker compose exec -T agent-svc env \
@@ -728,7 +942,7 @@ jobs:
           allowed = {"request_id", "schema_version", "fixture_version", "scenario", "scenario_version", "run_id", "status", "classification", "model", "stream"}
           try:
               run_id = f"{os.environ.get('GITHUB_RUN_ID', 'local')}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
-              with urllib.request.urlopen(f"http://localhost:8011/diagnostics?run_id={run_id}", timeout=5) as response:
+              with urllib.request.urlopen(f"http://localhost:{os.environ['LLM_HOST_PORT']}/diagnostics?run_id={run_id}", timeout=5) as response:
                   payload = json.load(response)
               entries = [{key: value for key, value in entry.items() if key in allowed} for entry in payload.get("entries", [])]
               output = {"schema_version": payload.get("schema_version"), "fixture_version": payload.get("fixture_version"), "entries": entries}
@@ -747,7 +961,7 @@ jobs:
           import urllib.request
           run_id = f"{os.environ.get('GITHUB_RUN_ID', 'local')}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
           try:
-              with urllib.request.urlopen(f"http://localhost:8083/ledger?run_id={run_id}", timeout=5) as response:
+              with urllib.request.urlopen(f"http://localhost:{os.environ['SLOPSEARX_FIXTURE_HOST_PORT']}/ledger?run_id={run_id}", timeout=5) as response:
                   payload = json.load(response)
               allowed = {"request_id", "scenario", "schema_version", "fixture_version", "status", "classification", "categories", "page", "result_count", "run_id"}
               output = {"schema_version": payload.get("schema_version"), "fixture_version": payload.get("fixture_version"), "entries": [{key: value for key, value in entry.items() if key in allowed} for entry in payload.get("entries", [])]}
@@ -838,6 +1052,12 @@ jobs:
             echo "=== docker compose ps -a ==="
             docker compose ps -a || true
             echo
+            echo "=== listening TCP sockets ==="
+            ss -ltnp || netstat -tlnp || true
+            echo
+            echo "=== all containers with ports ==="
+            docker ps --format '{{.Names}}\t{{.Ports}}' || true
+            echo
             echo "=== docker stats --no-stream ==="
             docker stats --no-stream || true
             echo
@@ -883,10 +1103,17 @@ jobs:
         run: echo "Runtime integration was intentionally not needed for this docs-only pull request."
 
       - name: Summarize fork pull request (integration skipped)
+        # String-rendered comparison: covers proven forks ('true') AND
+        # deleted forks (head.repo.fork null renders '') — both are untrusted,
+        # both get the explicit skipped-for-security summary. Same-repo PRs
+        # render 'false' and never match (#562 scrutiny round 1 follow-up).
         if: >-
-          github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == true &&
+          github.event_name == 'pull_request' &&
+          format('{0}', github.event.pull_request.head.repo.fork) != 'false' &&
           needs.changes.result == 'success'
-        run: 'echo "Fork pull request: self-hosted integration skipped for security."'
+        run: |-
+          echo "Fork pull request: self-hosted integration skipped for security."
+          echo "(Includes deleted forks whose head.repo.fork renders null.)"
 
       - name: Summarize successful runtime validation
         if: >-
@@ -909,7 +1136,7 @@ jobs:
           !(github.event_name == 'pull_request' &&
           needs.changes.outputs.requires_full_runtime == 'false') &&
           !(github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.fork == true) &&
+          format('{0}', github.event.pull_request.head.repo.fork) != 'false') &&
           needs.integration-tests.result != 'success'
         run: |
           echo "Required runtime integration did not complete successfully."

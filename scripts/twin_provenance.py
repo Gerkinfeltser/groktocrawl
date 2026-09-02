@@ -138,7 +138,7 @@ def _image_records(execution_mode: str) -> list[dict[str, object]]:
     references = {
         name: os.environ.get(
             f"TWIN_IMAGE_{name.upper().replace('-', '_')}",
-            "ghcr.io/magnus919/slopsearx@sha256:c7fd83077bf5f189a0125b6377b367740068d012e9caeb48318401a23437711d"
+            "ghcr.io/magnus919/slopsearx@sha256:91194d146d205b1cf4688c1989da8f5f6b599a9627be23fd1ee7a4e488fda5b7"
             if name == "slopsearx"
             else name,
         )

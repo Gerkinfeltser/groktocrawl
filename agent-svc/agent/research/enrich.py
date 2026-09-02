@@ -4,6 +4,7 @@ import asyncio
 import json as _json
 import logging
 
+from ..barrier_guard import is_barrier_flagged, log_refusal
 from ..llm import LLMClient
 from ..scraper_client import ScraperClient
 from ..searxng_client import SearXNGClient
@@ -104,9 +105,11 @@ async def run_enrich_pipeline(
 
                 markdown = (
                     scraped.get("data", {}).get("markdown", "")
-                    if scraped.get("success")
+                    if scraped.get("success") and not is_barrier_flagged(scraped)
                     else ""
                 )
+                if scraped.get("success") and is_barrier_flagged(scraped):
+                    log_refusal(top_url, scraped)
                 if not markdown:
                     return {"item": item, "enrichments": {}}
 

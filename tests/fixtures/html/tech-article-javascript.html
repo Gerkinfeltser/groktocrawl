@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>A Practical Introduction to Modern JavaScript Tooling</title>
+  <meta name="description"
+        content="How bundlers, transpilers, and type checkers fit together in a modern JavaScript workflow.">
+</head>
+<body>
+  <article>
+    <header><h1>A Practical Introduction to Modern JavaScript Tooling</h1>
+      <p>By Dana Example &middot; 12 min read</p></header>
+    <p>The modern JavaScript ecosystem can feel overwhelming, but most projects rely
+       on just three kinds of tools: a package manager, a bundler, and a formatter.
+       This article walks through how they cooperate in a realistic build pipeline
+       without drowning in configuration.</p>
+    <p>JavaScript has evolved from a small scripting language into the compilation
+       target of an entire tooling industry. TypeScript compiles down to JavaScript,
+       JSX components are transformed by Babel or SWC, and bundlers like Vite or
+       esbuild merge hundreds of modules into a handful of cacheable output files.
+       Understanding what each stage produces makes debugging far less mysterious.</p>
+    <h2>Bundling and code splitting</h2>
+    <p>A bundler resolves the import graph starting from an entry module and emits
+       static assets the browser can load directly. Code splitting lets you ship only
+       the JavaScript needed for the first paint, deferring the rest until the user
+       navigates further. Most bundlers support dynamic imports for this purpose.</p>
+    <h2>Type checking at scale</h2>
+    <p>Type checkers run as a separate process so that incremental rebuilds stay fast.
+       The checker reads declaration files describing library APIs, then verifies that
+       every call site lines up with those declarations. Teams adopting gradual typing
+       typically start with loose settings and tighten them per directory.</p>
+    <footer><p>Filed under: engineering, toolchains. References available on request.</p></footer>
+  </article>
+</body>
+</html>

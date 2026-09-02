@@ -104,9 +104,80 @@ In `smart_scrape()`, after each tier, the result dict is checked for a `"barrier
 * The barrier type string is a free-text enum — no type safety on the string value
 * Confidence scoring is a simple heuristic (signal count) — may need tuning in Phase 2
 
+## Amendment: Fastly challenge detection and consumer refusal (#586, 2026-08)
+
+Nature.com (and other Fastly-fronted sites) serve a JavaScript-challenge
+interstitial that Playwright renders into plausible-looking prose — the page is
+non-empty, so none of the original signals fire, and the challenge text flows
+through extraction as if it were article content. GitHub issue #586 closes this
+gap with two additions to classification plus an enforcement invariant on every
+consumer of scraper output.
+
+### Fastly signals
+
+`FASTLY_CHALLENGE_INDICATORS` adds the observed interstitial prose:
+"JavaScript is disabled in your browser.", "Please enable JavaScript to
+proceed.", and "A required part of this site couldn't load." A definitive
+transport signature, `/_fs-ch-` (Fastly's challenge asset prefix), identifies
+the challenge infrastructure regardless of rendered text.
+
+### Definitive signatures vs. prose signals
+
+Two evidence classes are now distinguished:
+
+* **Definitive transport signature** — HTML containing `/_fs-ch-`
+  short-circuits classification immediately: `BarrierInfo(detected=True,
+  barrier_type="fastly", confidence=0.95)`, mirroring the captcha-provider
+  block. The asset prefix is issued by Fastly's own challenge machinery; its
+  presence is not plausibly legitimate content.
+* **Prose signals** — the marker sentences accumulate through the existing
+  count-based ladder (`min(0.50 + n * 0.20, 0.95)`): 1 signal → 0.70,
+  2 signals → 0.90. Prose alone must **never** auto-classify at 0.95: wording
+  can legitimately appear in articles about browsers or accessibility, so only
+  the transport signature carries definitive weight.
+
+Fastly prose-in-title and signature-bearing URLs also feed `_is_bot_challenge()`,
+so the Tier 3 resolution poll engages for Fastly challenges exactly as it does
+for Cloudflare.
+
+### Consumer-refusal consequence
+
+Detection alone proved insufficient: a classified barrier can still survive as
+a "successful" scrape payload (warning key set, or quality
+`block_detected ∈ {warn, fail}`), and any consumer that feeds scraper markdown
+to the LLM would ingest challenge text. The enforced invariant is:
+
+> **Barrier content must NEVER reach the LLM.**
+
+Every agent-svc seam that ingests scraper results refuses flagged payloads
+(shared predicate `agent/barrier_guard.py::is_barrier_flagged`; refusal is
+logged, never silently swallowed):
+
+* `scraper_client.scrape_with_fallback` — both stages apply the guard; when
+  both stages yield only flagged content an explicit `BARRIER_DETECTED`
+  failure dict is returned instead of the flagged success.
+* `research/discovery._scrape_single` / `_scrape_urls` — flagged sources are
+  dropped (not ingested), including re-gating of poisoned scrape-cache hits.
+* Rich search (`research/search.py`) and its streaming variant — flagged
+  scrapes fall back to the search-result description; no challenge markdown
+  enters synthesis context.
+* Answer rerank-reuse seam (`_scrape_answer_sources`) — reuse artifacts whose
+  recovered markdown trips the block-page gate are refused.
+* Crawler — barrier-flagged pages are recorded as errors/skips with bounded
+  retries (max 2); children of such pages are not enqueued.
+* Batch-scrape worker and session agent steps — flagged payloads become typed
+  errors; flagged pages are never indexed.
+
+A page that merely *quotes* the exact marker phrases is expected to be flagged
+under this strict policy; the negative-control fixture demonstrates that
+ordinary JavaScript mentions stay clean.
+
+Out of scope for this amendment (documented detection surfaces elsewhere):
+browser-svc's duplicate detector and mcp-svc's scrape tool.
+
 ## Links
 
 * Supersedes the implicit barrier detection previously spread across `_looks_suspicious()`, `_is_bot_challenge()`, and `smart_scrape()`
 * Defined by `scraper-svc/scraper/fetch.py` (`BarrierInfo`, `_classify_barrier`)
-* See GitHub issues #51 (barrier detection) and #99 (adaptive barrier handling)
+* See GitHub issues #51 (barrier detection), #99 (adaptive barrier handling), and #586 (Fastly JS-challenge pages returned as article content)
 * Phase 2 will add per-barrier-type retry strategies and configurable confidence thresholds

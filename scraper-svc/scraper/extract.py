@@ -26,6 +26,7 @@ BLOCK_PAGE_PATTERNS: list[re.Pattern] = [
     re.compile(r"please enable javascript"),
     re.compile(r"enable javascript to continue"),
     re.compile(r"javascript is required"),
+    re.compile(r"javascript is disabled"),
     re.compile(r"please turn javascript on"),
     # Bot challenges
     re.compile(r"please verify you are (?:a )?human"),
@@ -75,6 +76,10 @@ BLOCK_PAGE_PATTERNS: list[re.Pattern] = [
     # Maintenance
     re.compile(r"under maintenance"),
     re.compile(r"temporarily unavailable"),
+    # Fastly JS-challenge interstitial (#586) — combined with the patterns
+    # above it pushes the interstitial to >=2 matches, i.e. a blocking "fail".
+    re.compile(r"a required part of this site could(?:n[o'\u2019]| no)t load"),
+    re.compile(r"/_fs-ch-"),
 ]
 
 
@@ -231,11 +236,37 @@ def _check_block_page(markdown: str, url: str = "") -> tuple[float, str]:
     return 1.0, "pass"
 
 
+# ── Volume-comparison gate (#587) ────────────────────────────────
+# Sources at or above MIN_LOW_YIELD_SOURCE_CHARS whose readable output is
+# either under VOLUME_YIELD_RATIO_FLOOR of the source size or under
+# VOLUME_MIN_OUTPUT_CHARS absolute are anomalously thin. Calibrated so the
+# issue #587 repro (768B intro-only markdown from 94,978B HTML, ratio 0.8%)
+# trips the check while typical article yields (~10%+) never do.
+MIN_LOW_YIELD_SOURCE_CHARS = 10000
+VOLUME_YIELD_RATIO_FLOOR = 0.02
+VOLUME_MIN_OUTPUT_CHARS = 2048
+
+
+def is_low_yield_text(markdown: str, source_size: int) -> bool:
+    """Return True when extracted text is anomalously small for its source.
+
+    Shared low-yield predicate used by extraction recovery
+    (``fetch_quality.html_to_markdown``) and by this module's quality
+    assessment ``volume`` check, so both agree on what counts as thin.
+    """
+    if source_size <= 0 or source_size < MIN_LOW_YIELD_SOURCE_CHARS:
+        return False
+    if len(markdown) < VOLUME_MIN_OUTPUT_CHARS:
+        return True
+    return len(markdown) < VOLUME_YIELD_RATIO_FLOOR * source_size
+
+
 def assess_quality(
     markdown: str,
     html: str = "",
     url: str = "",
     title: str = "",
+    html_size: int = 0,
 ) -> dict:
     """Run all quality gates on extracted content.
 
@@ -246,6 +277,10 @@ def assess_quality(
         html: Raw HTML if available (for future heuristics).
         url: Source URL (for context).
         title: Page title if available.
+        html_size: Size of the source HTML in characters, when the full
+            HTML is unavailable (e.g. tier pipelines keep only markdown).
+            Backs the ``volume`` check: anomalously thin extraction from a
+            large source is flagged so callers never ship a silent truncation.
 
     Returns:
         Dict with score, per-check breakdown, and detail:
@@ -259,6 +294,13 @@ def assess_quality(
     completeness_score, completeness_status = _check_completeness(markdown, title)
     block_score, block_status = _check_block_page(markdown, url)
 
+    # Volume gate: pass when no source-size information is available or
+    # when the yield is healthy; fail only on anomalously thin output.
+    if is_low_yield_text(markdown, html_size):
+        _volume_score, volume_status = 0.0, "fail"
+    else:
+        _volume_score, volume_status = 1.0, "pass"
+
     # Weighted composite: boilerplate 30%, completeness 30%, block detection 40%
     overall = boilerplate_score * 0.3 + completeness_score * 0.3 + block_score * 0.4
 
@@ -270,6 +312,8 @@ def assess_quality(
         details.append(f"completeness:{completeness_status}")
     if block_status != "pass":
         details.append(f"block:{block_status}")
+    if volume_status != "pass":
+        details.append(f"volume:{volume_status}")
 
     return {
         "score": round(overall, 2),
@@ -277,6 +321,7 @@ def assess_quality(
             "boilerplate": boilerplate_status,
             "completeness": completeness_status,
             "block_detected": block_status,
+            "volume": volume_status,
         },
         "detail": ", ".join(details) if details else "all checks passed",
     }
@@ -406,15 +451,14 @@ def filter_sections(
             logger.warning("markdownify not available for full verbosity")
             return soup.get_text(separator="\n", strip=True)
 
-    # Standard: use readability extraction on the (possibly filtered) HTML
+    # Standard: use the shared html_to_markdown path on the (possibly
+    # filtered) HTML. This keeps section-filtered output identical to the
+    # main extraction pipeline, including the #587 low-yield recovery for
+    # card-style layouts (a private readability copy here would truncate).
     try:
-        from markdownify import markdownify as md
-        from readability import Document
+        from .fetch_quality import html_to_markdown
 
-        doc = Document(str(soup))
-        summary = doc.summary()
-        markdown = md(summary, heading_style="ATX", strip=["script", "style"])
-        markdown = re.sub(r"\n{3,}", "\n\n", markdown)
+        markdown = html_to_markdown(str(soup))
         return markdown.strip()
     except Exception:
         return soup.get_text(separator="\n", strip=True)

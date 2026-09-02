@@ -40,6 +40,20 @@ class ScrapeError(GroktoCrawlError):
     detail = "Scrape failed"
 
 
+class BarrierDetectedError(ScrapeError):
+    """The scraped page is barrier/challenge content (#586, ADR-0015).
+
+    Subclass of :class:`ScrapeError` so existing ``except ScrapeError``
+    handlers keep working; the dedicated class-level ``error_code`` keeps
+    the rendered top-level body field consistent with
+    ``details.error_code`` instead of relying on the handler to dig the
+    specific code out of ``details``.
+    """
+
+    error_code = "BARRIER_DETECTED"
+    detail = "Barrier or challenge content detected"
+
+
 class CaptchaError(GroktoCrawlError):
     status_code = 502
     error_code = "CAPTCHA_UNRESOLVED"
@@ -74,6 +88,20 @@ class SearchError(GroktoCrawlError):
     status_code = 502
     error_code = "SEARCH_ERROR"
     detail = "Search failed"
+
+
+class SemanticError(GroktoCrawlError):
+    """The semantic-svc vector backend failed or is unreachable.
+
+    Raised when a dependent call into semantic-svc (e.g. the find-similar
+    vector search) fails at the transport or HTTP level, so the failure
+    surfaces as a structured 502 instead of being masked as an empty
+    success result (issue #588).
+    """
+
+    status_code = 502
+    error_code = "SEMANTIC_SERVICE_ERROR"
+    detail = "Semantic service error"
 
 
 class ConflictError(GroktoCrawlError):
