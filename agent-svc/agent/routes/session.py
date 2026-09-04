@@ -70,8 +70,8 @@ async def session_step(
             llm_base_url=request.app.state.llm_base_url,
             llm_api_key=request.app.state.llm_api_key,
             llm_model=request.app.state.llm_model,
-            parallel=body.parallel or bool(body.params.get("parallel", False)),
-            idempotency_key=body.idempotency_key or body.params.get("idempotency_key"),
+            parallel=body.parallel,
+            idempotency_key=body.idempotency_key,
         )
         return SessionStepResponse(
             step_index=result["step_index"],
@@ -83,7 +83,9 @@ async def session_step(
         msg = str(e)
         if "not found" in msg.lower():
             raise NotFoundError(detail=msg)
-        if "currently executing" in msg.lower():
+        if "currently executing" in msg.lower() or "pending independent" in msg.lower():
+            raise ConflictError(detail=msg)
+        if "idempotency key conflicts" in msg.lower():
             raise ConflictError(detail=msg)
         raise InvalidRequestError(detail=msg)
 

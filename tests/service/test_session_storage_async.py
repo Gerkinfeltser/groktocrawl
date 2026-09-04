@@ -110,15 +110,17 @@ class FakeRedis:
             meta["expires_at"] = args[2]
         elif "session_add_refs_v1" in script:
             refs = self.data.setdefault(keys[3], {})
-            refs.update(dict(zip(args[2::2], args[3::2], strict=True)))
+            refs.update(dict(zip(args[3::2], args[4::2], strict=True)))
             meta["expires_at"] = args[0]
         elif "session_append_step_v1" in script:
             old = self.data.get(keys[4], [])
-            index = int(meta["step_count"]) + 1
+            next_index = int(meta.get("next_step_index", meta["step_count"])) + 1
+            index = next_index
             step = json.loads(args[0])
             step.update(index=index, timestamp=json.loads(args[1]))
             self.data[keys[4]] = [*old, json.dumps(step)]
-            meta["step_count"] = str(index)
+            meta["next_step_index"] = str(index)
+            meta["step_count"] = str(int(meta["step_count"]) + 1)
             meta["expires_at"] = args[2]
         else:
             raise AssertionError("Unexpected Lua operation")
