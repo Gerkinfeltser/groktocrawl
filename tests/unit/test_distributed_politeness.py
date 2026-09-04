@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock
 import pytest
 from scraper.politeness import PolitenessManager, _DomainState
 
+from tests.outcome_governance import governed_skip
+
 
 def manager():
     value = PolitenessManager()
@@ -77,7 +79,13 @@ async def test_valkey_reservation_survives_cancelled_wait(monkeypatch):
     """The real Lua reservation keeps its slot after a caller is cancelled."""
     redis_url = os.environ.get("TEST_VALKEY_URL")
     if not redis_url:
-        pytest.skip("TEST_VALKEY_URL is not configured")
+        governed_skip(
+            "TEST_VALKEY_URL is not configured",
+            owner="repository-maintainer",
+            issue="#629",
+            classification="retained",
+            environment="Requires isolated Valkey; exercised in scraper-scaleout CI",
+        )
 
     import redis.asyncio as redis
 
