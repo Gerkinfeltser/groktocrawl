@@ -9,7 +9,9 @@ artifact is never persisted into the replayable event state.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from typing import Any
 
 from common.url import extract_domain
 
@@ -37,6 +39,11 @@ class SourceArtifact:
     retrieval: str = "web"  # "web" / "vector" / "both"
     score: float | None = None
     cache_age_ms: int | None = None
+    # Request options are retained so a later stage can only reuse content
+    # when it was fetched with an equivalent extraction contract.
+    fetch_options: dict[str, Any] | None = None
+    contents_options: dict[str, Any] | None = None
+    extras: dict[str, Any] | None = None
 
     def to_document(self, max_chars: int = DOCUMENT_MAX_CHARS) -> str:
         """Render the source into a ``Source: url (domain: ...)`` context block."""
@@ -51,6 +58,30 @@ class SourceArtifact:
             "source": self.source,
             "char_count": self.char_count,
         }
+
+    def compatible_with(
+        self,
+        *,
+        fetch_options: dict[str, Any] | None = None,
+        contents_options: dict[str, Any] | None = None,
+    ) -> bool:
+        """Return whether this artifact satisfies another scrape contract."""
+        return _options_fingerprint(self.fetch_options, self.contents_options) == (
+            _options_fingerprint(fetch_options, contents_options)
+        )
+
+
+def _options_fingerprint(
+    fetch_options: dict[str, Any] | None,
+    contents_options: dict[str, Any] | None,
+) -> str:
+    """Build a stable, JSON-safe fingerprint for request-scoped reuse."""
+    return json.dumps(
+        {"fetch": fetch_options or {}, "contents": contents_options or {}},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
 
 
 def artifacts_to_documents_and_details(
