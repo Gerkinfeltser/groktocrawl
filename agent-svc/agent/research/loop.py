@@ -42,8 +42,8 @@ from .utils import _validate_json_if_schema
 logger = logging.getLogger(__name__)
 
 
-async def _discover_with_progress(factory):
-    """Run discovery while forwarding completed acquisitions immediately."""
+async def _discover_with_progress(factory, initial_pending=None):
+    """Run discovery while forwarding search and acquisition events immediately."""
     progress: asyncio.Queue[ResearchEvent] = asyncio.Queue()
 
     async def on_artifact(artifact: SourceArtifact) -> None:
@@ -56,7 +56,27 @@ async def _discover_with_progress(factory):
             }
         )
 
-    task = asyncio.create_task(factory(on_artifact))
+    async def on_search_results(results) -> None:
+        await progress.put(
+            {
+                "type": "sources_pending",
+                "sources": [
+                    {
+                        "url": result["url"],
+                        "title": result.get("title", ""),
+                        "relevance": result.get("description", ""),
+                    }
+                    for result in results
+                    if result.get("url")
+                ],
+            }
+        )
+
+    if initial_pending:
+        await progress.put({"type": "sources_pending", "sources": initial_pending})
+
+    task = asyncio.create_task(factory(on_artifact, on_search_results))
+    event_task: asyncio.Task | None = None
     try:
         while not task.done():
             event_task = asyncio.create_task(progress.get())
@@ -65,14 +85,19 @@ async def _discover_with_progress(factory):
             )
             if event_task in done:
                 yield event_task.result()
+                event_task = None
             else:
                 event_task.cancel()
                 await asyncio.gather(event_task, return_exceptions=True)
+                event_task = None
         discovered = await task
         while not progress.empty():
             yield progress.get_nowait()
         yield {"type": "_discovery_complete", "result": discovered}
     finally:
+        if event_task is not None and not event_task.done():
+            event_task.cancel()
+            await asyncio.gather(event_task, return_exceptions=True)
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -166,6 +191,7 @@ async def _run_research_events(
 
                     async def discover_pass_one_multi(
                         on_artifact,
+                        on_search_results,
                         _queries=queries,
                         _urls=urls,
                         _pass_count=pass_count,
@@ -181,12 +207,14 @@ async def _run_research_events(
                             source_registry=source_registry,
                             pass_number=_pass_count,
                             on_artifact=on_artifact,
+                            on_search_results=on_search_results,
                         )
                 else:
                     query = queries[0] if queries else prompt
 
                     async def discover_pass_one_single(
                         on_artifact,
+                        on_search_results,
                         _query=query,
                         _urls=urls,
                         _pass_count=pass_count,
@@ -201,11 +229,13 @@ async def _run_research_events(
                             source_registry=source_registry,
                             pass_number=_pass_count,
                             on_artifact=on_artifact,
+                            on_search_results=on_search_results,
                         )
             else:
                 # ── Pass 2: gap-focused discovery ─────────────────
                 async def discover_pass_two(
                     on_artifact,
+                    on_search_results,
                     _gap_topics=gap_topics,
                     _pass_count=pass_count,
                     _credits_used=credits_used,
@@ -227,11 +257,10 @@ async def _run_research_events(
                         source_registry=source_registry,
                         pass_number=_pass_count,
                         on_artifact=on_artifact,
+                        on_search_results=on_search_results,
                     )
 
-            stream_progress = pass_count > 1 or (
-                strategy == "deep" and len(queries) > 1
-            )
+            stream_progress = True
             discovery_factory = (
                 discover_pass_two
                 if pass_count > 1
@@ -243,7 +272,14 @@ async def _run_research_events(
             )
             if stream_progress:
                 discovered = None
-                async for progress_event in _discover_with_progress(discovery_factory):
+                initial_pending = (
+                    [{"url": url, "title": "", "relevance": ""} for url in urls]
+                    if urls
+                    else None
+                )
+                async for progress_event in _discover_with_progress(
+                    discovery_factory, initial_pending
+                ):
                     if progress_event["type"] == "_discovery_complete":
                         discovered = progress_event["result"]
                     else:
@@ -251,35 +287,12 @@ async def _run_research_events(
                 if discovered is None:
                     raise RuntimeError("Discovery ended without a result")
             else:
-                discovered = await discovery_factory(None)
+                discovered = await discovery_factory(None, None)
 
             context = discovered["context"]
             source_details = discovered["source_details"]
             novel_artifacts = discovered.get("new_artifacts", [])
             previous_context = combined_context
-            search_results = discovered["search_results"]
-            pending_sources = (
-                [
-                    {
-                        "url": result["url"],
-                        "title": result.get("title", ""),
-                        "relevance": result.get("description", ""),
-                    }
-                    for result in search_results
-                    if result.get("url")
-                ]
-                if not urls
-                else [{"url": url, "title": "", "relevance": ""} for url in urls]
-            )
-            yield {"type": "sources_pending", "sources": pending_sources}
-            if not stream_progress:
-                for artifact in novel_artifacts:
-                    yield {
-                        "type": "source_scraped",
-                        "url": artifact.url,
-                        "source": artifact.source,
-                        "chars": artifact.char_count,
-                    }
             if not context and not combined_context:
                 yield {"type": "sources", "sources": []}
                 yield {

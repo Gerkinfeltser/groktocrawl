@@ -97,6 +97,72 @@ async def test_failed_query_does_not_cancel_other_query_acquisition():
 
 
 @pytest.mark.asyncio
+async def test_credit_admission_waits_for_query_order_before_spending_budget():
+    """A quick later result cannot consume the only credit ahead of query zero."""
+    from agent.research import discovery
+
+    slow_finished = asyncio.Event()
+    later_finished = asyncio.Event()
+    scraped: list[str] = []
+
+    async def search(query: str, **_kwargs):
+        if query == "first":
+            await slow_finished.wait()
+            return ([_result("https://source-a.example/important/article")], "healthy")
+        later_finished.set()
+        return ([_result("https://source-b.example/other")], "healthy")
+
+    searxng = MagicMock(search=AsyncMock(side_effect=search))
+    scraper = _scraper(asyncio.Event(), scraped)
+    task = asyncio.create_task(
+        discovery._run_multi_query_discover_and_scrape(
+            queries=["first", "later"],
+            urls=None,
+            searxng=searxng,
+            scraper=scraper,
+            max_credits=1,
+        )
+    )
+    await asyncio.wait_for(later_finished.wait(), timeout=1)
+    assert scraped == []
+
+    slow_finished.set()
+    result = await asyncio.wait_for(task, timeout=1)
+    assert scraped == ["https://source-a.example/important/article"]
+    assert [artifact.url for artifact in result["artifacts"]] == scraped
+    assert result["credits_used"] == 1
+
+
+@pytest.mark.asyncio
+async def test_credit_admission_filters_blacklisted_urls_before_fetch():
+    from agent.research import discovery
+
+    async def search(_query: str, **_kwargs):
+        return (
+            [
+                _result("https://bad.example/login"),
+                _result("https://good.example/article/detail"),
+            ],
+            "healthy",
+        )
+
+    scraped: list[str] = []
+    searxng = MagicMock(search=AsyncMock(side_effect=search))
+    scraper = _scraper(asyncio.Event(), scraped)
+    result = await discovery._run_multi_query_discover_and_scrape(
+        queries=["one"],
+        urls=None,
+        searxng=searxng,
+        scraper=scraper,
+        max_credits=1,
+    )
+
+    assert scraped == ["https://good.example/article/detail"]
+    assert result["credits_used"] == 1
+    assert all("/login" not in url for url in result["target_urls"])
+
+
+@pytest.mark.asyncio
 async def test_discovery_cancellation_awaits_search_and_scrape_tasks():
     from agent.research.discovery import _run_multi_query_discover_and_scrape
 
@@ -133,7 +199,8 @@ async def test_loop_forwards_source_event_before_discovery_completes():
         url="https://fast.example/page", markdown="fixture", source="fixture"
     )
 
-    async def factory(on_artifact):
+    async def factory(on_artifact, on_search_results):
+        await on_search_results([_result(artifact.url)])
         await on_artifact(artifact)
         await asyncio.sleep(0.02)
         discovery_finished.set()
@@ -145,5 +212,36 @@ async def test_loop_forwards_source_event_before_discovery_completes():
         if event["type"] == "source_scraped":
             assert not discovery_finished.is_set()
 
-    assert seen[0]["type"] == "source_scraped"
+    assert [event["type"] for event in seen] == [
+        "sources_pending",
+        "source_scraped",
+        "_discovery_complete",
+    ]
+    assert seen[0]["sources"][0]["url"] == artifact.url
+    assert seen[1]["type"] == "source_scraped"
     assert seen[-1]["type"] == "_discovery_complete"
+
+
+@pytest.mark.asyncio
+async def test_loop_progress_cancellation_cleans_waiter_and_discovery():
+    from agent.research.loop import _discover_with_progress
+
+    cancelled = asyncio.Event()
+
+    async def factory(_on_artifact, _on_search_results):
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    async def consume():
+        async for _event in _discover_with_progress(factory):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled.is_set()

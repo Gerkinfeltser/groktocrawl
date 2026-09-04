@@ -21,12 +21,21 @@ from .sources import (
 logger = logging.getLogger(__name__)
 
 ArtifactCallback = Callable[[SourceArtifact], Awaitable[None] | None]
+SearchCallback = Callable[[list[dict]], Awaitable[None] | None]
 
 
 async def _notify_artifact(callback: ArtifactCallback | None, artifact: SourceArtifact):
     if callback is None:
         return
     outcome = callback(artifact)
+    if outcome is not None:
+        await outcome
+
+
+async def _notify_search(callback: SearchCallback | None, results: list[dict]):
+    if callback is None:
+        return
+    outcome = callback(results)
     if outcome is not None:
         await outcome
 
@@ -341,6 +350,7 @@ async def _run_multi_query_discover_and_scrape(
     source_registry: SourceRegistry | None = None,
     pass_number: int | None = None,
     on_artifact: ArtifactCallback | None = None,
+    on_search_results: SearchCallback | None = None,
 ) -> dict:
     """Search multiple sub-queries, deduplicate URLs, scrape, and merge context.
 
@@ -363,6 +373,7 @@ async def _run_multi_query_discover_and_scrape(
     seen_urls: set[str] = {normalize_source_url(url) for url in target_urls}
     scrape_by_key: dict[str, SourceArtifact] = {}
     streamed_acquisition = False
+    admitted_urls: list[str] = []
 
     # Truncate to search budget
     budget = min(len(queries), max_searches_per_request)
@@ -390,6 +401,8 @@ async def _run_multi_query_discover_and_scrape(
         attempts = 0
         max_attempts = 20 if max_credits is None else max(0, max_credits)
         scrape_semaphore = asyncio.Semaphore(5)
+        admission_candidates: list[str] = []
+        admitted_query = 0
 
         async def start_candidates() -> None:
             nonlocal attempts
@@ -402,8 +415,10 @@ async def _run_multi_query_discover_and_scrape(
                 reused = source_registry.get(url, scrape_options)
                 if reused is not None:
                     scrape_by_key[key] = reused
+                    admitted_urls.append(url)
                     continue
                 attempts += 1
+                admitted_urls.append(url)
                 scrape_tasks.add(
                     asyncio.create_task(
                         _scrape_single(
@@ -415,6 +430,13 @@ async def _run_multi_query_discover_and_scrape(
                         )
                     )
                 )
+
+        def refresh_candidates() -> None:
+            """Rank only the resolved query prefix before admitting fetches."""
+            ranked = _filter_and_rank_urls(admission_candidates, max_urls=20)
+            candidate_urls[:] = [
+                url for url in ranked if normalize_source_url(url) not in attempted_keys
+            ]
 
         try:
             while search_tasks or scrape_tasks:
@@ -444,17 +466,29 @@ async def _run_multi_query_discover_and_scrape(
                             if isinstance(exc, RetryableRateLimitError):
                                 raise
                             logger.warning("Search failed for %s: %s", query, exc)
-                            continue
-                        ordered_results[index] = results
-                        for result in results:
-                            url = result.get("url", "")
-                            key = normalize_source_url(url)
-                            if url and key not in seen_urls:
-                                seen_urls.add(key)
-                                if _is_video_platform_url(url):
-                                    video_urls.append(url)
-                                else:
-                                    candidate_urls.append(url)
+                            # A failed query still resolves its position in
+                            # the admission prefix so healthy later queries
+                            # can proceed without changing their ordering.
+                            ordered_results[index] = []
+                        else:
+                            ordered_results[index] = results
+                            await _notify_search(on_search_results, results)
+                        # Only a contiguous query prefix is eligible for
+                        # admission. This makes speculation deterministic and
+                        # prevents a late high-ranked query from being crowded
+                        # out by an earlier completion.
+                        while admitted_query in ordered_results:
+                            for result in ordered_results[admitted_query]:
+                                url = result.get("url", "")
+                                key = normalize_source_url(url)
+                                if url and key not in seen_urls:
+                                    seen_urls.add(key)
+                                    if not _is_video_platform_url(url):
+                                        admission_candidates.append(url)
+                                    else:
+                                        video_urls.append(url)
+                            admitted_query += 1
+                        refresh_candidates()
                     else:
                         scrape_task = cast(asyncio.Task[SourceArtifact | None], task)
                         scrape_tasks.remove(scrape_task)
@@ -462,7 +496,15 @@ async def _run_multi_query_discover_and_scrape(
                         if artifact is not None:
                             scrape_by_key[normalize_source_url(artifact.url)] = artifact
                             await _notify_artifact(on_artifact, artifact)
-                if not search_tasks and len(scrape_by_key) < 3:
+                # Video sources remain a fallback until all preferred work
+                # has settled; otherwise a slow text fetch could be crowded
+                # out by a speculative video acquisition.
+                if (
+                    not search_tasks
+                    and not scrape_tasks
+                    and not candidate_urls
+                    and len(scrape_by_key) < 3
+                ):
                     candidate_urls.extend(video_urls)
                     video_urls.clear()
                 await start_candidates()
@@ -505,15 +547,23 @@ async def _run_multi_query_discover_and_scrape(
         )
 
     # Score and rank URLs before scraping (F1: source pre-filtering)
-    target_urls = _dedupe_urls(_filter_and_rank_urls(target_urls, max_urls=20))
+    ranked_urls = _dedupe_urls(_filter_and_rank_urls(target_urls, max_urls=20))
+    # Keep successful prefix admissions even when later results change the
+    # ranking. They were bounded and intentionally admitted from a ranked
+    # resolved prefix, so final filtering must not discard their evidence.
+    successful_admitted = [
+        url for url in admitted_urls if normalize_source_url(url) in scrape_by_key
+    ]
+    target_urls = _dedupe_urls([*ranked_urls, *successful_admitted])
     reusable_keys = {
         normalize_source_url(url)
         for url in target_urls
         if source_registry.get(url, scrape_options) is not None
     }
-    target_urls = _apply_credit_budget(
-        target_urls, max_credits, source_registry, scrape_options
-    )
+    if not streamed_acquisition:
+        target_urls = _apply_credit_budget(
+            target_urls, max_credits, source_registry, scrape_options
+        )
     if streamed_acquisition:
         artifacts = []
         for url in target_urls:
@@ -553,6 +603,7 @@ async def _run_research_discover_and_scrape(
     source_registry: SourceRegistry | None = None,
     pass_number: int | None = None,
     on_artifact: ArtifactCallback | None = None,
+    on_search_results: SearchCallback | None = None,
 ) -> dict:
     """Search → filter → scrape → context-building phase for research.
 
@@ -572,6 +623,7 @@ async def _run_research_discover_and_scrape(
         search_results, _health = await searxng.search(
             prompt, limit=10, raise_on_rate_limit=True
         )
+        await _notify_search(on_search_results, search_results)
         target_urls = _dedupe_urls([r["url"] for r in search_results if r.get("url")])
 
     # Score and rank URLs before scraping (F1: source pre-filtering)
