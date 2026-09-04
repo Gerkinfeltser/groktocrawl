@@ -18,3 +18,17 @@ and API browser admission budget 128. The additional Scraper Scale-Out CI lane
 exercises gateway routing at 1/2/4 replicas and backend-failure recovery using
 bounded acquisition twins; its JSON artifact records single-request median,
 concurrent request p50/p95, throughput, and number of backends reached.
+
+The [first topology run](https://github.com/groktopus/groktocrawl/actions/runs/33914884975)
+passed, including recovery after stopping one replica. For the 100 ms twin,
+64 requests with 16 concurrent callers measured:
+
+| Replicas | Concurrent p50 / p95 | Requests/second |
+| --- | --- | --- |
+| 1 | 401 / 403 ms | 39.7 |
+| 2 | 201 / 201 ms | 78.8 |
+| 4 | 103 / 106 ms | 150.7 |
+
+Isolated-request medians remained approximately 102 ms. This demonstrates the
+distinction between removing aggregate queueing and accelerating one operation.
+It does not measure real browser CPU/memory scaling or research answer quality.

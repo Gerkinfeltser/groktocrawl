@@ -91,7 +91,7 @@ def main():
         # Fail one replica abruptly: health checks must withdraw it, and the
         # surviving backends must still serve requests after convergence.
         victim = compose("ps", "-q", "scraper-svc").splitlines()[0]
-        subprocess.check_call(["docker", "stop", "--time", "0", victim])
+        subprocess.check_output(["docker", "stop", "--time", "0", victim])
         time.sleep(5)
         with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
             survivors = list(pool.map(lambda _: request(), range(24)))
