@@ -11,7 +11,6 @@ import inspect
 import json
 import logging
 import uuid
-from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Any
 
@@ -119,9 +118,22 @@ class SessionManager:
     @staticmethod
     async def _stop_lock_heartbeat(heartbeat: asyncio.Task[None]) -> None:
         """Cancel and await renewal before releasing the matching lease."""
+        caller = asyncio.current_task()
+        cancellations = caller.cancelling() if caller else 0
         heartbeat.cancel()
-        with suppress(asyncio.CancelledError):
-            await heartbeat
+        while not heartbeat.done():
+            try:
+                await asyncio.shield(heartbeat)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not heartbeat.cancelled():
+            error = heartbeat.exception()
+            if error is not None:
+                logger.warning("Session lock renewal failed: %r", error)
+        if caller and caller.cancelling() > cancellations:
+            raise asyncio.CancelledError
 
     async def _release_pending_reservation(
         self, session_id: str, reservation: dict
@@ -326,11 +338,13 @@ class SessionManager:
                 llm_model=llm_model,
             )
         finally:
-            await self._stop_lock_heartbeat(heartbeat)
-            self.store.reset_lock_owner(owner_context)
-            await self._store_call(
-                "arelease_lock", "release_lock", session_id, owner_token
-            )
+            try:
+                await self._stop_lock_heartbeat(heartbeat)
+            finally:
+                self.store.reset_lock_owner(owner_context)
+                await self._store_call(
+                    "arelease_lock", "release_lock", session_id, owner_token
+                )
 
         return result
 

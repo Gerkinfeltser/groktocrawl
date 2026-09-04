@@ -7,6 +7,67 @@ import time
 import pytest
 
 
+@pytest.mark.asyncio
+async def test_failed_heartbeat_does_not_skip_serial_owner_cleanup():
+    from unittest.mock import AsyncMock, MagicMock
+
+    from agent.session import SessionManager
+
+    manager = SessionManager.__new__(SessionManager)
+    manager.store = MagicMock()
+    manager.store.aget = AsyncMock(return_value={"id": "session"})
+    manager.store.acquire_lock = AsyncMock(return_value="owner")
+    manager.store.ahas_pending_steps = AsyncMock(return_value=False)
+    manager.store.arelease_lock = AsyncMock()
+    failed = asyncio.Event()
+
+    async def renew(*_args):
+        failed.set()
+        raise RuntimeError("fixture renewal failure")
+
+    async def execute(**_kwargs):
+        await failed.wait()
+        await asyncio.sleep(0)
+        return {"step_index": 1}
+
+    manager._renew_serial_lock = renew
+    manager._execute_step = execute
+    assert await manager.step("session", "query", {}, llm_model="fixture") == {
+        "step_index": 1
+    }
+    manager.store.reset_lock_owner.assert_called_once()
+    manager.store.arelease_lock.assert_awaited_once_with("session", "owner")
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_drains_heartbeat_before_escape():
+    from agent.session import SessionManager
+
+    started, cleaning, finish = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def renew():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await finish.wait()
+
+    heartbeat = asyncio.create_task(renew())
+    await started.wait()
+    stopping = asyncio.create_task(SessionManager._stop_lock_heartbeat(heartbeat))
+    await cleaning.wait()
+    stopping.cancel()
+    await asyncio.sleep(0)
+    stopping.cancel()
+    await asyncio.sleep(0)
+    assert not stopping.done()
+    finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+    assert heartbeat.done()
+
+
 class ParallelStore:
     def __init__(self):
         self.reservations = {}
