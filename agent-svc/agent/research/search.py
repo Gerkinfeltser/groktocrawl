@@ -8,14 +8,17 @@ import time
 from typing import Any
 
 from common.stage_metrics import StreamTiming
-from common.url import normalize_url
 
 from ..llm import LLMClient
 from ..scraper_client import ScraperClient
 from ..searxng_client import SearXNGClient
-from .acquisition import acquire_source_artifacts
+from .acquisition import (
+    AcquisitionResult,
+    acquire_source_artifacts,
+    stream_source_artifacts,
+)
 from .prompts import DEEP_SEARCH_GAP_PROMPT, RICH_SEARCH_SYSTEM_PROMPT
-from .sources import SourceArtifact
+from .sources import SourceArtifact, normalize_source_url
 
 logger = logging.getLogger(__name__)
 
@@ -184,11 +187,11 @@ async def run_rich_search(
             max_concurrent=5,
         )
         if artifact_sink is not None:
-            existing_keys = {normalize_url(a.url) for a in artifact_sink}
+            existing_keys = {normalize_source_url(a.url) for a in artifact_sink}
             artifact_sink.extend(
                 a
                 for a in acquired.artifacts
-                if normalize_url(a.url) not in existing_keys
+                if normalize_source_url(a.url) not in existing_keys
             )
         if refusal_sink is not None:
             refusal_sink.update(acquired.refusals)
@@ -201,7 +204,7 @@ async def run_rich_search(
             url = r.get("url", "")
             if not url:
                 continue
-            artifact = artifacts_by_url.get(normalize_url(url))
+            artifact = artifacts_by_url.get(normalize_source_url(url))
             enriched.append(
                 {
                     "url": url,
@@ -399,19 +402,17 @@ async def run_search_stream(
                 refused_urls.update(acquired.refusals)
                 unavailable_urls.update(acquired.failures)
                 artifacts_by_url = acquired.by_url()
-                rerank_documents = [
-                    (
-                        artifacts_by_url.get(normalize_url(r.get("url", ""))).markdown[
-                            :3000
-                        ]
-                        if artifacts_by_url.get(normalize_url(r.get("url", "")))
-                        and artifacts_by_url.get(
-                            normalize_url(r.get("url", ""))
-                        ).markdown
-                        else r.get("description", "")
+                rerank_documents = []
+                for candidate in search_results[:limit]:
+                    artifact = artifacts_by_url.get(
+                        normalize_source_url(candidate.get("url", ""))
                     )
-                    for r in search_results[:limit]
-                ]
+                    markdown = artifact.markdown if artifact else None
+                    rerank_documents.append(
+                        markdown[:3000]
+                        if markdown
+                        else candidate.get("description", "")
+                    )
 
                 if retrieval_mode == "hybrid":
                     reranked = await semantic.rerank(
@@ -448,19 +449,32 @@ async def run_search_stream(
         if search_type == "rich" and search_results:
             top_results = search_results[:limit]
 
-            acquired = await acquire_source_artifacts(
-                top_results,
-                scraper,
-                existing=acquired_artifacts,
-                refused_urls=refused_urls,
-                unavailable_urls=unavailable_urls,
-                max_concurrent=5,
-            )
+            acquired = AcquisitionResult()
+            async with contextlib.aclosing(
+                stream_source_artifacts(
+                    top_results,
+                    scraper,
+                    existing=acquired_artifacts,
+                    refused_urls=refused_urls,
+                    unavailable_urls=unavailable_urls,
+                    max_concurrent=5,
+                )
+            ) as acquisition_stream:
+                async for source_event in acquisition_stream:
+                    if isinstance(source_event, AcquisitionResult):
+                        acquired = source_event
+                    elif source_event.markdown:
+                        yield {
+                            "type": "scrape_result",
+                            "url": source_event.url,
+                            "contents": {"markdown": source_event.markdown[:3000]},
+                        }
+
             acquired_artifacts.extend(
                 a
                 for a in acquired.artifacts
-                if normalize_url(a.url)
-                not in {normalize_url(x.url) for x in acquired_artifacts}
+                if normalize_source_url(a.url)
+                not in {normalize_source_url(x.url) for x in acquired_artifacts}
             )
             artifacts_by_url = acquired.by_url()
             enriched: list[dict] = []
@@ -468,14 +482,9 @@ async def run_search_stream(
                 url = item.get("url", "")
                 if not url:
                     continue
-                artifact = artifacts_by_url.get(normalize_url(url))
+                artifact = artifacts_by_url.get(normalize_source_url(url))
                 if artifact and artifact.markdown:
                     md = artifact.markdown[:3000]
-                    yield {
-                        "type": "scrape_result",
-                        "url": url,
-                        "contents": {"markdown": md},
-                    }
                     content = md
                 else:
                     content = item.get("description", "")

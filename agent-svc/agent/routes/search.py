@@ -8,14 +8,13 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from common.url import normalize_url
-
 from ..models import (
     ImageSearchResult,
     SearchRequest,
     SearchResponse,
     SearchResult,
 )
+from ..research.sources import normalize_source_url
 
 logger = logging.getLogger(__name__)
 
@@ -269,15 +268,13 @@ async def search(request: Request, body: SearchRequest) -> SearchResponse:
                 refused_urls.update(acquired.refusals)
                 unavailable_urls.update(acquired.failures)
                 artifacts_by_url = acquired.by_url()
-                documents = [
-                    (
-                        artifacts_by_url[normalize_url(r.url)].markdown[:2000]
-                        if normalize_url(r.url) in artifacts_by_url
-                        and artifacts_by_url[normalize_url(r.url)].markdown
-                        else r.description
+                documents = []
+                for candidate in search_results[: body.limit]:
+                    artifact = artifacts_by_url.get(normalize_source_url(candidate.url))
+                    markdown = artifact.markdown if artifact else None
+                    documents.append(
+                        markdown[:2000] if markdown else candidate.description
                     )
-                    for r in search_results[: body.limit]
-                ]
 
                 if body.retrieval_mode == "hybrid":
                     # Cross-encoder reranker for merged keyword+semantic scoring

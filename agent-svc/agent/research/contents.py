@@ -3,11 +3,9 @@
 import asyncio
 import logging
 
-from common.url import normalize_url
-
 from .acquisition import acquire_source_artifacts
 from .prompts import HIGHLIGHTS_SYSTEM_PROMPT, SUMMARY_SYSTEM_PROMPT
-from .sources import SourceArtifact
+from .sources import SourceArtifact, normalize_source_url
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +156,7 @@ async def process_contents_for_results(
         if not url:
             return entry
 
-        artifact = artifact_by_url.get(normalize_url(url))
+        artifact = artifact_by_url.get(normalize_source_url(url))
         if artifact is None:
             return entry
 
@@ -218,7 +216,15 @@ async def process_contents_for_results(
     )
     artifact_by_url = acquired.by_url()
 
-    tasks = [asyncio.create_task(_process_one(r)) for r in results]
+    # Bound LLM work separately from acquisition: two pages may each run
+    # highlights and summary concurrently, for at most four calls per request.
+    transform_slots = asyncio.Semaphore(2)
+
+    async def process_bounded(result: dict) -> dict:
+        async with transform_slots:
+            return await _process_one(result)
+
+    tasks = [asyncio.create_task(process_bounded(r)) for r in results]
     enriched = await asyncio.gather(*tasks)
 
     return list(enriched)

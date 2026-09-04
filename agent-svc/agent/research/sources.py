@@ -12,12 +12,30 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from common.url import extract_domain
 
 # Documents are truncated to this many characters of Markdown when they are
 # turned into LLM context blocks, mirroring the historical per-source limit.
 DOCUMENT_MAX_CHARS = 8000
+
+
+def normalize_source_url(url: str) -> str:
+    """Fold transport-equivalent spelling without changing resource identity."""
+    raw = url.strip()
+    try:
+        parsed = urlsplit(raw)
+        host, port = parsed.hostname, parsed.port
+        if not host or not parsed.scheme or parsed.username or parsed.password:
+            return raw
+        scheme = parsed.scheme.lower()
+        netloc = f"[{host.lower()}]" if ":" in host else host.lower()
+        if port is not None and (scheme, port) not in {("http", 80), ("https", 443)}:
+            netloc += f":{port}"
+        return urlunsplit((scheme, netloc, parsed.path or "/", parsed.query, ""))
+    except ValueError:
+        return raw
 
 
 @dataclass

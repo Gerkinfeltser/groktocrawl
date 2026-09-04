@@ -37,7 +37,7 @@ class CountingScraper:
 async def test_acquisition_deduplicates_and_bounds_fetch_overlap() -> None:
     scraper = CountingScraper(delay=0.02)
     results = [
-        {"url": "https://EXAMPLE.test/a/", "title": "A"},
+        {"url": "https://EXAMPLE.test:443/a#top", "title": "A"},
         {"url": "https://example.test/a", "title": "duplicate"},
         *({"url": f"https://example.test/{i}", "title": str(i)} for i in range(4)),
     ]
@@ -47,7 +47,7 @@ async def test_acquisition_deduplicates_and_bounds_fetch_overlap() -> None:
     assert len(scraper.calls) == 5
     assert scraper.max_active == 2
     assert [artifact.url for artifact in acquired.artifacts] == [
-        "https://EXAMPLE.test/a/",
+        "https://EXAMPLE.test:443/a#top",
         "https://example.test/0",
         "https://example.test/1",
         "https://example.test/2",
@@ -77,7 +77,7 @@ async def test_barrier_refusal_is_reusable_metadata_without_retry() -> None:
     )
 
     assert first.artifacts == []
-    assert set(first.refusals) == {"https://barrier.test"}
+    assert set(first.refusals) == {"https://barrier.test/"}
     assert second.artifacts == []
     assert len(scraper.calls) == 1
 

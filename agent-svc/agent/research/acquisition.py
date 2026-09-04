@@ -10,14 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from common.url import normalize_url
-
 from ..barrier_guard import is_barrier_flagged, log_refusal
 from ..scraper_client import ScraperClient
-from .sources import SourceArtifact
+from .sources import SourceArtifact, normalize_source_url
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +30,7 @@ class AcquisitionResult:
     failures: dict[str, str] = field(default_factory=dict)
 
     def by_url(self) -> dict[str, SourceArtifact]:
-        return {normalize_url(a.url): a for a in self.artifacts}
+        return {normalize_source_url(a.url): a for a in self.artifacts}
 
 
 def _scrape_kwargs(
@@ -57,6 +56,7 @@ async def acquire_source_artifacts(
     contents_options: dict[str, Any] | None = None,
     refused_urls: set[str] | None = None,
     unavailable_urls: set[str] | None = None,
+    on_artifact: Callable[[SourceArtifact], Awaitable[None]] | None = None,
 ) -> AcquisitionResult:
     """Fetch distinct compatible URLs concurrently with a bounded fan-out.
 
@@ -68,7 +68,7 @@ async def acquire_source_artifacts(
     """
     result = AcquisitionResult()
     artifact_by_url = {
-        normalize_url(a.url): a
+        normalize_source_url(a.url): a
         for a in (existing or [])
         if a.compatible_with(
             fetch_options=scrape_options, contents_options=contents_options
@@ -81,7 +81,7 @@ async def acquire_source_artifacts(
         url = str(item.get("url") or "").strip()
         if not url:
             continue
-        key = normalize_url(url)
+        key = normalize_source_url(url)
         if key in seen:
             continue
         seen.add(key)
@@ -92,6 +92,8 @@ async def acquire_source_artifacts(
             result.failures[key] = "unavailable in prior stage"
             continue
         if key in artifact_by_url:
+            if on_artifact is not None:
+                await on_artifact(artifact_by_url[key])
             continue
         candidates.append((key, item))
 
@@ -130,33 +132,31 @@ async def acquire_source_artifacts(
                 or not markdown.strip()
             ):
                 return key, None, None, str(response.get("error") or "empty scrape")
-            return (
-                key,
-                SourceArtifact(
-                    url=url,
-                    title=str(item.get("title") or ""),
-                    relevance=str(item.get("description") or ""),
-                    markdown=markdown,
-                    source=str(data.get("source") or "unknown"),
-                    char_count=len(markdown),
-                    cache_state="live",
-                    fetch_options=scrape_options,
-                    contents_options=contents_options,
-                    extras=data.get("extras"),
-                ),
-                None,
-                None,
+            artifact = SourceArtifact(
+                url=url,
+                title=str(item.get("title") or ""),
+                relevance=str(item.get("description") or ""),
+                markdown=markdown,
+                source=str(data.get("source") or "unknown"),
+                char_count=len(markdown),
+                cache_state="live",
+                fetch_options=scrape_options,
+                contents_options=contents_options,
+                extras=data.get("extras"),
             )
+            if on_artifact is not None:
+                await on_artifact(artifact)
+            return key, artifact, None, None
 
     acquired = await asyncio.gather(
         *(acquire_one(key, item) for key, item in candidates),
         return_exceptions=True,
     )
-    for item in acquired:
-        if isinstance(item, BaseException):
-            logger.warning("Source acquisition task failed: %s", item)
+    for acquired_item in acquired:
+        if isinstance(acquired_item, BaseException):
+            logger.warning("Source acquisition task failed: %s", acquired_item)
             continue
-        key, artifact, refusal, failure = item
+        key, artifact, refusal, failure = acquired_item
         if artifact is not None:
             artifact_by_url[key] = artifact
         elif refusal is not None:
@@ -168,10 +168,39 @@ async def acquire_source_artifacts(
     ordered: list[SourceArtifact] = []
     emitted: set[str] = set()
     for item in results:
-        key = normalize_url(str(item.get("url") or ""))
+        key = normalize_source_url(str(item.get("url") or ""))
         if key in emitted or key not in artifact_by_url:
             continue
         emitted.add(key)
         ordered.append(artifact_by_url[key])
     result.artifacts = ordered
     return result
+
+
+async def stream_source_artifacts(
+    results: list[dict[str, Any]], scraper: ScraperClient, **kwargs: Any
+) -> AsyncGenerator[SourceArtifact | AcquisitionResult, None]:
+    """Emit completed artifacts promptly, then one deterministic final result."""
+    queue: asyncio.Queue[SourceArtifact | AcquisitionResult | None] = asyncio.Queue()
+
+    async def run() -> None:
+        try:
+            final = await acquire_source_artifacts(
+                results, scraper, on_artifact=queue.put, **kwargs
+            )
+            await queue.put(final)
+        finally:
+            await queue.put(None)
+
+    task = asyncio.create_task(run())
+    try:
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield item
+        await task
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
