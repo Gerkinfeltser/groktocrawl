@@ -384,3 +384,31 @@ async def test_close_waits_for_inflight_launch_and_allows_lifecycle_recreation(
     await pool.start()
     assert pool._started
     await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_reaper_finishes_every_detached_process(fake_pool):
+    browser_pool, _manager, browsers, _contexts = fake_pool
+    pool = browser_pool.BrowserPool(enabled=True, max_processes=2, idle_ttl=60)
+    first = await pool.acquire("https://one.example/a")
+    second = await pool.acquire("https://two.example/a")
+    await first.release()
+    await second.release()
+    pool.idle_ttl = 0
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def delayed_close():
+        started.set()
+        await finish.wait()
+        browsers[0][1].close_calls += 1
+
+    browsers[0][1].close = delayed_close
+    reaper = asyncio.create_task(pool._reap_expired())
+    await started.wait()
+    reaper.cancel()
+    finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await reaper
+    assert all(browser.close_calls == 1 for _, browser in browsers)
+    assert pool.process_count == 0
+    await asyncio.wait_for(pool.close(), 1)

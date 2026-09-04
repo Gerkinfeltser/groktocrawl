@@ -287,17 +287,19 @@ class BrowserPool:
                     await self._close_entry_safely(entry)
                     raise RuntimeError("browser pool is closed")
             except BaseException:
-                if launching:
-                    async with self._condition:
-                        self._launching = max(0, self._launching - 1)
-                        self._condition.notify_all()
-                if (
-                    browser is not None
-                    and not registered
-                    and not close_after_registration
-                ):
-                    with contextlib.suppress(Exception):
-                        await browser.close()
+                try:
+                    if (
+                        browser is not None
+                        and not registered
+                        and not close_after_registration
+                    ):
+                        with contextlib.suppress(Exception):
+                            await browser.close()
+                finally:
+                    if launching:
+                        async with self._condition:
+                            self._launching = max(0, self._launching - 1)
+                            self._condition.notify_all()
                 raise
 
         context = None
@@ -399,8 +401,16 @@ class BrowserPool:
                 self._closing_processes += 1
             if expired:
                 self._condition.notify_all()
-        for entry in expired:
-            await self._close_entry_safely(entry)
+        await self._close_entries_safely(expired)
+
+    async def _close_entries_safely(self, entries: list[_BrowserEntry]) -> None:
+        """Every detached entry must finish cleanup, even if the reaper stops."""
+        task = asyncio.gather(*(self._close_entry(entry) for entry in entries))
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
 
     async def _reap_loop(self) -> None:
         interval = max(0.1, min(self.idle_ttl or 0.1, 30.0))
@@ -436,8 +446,7 @@ class BrowserPool:
         if reaper is not None:
             reaper.cancel()
             await asyncio.gather(reaper, return_exceptions=True)
-        for entry in entries:
-            await self._close_entry_safely(entry)
+        await self._close_entries_safely(entries)
         async with self._condition:
             while self._closing_processes:
                 await self._condition.wait()
