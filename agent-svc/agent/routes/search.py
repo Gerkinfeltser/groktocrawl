@@ -5,7 +5,8 @@ import logging
 import re
 from typing import Any
 
-from fastapi import APIRouter, Request
+import httpx
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from ..models import (
@@ -169,7 +170,7 @@ async def search(request: Request, body: SearchRequest) -> SearchResponse:
 
         # Vector-only mode: query Qdrant, no SearXNG
         if body.retrieval_mode == "vector":
-            from ..semantic_client import SemanticClient
+            from ..semantic_client import SEMANTIC_UNAVAILABLE, SemanticClient
 
             semantic = SemanticClient(request.app.state.semantic_url)
             try:
@@ -180,6 +181,10 @@ async def search(request: Request, body: SearchRequest) -> SearchResponse:
                     SearchResult(url=r["url"], title=r["title"], description="")
                     for r in vector_results
                 ]
+            except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+                raise HTTPException(
+                    status_code=503, detail=SEMANTIC_UNAVAILABLE
+                ) from exc
             finally:
                 await semantic.close()
 

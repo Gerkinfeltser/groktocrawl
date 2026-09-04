@@ -85,6 +85,25 @@ an init process so orphaned browser descendants are reaped.
 
 `/health` reports dependency probes and `/metrics` exposes OpenMetrics data. Prometheus alerts and response procedures live in [runbooks](../runbooks/README.md). Important capacity controls include `AGENT_MAX_SEARCHES_PER_REQUEST`, `AGENT_SEARCH_RATE_LIMIT`, crawl duration/idle limits, scrape-cache TTLs, and vector-index capacity.
 
+### Semantic search readiness
+
+The optional `semantic-svc` `/health` probe checks that models have loaded and
+that Qdrant answers `get_collections()`. It does **not** embed a query, search a
+collection, validate indexed content, or measure vector-search latency. The
+agent service's aggregate `/health` does not probe semantic retrieval either.
+A green health response is therefore not evidence that a representative vector
+query will succeed within your latency target.
+
+Validate that separately against a populated index using `POST /v2/search` with
+`{"query":"a representative query for your indexed content","retrieval_mode":"vector","limit":5}`.
+Use your deployment's normal authentication, check the returned results, and
+record latency across repeated requests under representative load. Non-streaming
+vector requests return a sanitized HTTP 503 if the semantic service returns an
+HTTP error or cannot be reached. Streaming requests have already sent their HTTP
+headers, so they emit a sanitized `error` event and end the stream instead of
+emitting a successful `done` event. Hybrid-vector retrieval retains its web-only
+fallback when the vector service is unavailable.
+
 ### Job durability and recovery
 
 Async jobs (crawl, agent, extract, batch-scrape, llmstxt, and plan execution) run in-process inside `agent-svc` and are **not restart-safe**. Job records persist in Valkey for 24 hours, but execution is best-effort: a crash, forced termination, or restart does not resume or reclaim interrupted work, does not roll back partial artifacts already written to downstream stores, and does not replay undelivered webhooks. An orderly shutdown gives in-flight tasks a five-second grace period before cancellation (ADR-0035). In-flight background execution carries **no durability SLO**; after a restart, treat completion as at-least-once-with-verification and re-submit critical work.
