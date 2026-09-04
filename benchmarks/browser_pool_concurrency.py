@@ -4,7 +4,9 @@ This benchmark exercises the production ``BrowserPool`` and Playwright seam,
 but it does not make origin requests or run the full scraper/research stack.
 Each synthetic session fetches three pages concurrently.  Pool instances are
 independent and each is capped at one browser process, so the 1/2/4 pool cases
-stay within the four-process resource cap used by this probe.
+stay within the four-process resource cap used by this probe.  Each pool also
+has a four-lifecycle admission semaphore, matching the scraper's default
+``SCRAPER_MAX_BROWSER_CONCURRENCY`` bound.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ POOL_COUNTS = (1, 2, 4)
 SESSION_COUNTS = (1, 8)
 PAGES_PER_SESSION = 3
 MAX_CONTEXTS_PER_SESSION = 3
+MAX_CONTEXTS_PER_POOL = 4
 
 
 def _percentile(samples: list[float], fraction: float) -> float:
@@ -130,39 +133,48 @@ class _ResourceMonitor:
         }
 
 
-async def _fetch_page(pool: Any, page_number: int) -> dict[str, Any]:
+async def _fetch_page(
+    pool: Any, admission: asyncio.Semaphore, page_number: int
+) -> dict[str, Any]:
     started = time.monotonic()
-    lease = await pool.acquire(f"{URL}/{page_number}")
-    acquired = time.monotonic()
-    content = ""
-    try:
-
-        async def fulfill(route: Any) -> None:
-            await route.fulfill(body=HTML, content_type="text/html")
-
-        await lease.context.route("**/*", fulfill)
-        page = await lease.context.new_page()
+    async with admission:
+        admission_acquired = time.monotonic()
+        lease = await pool.acquire(f"{URL}/{page_number}")
+        pool_acquired = time.monotonic()
+        content = ""
         try:
-            await page.goto(f"{URL}/{page_number}", wait_until="domcontentloaded")
-            content = await page.locator("article").inner_text()
+
+            async def fulfill(route: Any) -> None:
+                await route.fulfill(body=HTML, content_type="text/html")
+
+            await lease.context.route("**/*", fulfill)
+            page = await lease.context.new_page()
+            try:
+                await page.goto(f"{URL}/{page_number}", wait_until="domcontentloaded")
+                content = await page.locator("article").inner_text()
+            finally:
+                await page.close()
         finally:
-            await page.close()
-    finally:
-        await lease.release()
+            await lease.release()
+    finished = time.monotonic()
     return {
-        "elapsed_seconds": time.monotonic() - started,
-        "acquire_seconds": acquired - started,
+        "elapsed_seconds": finished - started,
+        "admission_wait_seconds": admission_acquired - started,
+        "pool_acquire_wait_seconds": pool_acquired - admission_acquired,
+        "acquire_seconds": pool_acquired - started,
         "content_hash": hashlib.sha256(content.encode()).hexdigest(),
     }
 
 
-async def _session(pool: Any, session_number: int) -> dict[str, Any]:
+async def _session(
+    pool: Any, admission: asyncio.Semaphore, session_number: int
+) -> dict[str, Any]:
     started = time.monotonic()
     semaphore = asyncio.Semaphore(MAX_CONTEXTS_PER_SESSION)
 
     async def fetch(page_number: int) -> dict[str, Any]:
         async with semaphore:
-            return await _fetch_page(pool, page_number)
+            return await _fetch_page(pool, admission, page_number)
 
     pages = await asyncio.gather(
         *(fetch(page_number) for page_number in range(PAGES_PER_SESSION))
@@ -181,6 +193,7 @@ async def _measure(pool_count: int, session_count: int) -> dict[str, Any]:
         BrowserPool(enabled=True, max_processes=1, idle_ttl=60, max_age=900)
         for _ in range(pool_count)
     ]
+    admissions = [asyncio.Semaphore(MAX_CONTEXTS_PER_POOL) for _ in pools]
     started = time.monotonic()
     sessions: list[dict[str, Any]] = []
     monitor = _ResourceMonitor()
@@ -188,7 +201,11 @@ async def _measure(pool_count: int, session_count: int) -> dict[str, Any]:
         async with monitor:
             sessions = await asyncio.gather(
                 *(
-                    _session(pools[index % pool_count], index)
+                    _session(
+                        pools[index % pool_count],
+                        admissions[index % pool_count],
+                        index,
+                    )
                     for index in range(session_count)
                 )
             )
@@ -198,6 +215,8 @@ async def _measure(pool_count: int, session_count: int) -> dict[str, Any]:
     page_results = [page for session in sessions for page in session["pages"]]
     session_times = [session["elapsed_seconds"] for session in sessions]
     acquire_times = [page["acquire_seconds"] for page in page_results]
+    admission_times = [page["admission_wait_seconds"] for page in page_results]
+    pool_acquire_times = [page["pool_acquire_wait_seconds"] for page in page_results]
     elapsed = time.monotonic() - started
     hashes = {page["content_hash"] for page in page_results}
     return {
@@ -205,11 +224,14 @@ async def _measure(pool_count: int, session_count: int) -> dict[str, Any]:
         "session_count": session_count,
         "pages_per_session": PAGES_PER_SESSION,
         "max_contexts_per_session": MAX_CONTEXTS_PER_SESSION,
+        "max_contexts_per_pool": MAX_CONTEXTS_PER_POOL,
         "total_pages": len(page_results),
         "elapsed_seconds": round(elapsed, 6),
         "throughput_pages_per_second": round(len(page_results) / elapsed, 6),
         "session_latency": _summary(session_times),
         "context_acquire_wait": _summary(acquire_times),
+        "admission_wait": _summary(admission_times),
+        "pool_acquire_wait": _summary(pool_acquire_times),
         "identical_content": len(hashes) == 1,
         "per_pool_distribution": {
             str(index): sum(
