@@ -297,9 +297,7 @@ async def _run_research_events(
 
             # ── Gap detection after pass 1 ─────────────────────────
             if pass_count == 1:
-                # ``len(all_source_details) >= max_credits`` was the
-                # pre-registry approximation. Count only novel successful
-                # acquisitions so reuse remains free.
+                # Count novel successful acquisitions; reuse remains free.
                 budget_spent = max_credits is not None and credits_used >= max_credits
                 gap_topics = (
                     []
