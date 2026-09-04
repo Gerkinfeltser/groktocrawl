@@ -70,6 +70,8 @@ async def session_step(
             llm_base_url=request.app.state.llm_base_url,
             llm_api_key=request.app.state.llm_api_key,
             llm_model=request.app.state.llm_model,
+            parallel=body.parallel or bool(body.params.get("parallel", False)),
+            idempotency_key=body.idempotency_key or body.params.get("idempotency_key"),
         )
         return SessionStepResponse(
             step_index=result["step_index"],

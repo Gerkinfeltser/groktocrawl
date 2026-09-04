@@ -47,6 +47,10 @@ def _steps_key(session_id: str) -> str:
     return f"session:{session_id}:steps"
 
 
+def _step_log_key(session_id: str) -> str:
+    return f"session:{session_id}:step_log"
+
+
 def _artifact_key(session_id: str) -> str:
     return f"session:{session_id}:artifact"
 
@@ -59,13 +63,19 @@ def _lock_key(session_id: str) -> str:
     return f"session:{session_id}:lock"
 
 
+def _idempotency_key(session_id: str) -> str:
+    return f"session:{session_id}:idempotency"
+
+
 def _all_keys(session_id: str) -> list[str]:
     """Return all session keys (used for delete and TTL refresh)."""
     return [
         _meta_key(session_id),
         _steps_key(session_id),
+        _step_log_key(session_id),
         _artifact_key(session_id),
         _refs_key(session_id),
+        _idempotency_key(session_id),
     ]
 
 
@@ -118,6 +128,8 @@ class SessionStore:
             # Redis STRLEN reports bytes.  Keep a separate character count so
             # the public API retains its existing Unicode semantics.
             "artifact_chars": "0",
+            "revision": "0",
+            "next_step_index": "0",
         }
         self.redis.hset(meta_key, mapping=meta_mapping)  # type: ignore[arg-type]
         self.redis.expire(meta_key, effective_ttl)
@@ -242,7 +254,12 @@ class SessionStore:
     def get_steps(self, session_id: str) -> list[dict]:
         """Get the full step history for a session."""
         steps_raw = self.redis.get(_steps_key(session_id))
-        return json.loads(steps_raw) if steps_raw else []
+        steps = json.loads(steps_raw) if steps_raw else []
+        try:
+            step_log = self.redis.lrange(_step_log_key(session_id), 0, -1)
+        except AttributeError:
+            step_log = []
+        return steps + [json.loads(raw) for raw in step_log]
 
     def append_artifact(self, session_id: str, content: str) -> bool:
         """Append content to the session's accumulated artifact.
@@ -440,6 +457,265 @@ class SessionStore:
 
     async def adelete(self, session_id: str) -> bool:
         return await asyncio.to_thread(self.delete, session_id)
+
+    async def areserve_step(
+        self,
+        session_id: str,
+        idempotency_key: str,
+        lease_ttl: int = 120,
+    ) -> dict | None:
+        """Reserve an independent step without holding the session lock."""
+        return await asyncio.to_thread(
+            self.reserve_step, session_id, idempotency_key, lease_ttl
+        )
+
+    def reserve_step(
+        self,
+        session_id: str,
+        idempotency_key: str,
+        lease_ttl: int = 120,
+    ) -> dict | None:
+        """Reserve a stable step index and idempotency identity atomically."""
+        meta_key = _meta_key(session_id)
+        idempotency_hash = _idempotency_key(session_id)
+        token = str(uuid.uuid4())
+        now = int(datetime.now(UTC).timestamp())
+        script = """
+        if redis.call('exists', KEYS[1]) == 0 then return '' end
+        local existing = redis.call('hget', KEYS[2], ARGV[1])
+        if existing then
+            local item = cjson.decode(existing)
+            if item.status == 'committed' then return existing end
+            if tonumber(item.expires_at or 0) > tonumber(ARGV[4]) then return existing end
+        end
+        local next_index = redis.call('hget', KEYS[1], 'next_step_index')
+        if not next_index then
+            next_index = redis.call('hget', KEYS[1], 'step_count') or '0'
+            redis.call('hset', KEYS[1], 'next_step_index', next_index)
+        end
+        local index = redis.call('hincrby', KEYS[1], 'next_step_index', 1)
+        local item = cjson.encode({status='pending', token=ARGV[2], index=index,
+                                   revision=tonumber(redis.call('hget', KEYS[1], 'revision') or '0'),
+                                   expires_at=tonumber(ARGV[4]) + tonumber(ARGV[3])})
+        redis.call('hset', KEYS[2], ARGV[1], item)
+        redis.call('expire', KEYS[2], ARGV[3])
+        return item
+        """
+        try:
+            raw = self.redis.eval(
+                script,
+                2,
+                meta_key,
+                idempotency_hash,
+                idempotency_key,
+                token,
+                lease_ttl,
+                now,
+            )
+            if raw in (None, ""):
+                return None
+            item = json.loads(raw)
+            if item.get("status") == "pending" and item.get("token") == token:
+                item["acquired"] = True
+            return item
+        except (AttributeError, TypeError, NotImplementedError):
+            meta = self.redis.hgetall(meta_key)
+            if not meta:
+                return None
+            existing_raw = self.redis.hget(idempotency_hash, idempotency_key)
+            if existing_raw:
+                existing = json.loads(existing_raw)
+                if (
+                    existing.get("status") == "committed"
+                    or int(existing.get("expires_at", 0)) > now
+                ):
+                    return existing
+            next_index = int(meta.get("next_step_index", meta.get("step_count", 0))) + 1
+            revision = int(meta.get("revision", 0))
+            item = {
+                "status": "pending",
+                "token": token,
+                "index": next_index,
+                "revision": revision,
+                "expires_at": now + lease_ttl,
+            }
+            self.redis.hset(meta_key, "next_step_index", next_index)
+            self.redis.hset(idempotency_hash, idempotency_key, json.dumps(item))
+            self.redis.expire(idempotency_hash, lease_ttl)
+            item["acquired"] = True
+            return item
+
+    async def acommit_step(
+        self,
+        session_id: str,
+        reservation: dict,
+        step: dict,
+        refs: dict[str, dict],
+        artifact: str,
+        result: dict,
+        ttl: int | None = None,
+    ) -> dict | None:
+        return await asyncio.to_thread(
+            self.commit_step,
+            session_id,
+            reservation,
+            step,
+            refs,
+            artifact,
+            result,
+            ttl,
+        )
+
+    def commit_step(
+        self,
+        session_id: str,
+        reservation: dict,
+        step: dict,
+        refs: dict[str, dict],
+        artifact: str,
+        result: dict,
+        ttl: int | None = None,
+    ) -> dict | None:
+        """Publish an independent step atomically after its remote work."""
+        meta_key = _meta_key(session_id)
+        steps_key = _steps_key(session_id)
+        step_log_key = _step_log_key(session_id)
+        artifact_key = _artifact_key(session_id)
+        refs_key = _refs_key(session_id)
+        idempotency_hash = _idempotency_key(session_id)
+        effective_ttl = ttl or self.default_ttl
+        encoded_refs = {ref_id: json.dumps(data) for ref_id, data in refs.items()}
+        stored_result = json.dumps({"status": "committed", "result": result})
+        step_json = json.dumps(step)
+        refs_args: list[str] = []
+        for ref_id, data in encoded_refs.items():
+            refs_args.extend((ref_id, data))
+        script = """
+        if redis.call('exists', KEYS[1]) == 0 then return '' end
+        local existing = redis.call('hget', KEYS[5], ARGV[1])
+        if not existing then return '' end
+        local item = cjson.decode(existing)
+        if item.status == 'committed' then return existing end
+        if item.token ~= ARGV[2] then return '' end
+        local revision = tonumber(redis.call('hget', KEYS[1], 'revision') or '0')
+        if revision < tonumber(ARGV[4]) then return '' end
+        local step = cjson.decode(ARGV[5])
+        local ref_count = tonumber(ARGV[6])
+        local artifact_arg = 7 + (ref_count * 2)
+        redis.call('rpush', KEYS[6], ARGV[5])
+        local arg = 7
+        for i = 1, ref_count do
+            redis.call('hset', KEYS[4], ARGV[arg], ARGV[arg + 1])
+            arg = arg + 2
+        end
+        redis.call('append', KEYS[3], ARGV[artifact_arg])
+        redis.call('hincrby', KEYS[1], 'step_count', 1)
+        redis.call('hincrby', KEYS[1], 'artifact_chars', tonumber(ARGV[artifact_arg + 1]))
+        redis.call('hset', KEYS[1], 'revision', revision + 1,
+                   'expires_at', ARGV[artifact_arg + 3])
+        redis.call('hset', KEYS[5], ARGV[1], ARGV[artifact_arg + 2])
+        for i = 1, 6 do redis.call('expire', KEYS[i], ARGV[artifact_arg + 4]) end
+        return ARGV[artifact_arg + 2]
+        """
+        # ARGV layout after refs: artifact, character delta, result, expires_at,
+        # and the fixed TTL. Build the prefix and append values, then let Lua
+        # index from the ref count.
+        args = [
+            reservation["idempotency_key"],
+            reservation["token"],
+            str(effective_ttl),
+            str(reservation["revision"]),
+            step_json,
+            str(len(encoded_refs)),
+            *refs_args,
+            artifact,
+            str(len(artifact)),
+            stored_result,
+            _expires_iso(effective_ttl),
+            str(effective_ttl),
+        ]
+        try:
+            raw = self.redis.eval(
+                script,
+                6,
+                meta_key,
+                steps_key,
+                artifact_key,
+                refs_key,
+                idempotency_hash,
+                step_log_key,
+                *args,
+            )
+            if raw in (None, ""):
+                return None
+            decoded = json.loads(raw)
+            return (
+                decoded.get("result")
+                if decoded.get("status") == "committed"
+                else decoded
+            )
+        except (AttributeError, TypeError, NotImplementedError):
+            # Compatibility fallback for minimal test doubles.  The normal
+            # deployment path uses the atomic script above.
+            if not self.redis.exists(meta_key):
+                return None
+            current = self.redis.hget(idempotency_hash, reservation["idempotency_key"])
+            if not current:
+                return None
+            current_item = json.loads(current)
+            if current_item.get("status") == "committed":
+                return current_item.get("result")
+            if current_item.get("token") != reservation["token"]:
+                return None
+            step_index = int(reservation["index"])
+            step["index"] = step_index
+            try:
+                self.redis.rpush(step_log_key, json.dumps(step))
+            except AttributeError:
+                steps_raw = self.redis.get(steps_key)
+                steps = json.loads(steps_raw) if steps_raw else []
+                steps.append(step)
+                self.redis.set(steps_key, json.dumps(steps), ex=effective_ttl)
+            self.redis.hset(
+                idempotency_hash, reservation["idempotency_key"], stored_result
+            )
+            for ref_id, data in encoded_refs.items():
+                self.redis.hset(refs_key, ref_id, data)
+            self.redis.append(artifact_key, artifact)
+            self.redis.hincrby(meta_key, "step_count", 1)
+            self.redis.hincrby(meta_key, "artifact_chars", len(artifact))
+            self.redis.hincrby(meta_key, "revision", 1)
+            self.redis.expire(step_log_key, effective_ttl)
+            return result
+
+    async def arelease_step(self, session_id: str, reservation: dict) -> None:
+        await asyncio.to_thread(self.release_step, session_id, reservation)
+
+    def release_step(self, session_id: str, reservation: dict) -> None:
+        """Release only this caller's pending idempotency reservation."""
+        script = """
+        local existing = redis.call('hget', KEYS[1], ARGV[1])
+        if existing and cjson.decode(existing).token == ARGV[2] then
+            redis.call('hdel', KEYS[1], ARGV[1])
+        end
+        return 1
+        """
+        try:
+            self.redis.eval(
+                script,
+                1,
+                _idempotency_key(session_id),
+                reservation["idempotency_key"],
+                reservation["token"],
+            )
+        except (AttributeError, TypeError, NotImplementedError):
+            current = self.redis.hget(
+                _idempotency_key(session_id), reservation["idempotency_key"]
+            )
+            if current and json.loads(current).get("token") == reservation["token"]:
+                self.redis.hdel(
+                    _idempotency_key(session_id), reservation["idempotency_key"]
+                )
 
     # ── Reference Storage (HSET-based) ──────────────────────────
 

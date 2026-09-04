@@ -127,7 +127,7 @@ async def test_async_session_lifecycle_batches_refs_and_preserves_unicode(store)
     # One metadata read, one pipeline transaction, one bulk HSET, one
     # metadata HSET, and four fixed TTL commands; no command per ref.
     assert ref_commands.count("hset") == 2
-    assert len(ref_commands) <= 9
+    assert len(ref_commands) <= 10
 
     assert await store.aappend_artifact(session_id, "é🙂")
     assert await store.aappend_artifact(session_id, "\nmore")
@@ -150,7 +150,7 @@ def test_bulk_ref_command_count_is_bounded(store, ref_count):
     refs = {f"ref_{i}": {"url": f"https://example.test/{i}"} for i in range(ref_count)}
     store.redis.commands.clear()
     assert store.add_refs(session_id, refs)
-    assert len(store.redis.commands) == 8
+    assert len(store.redis.commands) == 10
 
 
 @pytest.mark.asyncio
