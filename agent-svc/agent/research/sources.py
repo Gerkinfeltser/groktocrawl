@@ -76,8 +76,8 @@ def normalize_source_url(url: str) -> str:
     """Return a conservative identity key for a request-scoped source.
 
     Only URL spelling that cannot identify a different resource is folded:
-    scheme and host case, default ports, fragments, and a trailing path slash.
-    Query strings (including their order and case) and path case are retained
+    scheme and host case, default ports, fragments, and an empty path. Query
+    strings (including their order and case) and path spelling are retained
     because either can be significant to a resource. Invalid or relative URLs
     are returned trimmed rather than guessed at.
     """
@@ -109,16 +109,10 @@ def normalize_source_url(url: str) -> str:
     else:
         netloc = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
     path = parsed.path or "/"
-    if len(path) > 1:
-        path = path.rstrip("/")
     result = f"{scheme}://{netloc}{path}"
     if parsed.query:
         result += f"?{parsed.query}"
     return result
-
-
-# Short alias used by discovery callers and convenient for tests.
-_normalize_source_url = normalize_source_url
 
 
 def _options_fingerprint(

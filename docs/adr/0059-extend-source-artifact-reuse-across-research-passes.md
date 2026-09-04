@@ -28,8 +28,8 @@ context, or source accounting.
 Discovery accepts an optional request-scoped `SourceRegistry`. The registry
 maps a normalized URL identity to the latest successful, nonempty
 `SourceArtifact`. Normalization lowercases scheme and host, removes default
-ports, fragments, and non-root trailing slashes; it preserves path case and
-the complete query string. A registry hit is reusable only when its exact
+ports and fragments, and maps an empty path to `/`; it preserves path case,
+trailing slashes, and the complete query string. A registry hit is reusable only when its exact
 fetch/contents option fingerprint matches the requested extraction contract.
 
 Failed or refused acquisitions are never registered. A later pass can retry

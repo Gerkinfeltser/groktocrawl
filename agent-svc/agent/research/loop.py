@@ -31,7 +31,11 @@ from .events import ResearchEvent
 from .gaps import _detect_gaps
 from .plan import _generate_research_plan
 from .prompts import ANSWER_SYSTEM_PROMPT, EXTRACT_SYSTEM_PROMPT, SYSTEM_PROMPT
-from .sources import SourceArtifact, artifacts_to_documents_and_details
+from .sources import (
+    SourceArtifact,
+    SourceRegistry,
+    artifacts_to_documents_and_details,
+)
 from .utils import _validate_json_if_schema
 
 logger = logging.getLogger(__name__)
@@ -103,7 +107,9 @@ async def _run_research_events(
 
         pass_count = 0
         max_passes = 2 if search_type == "deep" else 1
+        source_registry = SourceRegistry()
         all_source_details: list[dict] = []
+        credits_used = 0
         combined_context = ""
         gap_topics: list[str] = []
         answer = ""
@@ -128,6 +134,8 @@ async def _run_research_events(
                         max_searches_per_request=max_searches_per_request,
                         scrape_options=scrape_opts,
                         max_credits=max_credits,
+                        source_registry=source_registry,
+                        pass_number=pass_count,
                     )
                 else:
                     query = queries[0] if queries else prompt
@@ -138,6 +146,8 @@ async def _run_research_events(
                         scraper=scraper,
                         scrape_options=scrape_opts,
                         max_credits=max_credits,
+                        source_registry=source_registry,
+                        pass_number=pass_count,
                     )
             else:
                 # ── Pass 2: gap-focused discovery ─────────────────
@@ -151,14 +161,16 @@ async def _run_research_events(
                     ),
                     scrape_options=scrape_opts,
                     max_credits=(
-                        max_credits - len(all_source_details)
-                        if max_credits is not None
-                        else None
+                        max_credits - credits_used if max_credits is not None else None
                     ),
+                    source_registry=source_registry,
+                    pass_number=pass_count,
                 )
 
             context = discovered["context"]
             source_details = discovered["source_details"]
+            novel_artifacts = discovered.get("new_artifacts", [])
+            previous_context = combined_context
             search_results = discovered["search_results"]
             pending_sources = (
                 [
@@ -174,12 +186,15 @@ async def _run_research_events(
                 else [{"url": url, "title": "", "relevance": ""} for url in urls]
             )
             yield {"type": "sources_pending", "sources": pending_sources}
-            for source in source_details:
+            # A registry hit is already known to the client. Emit progress
+            # only for newly acquired artifacts so a duplicate-only pass does
+            # not replay scrape events for the same source.
+            for artifact in novel_artifacts:
                 yield {
                     "type": "source_scraped",
-                    "url": source["url"],
-                    "source": source["source"],
-                    "chars": source["char_count"],
+                    "url": artifact.url,
+                    "source": artifact.source,
+                    "chars": artifact.char_count,
                 }
             if not context and not combined_context:
                 yield {"type": "sources", "sources": []}
@@ -192,16 +207,16 @@ async def _run_research_events(
                 }
                 return
 
-            all_source_details.extend(source_details)
-            if pass_count == 1:
-                combined_context = context
-            else:
-                if context:
-                    combined_context = (
-                        combined_context
-                        + "\n\n---\n\nAdditional sources (pass 2):\n\n"
-                        + context
-                    )
+            all_source_details = list(source_details)
+            credits_used += discovered.get("credits_used", len(novel_artifacts))
+            combined_context = context
+
+            # Gap search can rediscover every source from pass one. The
+            # request-scoped registry makes that a no-op: preserve the first
+            # synthesis and its stream/schema semantics when evidence and
+            # context are unchanged.
+            if pass_count > 1 and context == previous_context:
+                break
 
             if not combined_context:
                 yield {"type": "sources", "sources": []}
@@ -282,9 +297,10 @@ async def _run_research_events(
 
             # ── Gap detection after pass 1 ─────────────────────────
             if pass_count == 1:
-                budget_spent = (
-                    max_credits is not None and len(all_source_details) >= max_credits
-                )
+                # ``len(all_source_details) >= max_credits`` was the
+                # pre-registry approximation. Count only novel successful
+                # acquisitions so reuse remains free.
+                budget_spent = max_credits is not None and credits_used >= max_credits
                 gap_topics = (
                     []
                     if budget_spent

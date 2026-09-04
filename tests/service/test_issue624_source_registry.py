@@ -33,7 +33,10 @@ def test_source_identity_is_conservative():
 
     assert (
         normalize_source_url("HTTPS://EXAMPLE.COM:443/docs/#section")
-        == "https://example.com/docs"
+        == "https://example.com/docs/"
+    )
+    assert normalize_source_url("https://example.com/docs") != normalize_source_url(
+        "https://example.com/docs/"
     )
     assert normalize_source_url(
         "https://example.com/docs?a=1&b=2"
@@ -142,7 +145,7 @@ async def test_discovery_accounts_novel_and_reused_sources_with_credit_budget():
     searxng.search = AsyncMock(
         return_value=(
             [
-                {"url": "HTTPS://EXAMPLE.COM:443/old/#x", "title": "old"},
+                {"url": "HTTPS://EXAMPLE.COM:443/old#x", "title": "old"},
                 {"url": "https://new.example/page", "title": "new"},
             ],
             MagicMock(),
@@ -173,3 +176,189 @@ async def test_discovery_accounts_novel_and_reused_sources_with_credit_budget():
     assert len(result["reused_sources"]) == 1
     assert len(result["source_details"]) == 2
     assert result["context"].count("Source:") == 2
+
+
+def _research_clients(search_by_query: dict[str, list[dict]], markdown_by_url=None):
+    """Build deterministic clients for mocked two-pass loop tests."""
+    searxng = MagicMock()
+
+    async def search(query: str, **kwargs):
+        return search_by_query[query], MagicMock()
+
+    searxng.search = AsyncMock(side_effect=search)
+    searxng.close = AsyncMock()
+    scraper = MagicMock()
+    scraper.base_url = "http://scraper"
+    scraper.calls: list[str] = []
+    markdown_by_url = markdown_by_url or {}
+
+    async def scrape_with_fallback(url: str, **kwargs):
+        scraper.calls.append(url)
+        return {
+            "success": True,
+            "data": {
+                "markdown": markdown_by_url.get(url, f"markdown for {url}"),
+                "source": "fixture",
+            },
+        }
+
+    scraper.scrape_with_fallback = AsyncMock(side_effect=scrape_with_fallback)
+    scraper.close = AsyncMock()
+    llm = MagicMock()
+    llm.generate = AsyncMock(return_value="answer [1]")
+    llm.close = AsyncMock()
+    return searxng, scraper, llm
+
+
+def _patch_research_clients(searxng, scraper, llm, *, gaps=True):
+    from unittest.mock import patch
+
+    plan = {
+        "focused_queries": ["first-a", "first-b"],
+        "research_strategy": "deep",
+        "reasoning": "fixture",
+    }
+    return patch.multiple(
+        "agent.research.loop",
+        SearXNGClient=MagicMock(return_value=searxng),
+        ScraperClient=MagicMock(return_value=scraper),
+        LLMClient=MagicMock(return_value=llm),
+        _generate_research_plan=AsyncMock(return_value=plan),
+        _detect_gaps=AsyncMock(return_value=["gap"] if gaps else []),
+    )
+
+
+@pytest.mark.asyncio
+async def test_two_pass_duplicate_only_reuses_and_synthesizes_once():
+    from agent.research.loop import run_research
+
+    first = [
+        {"url": f"https://source{i}.example/page", "title": f"S{i}"} for i in range(3)
+    ]
+    duplicate_aliases = [
+        {"url": "HTTPS://SOURCE0.EXAMPLE:443/page#section"},
+        {"url": "https://SOURCE1.EXAMPLE/page#part"},
+        {"url": "https://source2.example/page#part"},
+    ]
+    clients = _research_clients(
+        {"first-a": first, "first-b": [], "gap": duplicate_aliases}
+    )
+    _searxng, scraper, llm = clients
+    with _patch_research_clients(*clients):
+        result = await run_research(
+            prompt="question", llm_model="fixture", search_type="deep"
+        )
+
+    assert len(scraper.calls) == 3
+    assert llm.generate.await_count == 1
+    assert result["sources"] == [item["url"] for item in first]
+    assert len(result["source_details"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_two_pass_partial_overlap_fetches_only_novel_source():
+    from agent.research.loop import run_research
+
+    first = [
+        {"url": f"https://source{i}.example/page", "title": f"S{i}"} for i in range(3)
+    ]
+    second = [
+        {"url": "HTTPS://SOURCE0.EXAMPLE:443/page#section"},
+        {"url": "https://SOURCE1.EXAMPLE/page#part"},
+        {"url": "https://new.example/page"},
+    ]
+    clients = _research_clients({"first-a": first, "first-b": [], "gap": second})
+    _searxng, scraper, llm = clients
+    with _patch_research_clients(*clients):
+        result = await run_research(
+            prompt="question", llm_model="fixture", search_type="deep"
+        )
+
+    assert len(scraper.calls) == 4
+    assert llm.generate.await_count == 2
+    assert len(result["sources"]) == 4
+    assert result["sources"].count("https://new.example/page") == 1
+
+
+@pytest.mark.asyncio
+async def test_two_pass_failed_first_acquisition_retries_without_duplicate_source():
+    from agent.research.loop import run_research
+
+    first = [{"url": f"https://source{i}.example/page"} for i in range(3)]
+    second = [
+        {"url": "HTTPS://SOURCE0.EXAMPLE:443/page#retry"},
+        {"url": "https://source1.example/page"},
+        {"url": "https://source2.example/page"},
+    ]
+    clients = _research_clients({"first-a": first, "first-b": [], "gap": second})
+    _searxng, scraper, llm = clients
+    attempts: dict[str, int] = {}
+
+    async def scrape_with_retry(url: str, **kwargs):
+        key = "source0" if "source0" in url.lower() else url
+        attempts[key] = attempts.get(key, 0) + 1
+        scraper.calls.append(url)
+        if key == "source0" and attempts[key] == 1:
+            return {"success": False, "error": "transient"}
+        return {
+            "success": True,
+            "data": {"markdown": f"markdown for {url}", "source": "fixture"},
+        }
+
+    scraper.scrape_with_fallback = AsyncMock(side_effect=scrape_with_retry)
+    with _patch_research_clients(*clients):
+        result = await run_research(
+            prompt="question", llm_model="fixture", search_type="deep"
+        )
+
+    assert attempts["source0"] == 2
+    assert len(scraper.calls) == 4
+    assert llm.generate.await_count == 2
+    assert len(result["sources"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_two_pass_schema_and_streaming_preserve_single_synthesis_on_duplicate_pass():
+    from agent.research.loop import run_research_stream
+
+    first = [{"url": f"https://source{i}.example/page"} for i in range(3)]
+    second = [{"url": f"HTTPS://SOURCE{i}.EXAMPLE:443/page#part"} for i in range(3)]
+    clients = _research_clients({"first-a": first, "first-b": [], "gap": second})
+    _searxng, scraper, llm = clients
+
+    async def generate_stream(**kwargs):
+        yield {"type": "token", "content": "streamed"}
+        yield {"type": "done", "full_content": "streamed"}
+
+    llm.generate_stream = generate_stream
+    with _patch_research_clients(*clients):
+        events = [
+            event
+            async for event in run_research_stream(
+                prompt="question", llm_model="fixture", search_type="deep"
+            )
+        ]
+
+    assert len(scraper.calls) == 3
+    assert [event["type"] for event in events].count("token") == 1
+    assert events[-1]["type"] == "done"
+
+    # Structured output uses the non-streaming synthesis branch even through
+    # the stream adapter, and duplicate pass reuse still avoids a second call.
+    clients = _research_clients({"first-a": first, "first-b": [], "gap": second})
+    _searxng, scraper, llm = clients
+    llm.generate.return_value = "{}"
+    with _patch_research_clients(*clients):
+        events = [
+            event
+            async for event in run_research_stream(
+                prompt="question",
+                llm_model="fixture",
+                search_type="deep",
+                schema={"type": "object"},
+            )
+        ]
+
+    assert len(scraper.calls) == 3
+    assert llm.generate.await_count == 1
+    assert events[-1]["type"] == "done"

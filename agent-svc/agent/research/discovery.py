@@ -121,6 +121,24 @@ async def _scrape_urls(
         return artifacts
 
     urls = urls_to_scrape
+    fresh_by_key: dict[str, SourceArtifact] = {}
+
+    def finalize() -> list[SourceArtifact]:
+        """Register fresh artifacts in candidate order for stable output."""
+        if source_registry is None:
+            return artifacts
+        for url in urls:
+            key = normalize_source_url(url)
+            artifact = fresh_by_key.get(key)
+            if artifact is not None:
+                source_registry.register(artifact, scrape_options)
+        fresh = [
+            fresh_by_key[normalize_source_url(url)]
+            for url in urls
+            if normalize_source_url(url) in fresh_by_key
+        ]
+        return artifacts[: len(artifacts) - len(fresh)] + fresh
+
     max_attempts = max_attempts or len(urls)
     semaphore = asyncio.Semaphore(max_concurrent)
     url_timeout = 70  # Accommodates scrape_with_fallback (20s generic + 45s browser)
@@ -150,9 +168,8 @@ async def _scrape_urls(
         for task in done:
             artifact = task.result()
             if artifact is not None:
-                if source_registry is not None:
-                    artifact = source_registry.register(artifact, scrape_options)
                 artifacts.append(artifact)
+                fresh_by_key[normalize_source_url(artifact.url)] = artifact
                 if len(artifacts) >= min_sources:
                     # Cancel remaining speculative tasks and await them so no
                     # pending task is destroyed (or races browser cleanup).
@@ -160,9 +177,9 @@ async def _scrape_urls(
                         t.cancel()
                     if tasks:
                         await asyncio.gather(*tasks, return_exceptions=True)
-                    return artifacts
+                    return finalize()
 
-    return artifacts
+    return finalize()
 
 
 def _dedupe_urls(urls: list[str]) -> list[str]:
