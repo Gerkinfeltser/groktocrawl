@@ -1,6 +1,7 @@
 """Opt-in distributed pacing must fail closed without shared coordination."""
 
 import asyncio
+import os
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -69,3 +70,45 @@ async def test_cancellation_propagates(monkeypatch):
     )
     with pytest.raises(asyncio.CancelledError):
         await manager().check("https://example.org/a")
+
+
+@pytest.mark.asyncio
+async def test_valkey_reservation_survives_cancelled_wait(monkeypatch):
+    """The real Lua reservation keeps its slot after a caller is cancelled."""
+    redis_url = os.environ.get("TEST_VALKEY_URL")
+    if not redis_url:
+        pytest.skip("TEST_VALKEY_URL is not configured")
+
+    import redis.asyncio as redis
+
+    client = redis.from_url(redis_url, decode_responses=True)
+    value = manager()
+    value._domains["example.org"].crawl_delay = 0.05
+    key = value._rate_key("example.org") + ":slots"
+    await client.delete(key)
+    monkeypatch.setattr(
+        "scraper.cache._get_cache_client", AsyncMock(return_value=client)
+    )
+    try:
+        assert (await value.check("https://example.org/first")).action == "proceed"
+        delayed = await value.check("https://example.org/second")
+        assert delayed.action == "delay"
+        assert delayed.delay_seconds >= 0.04
+
+        # Cancel the actual delayed caller. Its local rollback cannot reclaim
+        # the shared Lua slot after another replica could have reserved later.
+        delayed_task = asyncio.create_task(asyncio.sleep(delayed.delay_seconds))
+        await asyncio.sleep(0.01)
+        delayed_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await delayed_task
+        value.rollback_reservation("https://example.org/second")
+        assert float(await client.get(key)) > time.time() * 1000
+        assert await client.pttl(key) > 0
+
+        later = await value.check("https://example.org/third")
+        assert later.action == "delay"
+        assert later.delay_seconds >= 0.08
+    finally:
+        await client.delete(key)
+        await client.aclose()

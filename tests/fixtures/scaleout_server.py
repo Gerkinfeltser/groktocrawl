@@ -1,5 +1,6 @@
 """Threaded acquisition twin for exercising the real gateway topology."""
 
+import contextlib
 import json
 import socket
 import threading
@@ -16,7 +17,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self.rfile.read(int(self.headers.get("Content-Length", 0)))
         with slots:
-            time.sleep(0.1)
+            time.sleep(min(float(self.headers.get("X-Test-Delay", "0.1")), 5.0))
             self.respond({"success": True, "backend": socket.gethostname()})
 
     def respond(self, body):
@@ -25,7 +26,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
-        self.wfile.write(encoded)
+        with contextlib.suppress(BrokenPipeError):
+            self.wfile.write(encoded)
 
     def log_message(self, *_args):
         pass
