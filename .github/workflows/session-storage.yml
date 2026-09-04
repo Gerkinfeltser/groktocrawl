@@ -29,7 +29,7 @@ jobs:
         with:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@v7
-      - run: uv sync --frozen --group dev
+      - run: uv sync --locked --no-dev --group fast-tests
       - name: Exercise real atomic storage operations
         env:
           SESSION_STORE_TEST_URL: redis://127.0.0.1:6379/0
