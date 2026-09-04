@@ -6,6 +6,8 @@ import time
 
 import pytest
 
+from tests.outcome_governance import governed_skip
+
 
 class _Pipeline:
     def __init__(self, redis):
@@ -91,6 +93,39 @@ class FakeRedis:
         self.expiries[key] = ttl
         return True
 
+    def eval(self, script, key_count, *values):
+        self._call("eval")
+        keys, args = values[:key_count], values[key_count:]
+        if "session_read_steps_v1" in script:
+            return [self.data.get(keys[0], "[]"), self.data.get(keys[1], [])]
+        meta = self.data.get(keys[0])
+        if not meta:
+            return None if "session_append_step_v1" in script else 0
+        if "session_append_artifact_v1" in script:
+            previous = self.data.get(keys[2], "")
+            meta["artifact_chars"] = str(
+                int(meta.get("artifact_chars", len(previous))) + int(args[1])
+            )
+            self.data[keys[2]] = previous + args[0]
+            meta["expires_at"] = args[2]
+        elif "session_add_refs_v1" in script:
+            refs = self.data.setdefault(keys[3], {})
+            refs.update(dict(zip(args[2::2], args[3::2], strict=True)))
+            meta["expires_at"] = args[0]
+        elif "session_append_step_v1" in script:
+            old = self.data.get(keys[4], [])
+            index = int(meta["step_count"]) + 1
+            step = json.loads(args[0])
+            step.update(index=index, timestamp=json.loads(args[1]))
+            self.data[keys[4]] = [*old, json.dumps(step)]
+            meta["step_count"] = str(index)
+            meta["expires_at"] = args[2]
+        else:
+            raise AssertionError("Unexpected Lua operation")
+        for key in keys:
+            self.expiries[key] = int(meta["ttl"])
+        return index if "session_append_step_v1" in script else 1
+
     def pipeline(self, **_kwargs):
         self._call("pipeline")
         return _Pipeline(self)
@@ -124,19 +159,16 @@ async def test_async_session_lifecycle_batches_refs_and_preserves_unicode(store)
     before_refs = len(store.redis.commands)
     assert await store.aadd_refs(session_id, refs)
     ref_commands = store.redis.commands[before_refs:]
-    # One metadata read, one pipeline transaction, one bulk HSET, one
-    # metadata HSET, and four fixed TTL commands; no command per ref.
-    assert ref_commands.count("hset") == 2
-    assert len(ref_commands) <= 9
+    # One TTL metadata read and one guarded server-side bulk commit.
+    assert ref_commands == ["hget", "eval"]
 
     assert await store.aappend_artifact(session_id, "é🙂")
     assert await store.aappend_artifact(session_id, "\nmore")
     store.redis.commands.clear()
     session = await store.aget(session_id)
     assert session["artifact_length"] == len("é🙂\nmore")
-    # The only GET is the legacy JSON step history; artifact length comes
-    # directly from metadata and does not fetch the markdown value.
-    assert store.redis.commands.count("get") == 1
+    # History is read in Lua; metadata length never fetches the artifact.
+    assert store.redis.commands.count("get") == 0
     assert (await store.aget_refs(session_id))["ref_1_0"]["markdown"] == "é"
     assert list((await store.aget_refs(session_id)).keys()) == list(refs.keys())
 
@@ -150,7 +182,7 @@ def test_bulk_ref_command_count_is_bounded(store, ref_count):
     refs = {f"ref_{i}": {"url": f"https://example.test/{i}"} for i in range(ref_count)}
     store.redis.commands.clear()
     assert store.add_refs(session_id, refs)
-    assert len(store.redis.commands) == 8
+    assert store.redis.commands == ["hget", "eval"]
 
 
 @pytest.mark.asyncio
@@ -205,8 +237,8 @@ async def test_search_step_commits_refs_as_one_storage_batch(store, monkeypatch)
     assert outcome["ref_count"] == 20
     assert len(await store.aget_refs(session_id)) == 20
     committed = store.redis.commands[before:]
-    assert committed.count("hset") == 4  # fixed writes, independent of ref count
-    assert committed.count("pipeline") == 2
+    assert committed.count("eval") == 3  # step, refs, artifact
+    assert committed.count("hget") == 3
 
 
 @pytest.mark.asyncio
@@ -245,3 +277,124 @@ def test_artifact_append_does_not_download_existing_value(store, prefix):
     assert store._append_artifact_atomic(session_id, "追加🙂")
     assert "get" not in store.redis.commands
     assert store.get(session_id)["artifact_length"] == len(prefix) + 3
+
+
+@pytest.mark.asyncio
+async def test_cancellation_drains_native_write_before_returning(store):
+    import threading
+
+    entered, finish = threading.Event(), threading.Event()
+    writes = []
+
+    def blocked_write():
+        entered.set()
+        finish.wait(2)
+        writes.append("committed")
+
+    task = asyncio.create_task(store._offload(blocked_write))
+    await asyncio.wait_for(asyncio.to_thread(entered.wait), 1)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    finish.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert writes == ["committed"]
+
+
+@pytest.mark.asyncio
+async def test_blocking_storage_admission_is_bounded(store):
+    import threading
+
+    finish = threading.Event()
+    lock = threading.Lock()
+    active = peak = 0
+
+    def blocked():
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        finish.wait(2)
+        with lock:
+            active -= 1
+
+    tasks = [asyncio.create_task(store._offload(blocked)) for _ in range(20)]
+    for _ in range(100):
+        if peak == 8:
+            break
+        await asyncio.sleep(0.001)
+    assert peak == 8
+    finish.set()
+    await asyncio.gather(*tasks)
+    assert peak == 8
+
+
+@pytest.mark.asyncio
+@pytest.mark.enable_socket
+async def test_real_valkey_atomic_append_history_and_deleted_session():
+    import os
+
+    from agent.session_store import SessionStore, _all_keys, _meta_key, _steps_key
+
+    url = os.getenv("SESSION_STORE_TEST_URL")
+    if not url:
+        governed_skip(
+            "Set SESSION_STORE_TEST_URL for real Valkey contract test",
+            owner="repository-maintainer",
+            issue="#626",
+            classification="retained",
+            environment="Requires isolated Valkey; exercised in session-storage CI",
+        )
+    store = SessionStore(redis_url=url)
+    session_id = await store.acreate(ttl=120)
+    try:
+        legacy = [{"index": 1, "params": {"empty": [], "object": {}}, "action": "old"}]
+        store.redis.set(_steps_key(session_id), json.dumps(legacy), ex=120)
+        store.redis.hset(_meta_key(session_id), "step_count", 1)
+        store.redis.hdel(_meta_key(session_id), "artifact_chars")
+        store.redis.set(_all_keys(session_id)[2], "é🙂", ex=120)
+        indices = await asyncio.gather(
+            *(
+                store.aappend_step(
+                    session_id,
+                    {
+                        "action": "search",
+                        "params": {"empty": [], "object": {}},
+                        "summary": str(i),
+                    },
+                )
+                for i in range(20)
+            )
+        )
+        assert sorted(indices) == list(range(2, 22))
+        steps = await store.aget_steps(session_id)
+        assert steps[0] == legacy[0]
+        assert [step["index"] for step in steps] == list(range(1, 22))
+        assert all(step["params"] == {"empty": [], "object": {}} for step in steps)
+        await asyncio.gather(
+            *(store.aappend_artifact(session_id, "追加🙂") for _ in range(20))
+        )
+        meta = await store.aget(session_id)
+        assert meta["artifact_length"] == 62
+        assert await store.aget_artifact(session_id) == "é🙂" + "追加🙂" * 20
+        for count in (1, 20, 100):
+            assert await store.aadd_refs(
+                session_id, {f"ref_{i}": {"markdown": "é🙂"} for i in range(count)}
+            )
+        assert len(await store.aget_refs(session_id)) == 100
+        assert all(0 < store.redis.ttl(key) <= 120 for key in _all_keys(session_id))
+        from datetime import datetime
+
+        assert (
+            datetime.fromisoformat(meta["expires_at"])
+            - datetime.fromisoformat(meta["created_at"])
+        ).total_seconds() < 125
+        await store.adelete(session_id)
+        assert not await store.aappend_artifact(session_id, "late")
+        assert not await store.aadd_refs(session_id, {"late": {}})
+        assert await store.aappend_step(session_id, {"action": "late"}) is None
+        assert not any(store.redis.exists(key) for key in _all_keys(session_id))
+    finally:
+        await store.adelete(session_id)
+        store.redis.close()

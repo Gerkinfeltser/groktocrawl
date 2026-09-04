@@ -1,39 +1,59 @@
-# ADR-0063: Offload and Batch Session Persistence
+# Bounded Nonblocking Session Persistence
 
-- **Status:** accepted
-- **Date:** 2026-09-04
+- Status: accepted
+- Deciders: GroktoCrawl maintainers
+- Date: 2026-09-04
 
 ## Context
 
-The session state machine is asynchronous, but its Valkey client is
-synchronous.  A step that stores many references therefore performs blocking
-network calls on the FastAPI event loop, and each artifact append downloads and
-rewrites all previous markdown.  Session metadata also needs an artifact
-length without changing the API's character-count semantics for Unicode.
+Synchronous Redis calls blocked the API event loop. A 20-reference step issued
+160 commands just to store refs, while artifact appends and step history rewrote
+the complete accumulated values. Moving calls into threads alone leaves an
+unbounded work queue and lets cancellation release a session lock before a
+native write completes.
 
 ## Decision
 
-Keep the synchronous `SessionStore` API for existing callers and add explicit
-async methods that run each logical storage operation in `asyncio.to_thread`.
-The asynchronous session path uses these methods exclusively, including lock
-acquisition and release.  Reference commits use one transactional pipeline
-with one TTL refresh per session key.  Artifact commits use Redis `APPEND` and
-an `artifact_chars` metadata field; the field stores Python character length,
-not Redis byte length.  Reads of sessions created before this field was added
-fall back to one artifact read, after which the next append seeds the counter.
+Use a transitional offload boundary of eight admitted operations per store.
+Drain native work before propagating cancellation and releasing session locks.
+Redis connection/read timeouts bound stalled calls. Lock-acquisition cancellation
+compares and deletes its ownership token after the pending SET completes.
 
-The existing JSON step-history key and reference hash remain unchanged for
-compatibility.  Step commits are still serialized by the existing per-session
-lock, while artifact and reference writes are atomic within their respective
-transactions.  Missing sessions return the same false/none results as the
-legacy methods, and storage errors remain visible to callers.
+Use guarded Lua commits for bulk refs, artifact append, and step append. Each
+checks session existence at commit time, refreshes all data-key TTLs together,
+and updates expiry metadata. Artifact APPEND and a character counter avoid
+transferring existing Markdown. Legacy sessions missing the counter initialize
+it atomically by counting UTF-8 leading bytes before appending.
+
+Keep existing `:steps` JSON as an immutable legacy prefix; append new raw JSON
+entries to `:step_log`. Read both in one Lua snapshot and combine in Python.
+Do not re-encode user JSON through Lua cjson, which can change empty arrays into
+objects. Step indices are assigned atomically. Delete and TTL refresh include
+the new log key. Public export and reference shapes stay unchanged.
+
+This remains an in-process execution design. Each storage operation is atomic;
+a whole research step's metadata, refs and artifact still spans operations under
+the existing step lock. Full-step atomic commit and opt-in independent step
+execution are separate work in #625.
 
 ## Consequences
 
-Async handlers no longer hold the event loop during synchronous Valkey I/O.
-Reference command count is bounded per logical commit rather than multiplied
-by the number of references, and artifact append traffic no longer scales with
-the accumulated artifact.  A worker thread is occupied for each active
-storage operation, and legacy sessions incur one migration read for artifact
-length.  Step history remains JSON for public API compatibility and can be
-migrated separately if append-only history storage becomes necessary.
+Event-loop responsiveness no longer depends on synchronous storage latency.
+Ref commits take two client round trips (TTL read and guarded bulk write),
+independent of reference count. Artifact and history writes transfer only new
+data. Full history/export reads still transfer the requested complete output.
+Cancellation may wait for an already executing write to finish; this prevents
+late writes after ownership is released. A failed step may have partial committed
+state until the full-step commit protocol is added; deletion cannot resurrect it.
+
+## Validation
+
+Delayed Redis doubles verify heartbeat responsiveness and bounded admission;
+cancellation tests verify native-write drain. A real Valkey CI contract tests
+concurrent history and Unicode appends, legacy empty-array/object preservation,
+custom TTLs, deletion and late-result rejection.
+
+## Links
+
+- [ADR-0040](0040-session-protocol.md)
+- Issues #625 and #626

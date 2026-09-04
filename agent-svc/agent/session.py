@@ -61,15 +61,26 @@ class SessionManager:
         """
         async_method = getattr(self.store, async_name, None)
         if inspect.iscoroutinefunction(async_method):
-            return await async_method(*args, **kwargs)
-        sync_method = getattr(self.store, sync_name)
-        return await asyncio.to_thread(sync_method, *args, **kwargs)
+            result = await async_method(*args, **kwargs)
+        else:
+            sync_method = getattr(self.store, sync_name)
+            result = await asyncio.to_thread(sync_method, *args, **kwargs)
+        if (sync_name == "append_step" and result is None) or (
+            sync_name == "append_artifact" and result is False
+        ):
+            raise ValueError(f"Session expired or was deleted during commit: {args[0]}")
+        return result
 
     async def _store_refs(self, session_id: str, refs: dict[str, dict]) -> bool:
         """Commit refs in one batch, retaining compatibility with test stores."""
         async_method = getattr(self.store, "aadd_refs", None)
         if inspect.iscoroutinefunction(async_method):
-            return await async_method(session_id, refs)
+            committed = await async_method(session_id, refs)
+            if not committed:
+                raise ValueError(
+                    f"Session expired or was deleted during commit: {session_id}"
+                )
+            return True
 
         # A real legacy store may have the bulk sync API even if it predates
         # the async wrappers.  Spec-less MagicMock stores do not, so preserve
