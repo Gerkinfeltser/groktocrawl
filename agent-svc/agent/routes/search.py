@@ -22,15 +22,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _raise_semantic_unavailable(exc: Exception) -> None:
-    if isinstance(exc, httpx.HTTPStatusError):
-        detail = f"Semantic service returned HTTP {exc.response.status_code}"
-    elif isinstance(exc, httpx.RequestError):
-        detail = "Semantic service is unavailable"
-    else:
-        raise exc
-    raise HTTPException(status_code=503, detail=detail) from exc
-
 @router.post("/v1/search")
 async def search_v1(request: Request, body: SearchRequest) -> dict[str, Any]:
     """Firecrawl v1-compatible search endpoint.
@@ -179,7 +170,7 @@ async def search(request: Request, body: SearchRequest) -> SearchResponse:
 
         # Vector-only mode: query Qdrant, no SearXNG
         if body.retrieval_mode == "vector":
-            from ..semantic_client import SemanticClient
+            from ..semantic_client import SEMANTIC_UNAVAILABLE, SemanticClient
 
             semantic = SemanticClient(request.app.state.semantic_url)
             try:
@@ -191,7 +182,9 @@ async def search(request: Request, body: SearchRequest) -> SearchResponse:
                     for r in vector_results
                 ]
             except (httpx.HTTPStatusError, httpx.RequestError) as exc:
-                _raise_semantic_unavailable(exc)
+                raise HTTPException(
+                    status_code=503, detail=SEMANTIC_UNAVAILABLE
+                ) from exc
             finally:
                 await semantic.close()
 

@@ -7,6 +7,8 @@ import logging
 import time
 from typing import Any
 
+import httpx
+
 from common.stage_metrics import StreamTiming
 
 from ..llm import LLMClient
@@ -338,7 +340,7 @@ async def run_search_stream(
     try:
         # ── Phase 1: Search ──────────────────────────────────────
         if retrieval_mode == "vector":
-            from ..semantic_client import SemanticClient
+            from ..semantic_client import SEMANTIC_UNAVAILABLE, SemanticClient
 
             semantic = SemanticClient(semantic_url)
             try:
@@ -347,6 +349,10 @@ async def run_search_stream(
                     {"url": r["url"], "title": r["title"], "description": ""}
                     for r in vector_results
                 ]
+            except (httpx.HTTPStatusError, httpx.RequestError):
+                # SSE headers are already sent; terminate with an error event.
+                yield {"type": "error", "content": SEMANTIC_UNAVAILABLE}
+                return
             finally:
                 await semantic.close()
 
