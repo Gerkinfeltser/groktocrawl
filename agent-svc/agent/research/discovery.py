@@ -139,7 +139,9 @@ async def _scrape_urls(
         ]
         return artifacts[: len(artifacts) - len(fresh)] + fresh
 
-    max_attempts = max_attempts or len(urls)
+    # ``0`` is a deliberate no-attempt budget. Treat only ``None`` as the
+    # default so callers can probe reuse without admitting fresh work.
+    max_attempts = len(urls) if max_attempts is None else max(0, max_attempts)
     semaphore = asyncio.Semaphore(max_concurrent)
     url_timeout = 70  # Accommodates scrape_with_fallback (20s generic + 45s browser)
 
@@ -149,35 +151,49 @@ async def _scrape_urls(
     tasks: set[asyncio.Task] = set()
     attempts = 0
 
-    while pending or tasks:
-        # Fill slots up to our budget
-        while len(tasks) < max_concurrent and pending and attempts < max_attempts:
-            url = pending.pop(0)
-            attempts += 1
-            task = asyncio.create_task(
-                _scrape_single(url, scraper, semaphore, url_timeout, scrape_options)
-            )
-            tasks.add(task)
+    try:
+        while pending or tasks:
+            # Fill slots up to our budget
+            while len(tasks) < max_concurrent and pending and attempts < max_attempts:
+                url = pending.pop(0)
+                attempts += 1
+                task = asyncio.create_task(
+                    _scrape_single(url, scraper, semaphore, url_timeout, scrape_options)
+                )
+                tasks.add(task)
 
-        if not tasks:
-            break
+            if not tasks:
+                break
 
-        # Wait for at least one task to complete
-        done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            # Wait for at least one task to complete
+            done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
-        for task in done:
-            artifact = task.result()
-            if artifact is not None:
-                artifacts.append(artifact)
-                fresh_by_key[normalize_source_url(artifact.url)] = artifact
-                if len(artifacts) >= min_sources:
-                    # Cancel remaining speculative tasks and await them so no
-                    # pending task is destroyed (or races browser cleanup).
-                    for t in tasks:
-                        t.cancel()
-                    if tasks:
-                        await asyncio.gather(*tasks, return_exceptions=True)
-                    return finalize()
+            for task in done:
+                artifact = task.result()
+                if artifact is not None:
+                    artifacts.append(artifact)
+                    fresh_by_key[normalize_source_url(artifact.url)] = artifact
+
+            # ``asyncio.wait`` may return several tasks in ``done``. Process
+            # the complete batch above before stopping, otherwise successful
+            # artifacts that raced the threshold disappear from the registry.
+            if len(artifacts) >= min_sources:
+                # Cancel remaining speculative tasks and await them so no
+                # pending task is destroyed (or races browser cleanup).
+                for t in tasks:
+                    t.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                return finalize()
+
+    finally:
+        # A caller cancellation must drain every scrape that was admitted by
+        # this helper before the cancellation escapes. Otherwise the HTTP
+        # requests continue after the research request has gone away.
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     return finalize()
 

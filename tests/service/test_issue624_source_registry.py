@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -176,6 +177,61 @@ async def test_discovery_accounts_novel_and_reused_sources_with_credit_budget():
     assert len(result["reused_sources"]) == 1
     assert len(result["source_details"]) == 2
     assert result["context"].count("Source:") == 2
+
+
+@pytest.mark.asyncio
+async def test_scrape_urls_keeps_all_successes_from_completed_batch():
+    from agent.research.discovery import _scrape_urls
+    from agent.research.sources import SourceRegistry
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    active = 0
+    scraper = MagicMock()
+
+    async def scrape(url: str, **_kwargs):
+        nonlocal active
+        active += 1
+        if active == 2:
+            started.set()
+        await release.wait()
+        return {
+            "success": True,
+            "data": {"markdown": f"content for {url}", "source": "fixture"},
+        }
+
+    scraper.scrape_with_fallback = AsyncMock(side_effect=scrape)
+    registry = SourceRegistry()
+    urls = [f"https://batch.example/{i}" for i in range(2)]
+    request = asyncio.create_task(
+        _scrape_urls(
+            urls,
+            scraper,
+            min_sources=1,
+            max_concurrent=2,
+            source_registry=registry,
+        )
+    )
+    await started.wait()
+    release.set()
+    artifacts = await request
+
+    assert {artifact.url for artifact in artifacts} == set(urls)
+    assert {artifact.url for artifact in registry.artifacts()} == set(urls)
+
+
+@pytest.mark.asyncio
+async def test_scrape_urls_zero_attempt_budget_does_not_fetch():
+    from agent.research.discovery import _scrape_urls
+
+    scraper = MagicMock()
+    scraper.scrape_with_fallback = AsyncMock()
+    artifacts = await _scrape_urls(
+        ["https://zero.example/page"], scraper, min_sources=1, max_attempts=0
+    )
+
+    assert artifacts == []
+    scraper.scrape_with_fallback.assert_not_awaited()
 
 
 def _research_clients(search_by_query: dict[str, list[dict]], markdown_by_url=None):
@@ -387,3 +443,44 @@ def test_source_identity_preserves_path_parameters():
     assert normalize_source_url("https://example.com/page;a=1") != normalize_source_url(
         "https://example.com/page;a=2"
     )
+
+
+@pytest.mark.asyncio
+async def test_scrape_urls_cancellation_drains_inflight_workers():
+    from agent.research.discovery import _scrape_urls
+    from agent.research.sources import SourceRegistry
+
+    started = 0
+    both_started = asyncio.Event()
+    cancelled: list[str] = []
+
+    async def scrape_with_fallback(url: str, **kwargs):
+        nonlocal started
+        started += 1
+        if started == 2:
+            both_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(url)
+
+    scraper = MagicMock()
+    scraper.scrape_with_fallback = scrape_with_fallback
+    task = asyncio.create_task(
+        _scrape_urls(
+            ["https://example.com/a", "https://example.com/b"],
+            scraper,
+            max_concurrent=2,
+            source_registry=SourceRegistry(),
+        )
+    )
+
+    await asyncio.wait_for(both_started.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert sorted(cancelled) == [
+        "https://example.com/a",
+        "https://example.com/b",
+    ]
