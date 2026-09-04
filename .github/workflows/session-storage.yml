@@ -1,0 +1,37 @@
+name: Session storage contract
+on:
+  pull_request:
+    paths:
+      - agent-svc/agent/session.py
+      - agent-svc/agent/session_store.py
+      - tests/service/test_session_storage_async.py
+      - .github/workflows/session-storage.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  valkey:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      valkey:
+        image: valkey/valkey:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --frozen --group dev
+      - name: Exercise real atomic storage operations
+        env:
+          SESSION_STORE_TEST_URL: redis://127.0.0.1:6379/0
+          PYTHONPATH: agent-svc:scraper-svc:.
+        run: uv run --no-sync pytest tests/service/test_session_storage_async.py --no-cov -n 0 -q

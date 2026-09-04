@@ -17,7 +17,8 @@ The session step API keeps serialized execution as its default and adds an
 explicit `parallel` opt-in with an optional stable `idempotency_key`.  Only
 search and scrape may use this mode.  They reserve a step identity and input
 revision briefly, execute remote work without the session lock, and publish
-through one guarded Redis commit.  The commit atomically appends step history,
+through one guarded Redis commit.  At most eight independent reservations are
+active per session.  The commit atomically appends step history,
 references, and artifact text, increments the session revision, refreshes TTL,
 and records the completed idempotency result.  A duplicate key returns the
 recorded result; a pending duplicate is rejected without repeating external
