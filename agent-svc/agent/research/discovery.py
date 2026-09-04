@@ -9,7 +9,12 @@ from ..metrics import METRICS
 from ..scraper_client import ScraperClient
 from ..searxng_client import SearXNGClient
 from .scoring import _filter_and_rank_urls, _is_video_platform_url
-from .sources import SourceArtifact, artifacts_to_documents_and_details
+from .sources import (
+    SourceArtifact,
+    SourceRegistry,
+    artifacts_to_documents_and_details,
+    normalize_source_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +61,9 @@ async def _scrape_single(
                     markdown=md,
                     source=result["data"].get("source", "unknown"),
                     char_count=len(md),
+                    cache_state="live",
                     fetched_at=time.time(),
+                    fetch_options=scrape_options,
                 )
             else:
                 logger.warning("Failed to scrape %s: %s", url, result.get("error"))
@@ -76,6 +83,7 @@ async def _scrape_urls(
     max_attempts: int | None = None,
     max_concurrent: int = 5,
     scrape_options: dict | None = None,
+    source_registry: SourceRegistry | None = None,
 ) -> list[SourceArtifact]:
     """Scrape URLs with bounded concurrency and return ``SourceArtifact``s.
 
@@ -87,6 +95,32 @@ async def _scrape_urls(
     coroutine is left behind.
     """
     artifacts: list[SourceArtifact] = []
+    urls_to_scrape: list[str] = []
+    seen_keys: set[str] = set()
+    for url in urls:
+        key = normalize_source_url(url)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        if source_registry is not None:
+            reused = source_registry.get(url, scrape_options)
+            if reused is not None:
+                artifacts.append(reused)
+                METRICS.counter(
+                    "fetches_deduped_total",
+                    "Total scrapes avoided by reusing already-fetched content",
+                    ["reason"],
+                ).inc({"reason": "research_registry"})
+                continue
+        urls_to_scrape.append(url)
+
+    # A compatible artifact satisfies the source quota without consuming a
+    # credit or launching speculative work. Failed attempts are intentionally
+    # absent from the registry and remain in this fresh list for retry.
+    if len(artifacts) >= min_sources or not urls_to_scrape:
+        return artifacts
+
+    urls = urls_to_scrape
     max_attempts = max_attempts or len(urls)
     semaphore = asyncio.Semaphore(max_concurrent)
     url_timeout = 70  # Accommodates scrape_with_fallback (20s generic + 45s browser)
@@ -116,6 +150,8 @@ async def _scrape_urls(
         for task in done:
             artifact = task.result()
             if artifact is not None:
+                if source_registry is not None:
+                    artifact = source_registry.register(artifact, scrape_options)
                 artifacts.append(artifact)
                 if len(artifacts) >= min_sources:
                     # Cancel remaining speculative tasks and await them so no
@@ -129,11 +165,95 @@ async def _scrape_urls(
     return artifacts
 
 
+def _dedupe_urls(urls: list[str]) -> list[str]:
+    """Keep first URL spelling while deduplicating conservative identities."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for url in urls:
+        key = normalize_source_url(url)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(url)
+    return result
+
+
+def _apply_credit_budget(
+    urls: list[str],
+    max_credits: int | None,
+    source_registry: SourceRegistry | None,
+    scrape_options: dict | None,
+) -> list[str]:
+    """Bound only novel acquisitions; compatible registry hits are free."""
+    if max_credits is None or max_credits < 0:
+        return urls
+    if source_registry is None:
+        return urls[:max_credits]
+
+    result: list[str] = []
+    novel = 0
+    for url in urls:
+        if source_registry.get(url, scrape_options) is None:
+            if novel >= max_credits:
+                continue
+            novel += 1
+        result.append(url)
+    return result
+
+
+def _discovery_result(
+    *,
+    search_results: list[dict],
+    target_urls: list[str],
+    artifacts: list[SourceArtifact],
+    source_registry: SourceRegistry | None,
+    reusable_keys: set[str],
+    pass_number: int | None = None,
+) -> dict:
+    """Project discovery with unique context and acquisition accounting."""
+    all_artifacts = (
+        source_registry.artifacts() if source_registry is not None else artifacts
+    )
+    documents, source_details = artifacts_to_documents_and_details(all_artifacts)
+    context = "\n\n---\n\n".join(documents) if documents else ""
+    novel_artifacts = [
+        artifact
+        for artifact in artifacts
+        if normalize_source_url(artifact.url) not in reusable_keys
+    ]
+    reused_artifacts = [
+        artifact
+        for artifact in artifacts
+        if normalize_source_url(artifact.url) in reusable_keys
+    ]
+    if pass_number is not None:
+        METRICS.counter(
+            "research_novel_sources_total",
+            "Successfully acquired novel sources by research pass",
+            ["pass"],
+        ).inc({"pass": str(pass_number)}, len(novel_artifacts))
+    return {
+        "search_results": search_results,
+        "target_urls": target_urls,
+        "documents": documents,
+        "source_details": source_details,
+        "context": context,
+        "artifacts": all_artifacts,
+        "new_artifacts": novel_artifacts,
+        "reused_artifacts": reused_artifacts,
+        "novel_sources": [artifact.url for artifact in novel_artifacts],
+        "reused_sources": [artifact.url for artifact in reused_artifacts],
+        "credits_used": len(novel_artifacts),
+        "fetches_deduped": len(reused_artifacts),
+    }
+
+
 async def _scrape_with_fallback(
     urls: list[str],
     scraper: ScraperClient,
     min_sources: int = 3,
     scrape_options: dict | None = None,
+    source_registry: SourceRegistry | None = None,
 ) -> list[SourceArtifact]:
     """Scrape URLs with video-platform fallback strategy.
 
@@ -152,6 +272,7 @@ async def _scrape_with_fallback(
         min_sources=min_sources,
         max_attempts=len(preferred) or 10,
         scrape_options=scrape_options,
+        source_registry=source_registry,
     )
     logger.info(
         "Scrape with fallback: %d docs from %d preferred URLs (min_sources=%d)",
@@ -168,6 +289,7 @@ async def _scrape_with_fallback(
             min_sources=remaining,
             max_attempts=remaining * 2,
             scrape_options=scrape_options,
+            source_registry=source_registry,
         )
         artifacts.extend(extra)
 
@@ -182,6 +304,8 @@ async def _run_multi_query_discover_and_scrape(
     max_searches_per_request: int = 5,
     scrape_options: dict | None = None,
     max_credits: int | None = None,
+    source_registry: SourceRegistry | None = None,
+    pass_number: int | None = None,
 ) -> dict:
     """Search multiple sub-queries, deduplicate URLs, scrape, and merge context.
 
@@ -198,9 +322,10 @@ async def _run_multi_query_discover_and_scrape(
     Returns the same dict shape as ``_run_research_discover_and_scrape()``:
         search_results, target_urls, documents, source_details, context
     """
-    target_urls = list(urls) if urls else []
+    source_registry = source_registry or SourceRegistry()
+    target_urls = _dedupe_urls(list(urls) if urls else [])
     all_search_results: list[dict] = []
-    seen_urls: set[str] = set(target_urls)
+    seen_urls: set[str] = {normalize_source_url(url) for url in target_urls}
 
     # Truncate to search budget
     budget = min(len(queries), max_searches_per_request)
@@ -238,37 +363,47 @@ async def _run_multi_query_discover_and_scrape(
             results, _health = result_tuple  # type: ignore[misc]
             for r in results:
                 url = r.get("url", "")
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
+                normalized = normalize_source_url(url)
+                if url and normalized not in seen_urls:
+                    seen_urls.add(normalized)
                     all_search_results.append(r)
                     target_urls.append(url)
 
     if not target_urls and not queries_to_run:
-        return {
-            "search_results": [],
-            "target_urls": [],
-            "documents": [],
-            "source_details": [],
-            "context": "",
-        }
+        return _discovery_result(
+            search_results=[],
+            target_urls=[],
+            artifacts=[],
+            source_registry=source_registry,
+            reusable_keys=set(),
+            pass_number=pass_number,
+        )
 
     # Score and rank URLs before scraping (F1: source pre-filtering)
-    target_urls = _filter_and_rank_urls(target_urls, max_urls=20)
-    if max_credits is not None and max_credits >= 0:
-        target_urls = target_urls[:max_credits]
-    artifacts = await _scrape_with_fallback(
-        target_urls, scraper, min_sources=3, scrape_options=scrape_options
-    )
-    documents, source_details = artifacts_to_documents_and_details(artifacts)
-    context = "\n\n---\n\n".join(documents) if documents else ""
-
-    return {
-        "search_results": all_search_results,
-        "target_urls": target_urls,
-        "documents": documents,
-        "source_details": source_details,
-        "context": context,
+    target_urls = _dedupe_urls(_filter_and_rank_urls(target_urls, max_urls=20))
+    reusable_keys = {
+        normalize_source_url(url)
+        for url in target_urls
+        if source_registry.get(url, scrape_options) is not None
     }
+    target_urls = _apply_credit_budget(
+        target_urls, max_credits, source_registry, scrape_options
+    )
+    artifacts = await _scrape_with_fallback(
+        target_urls,
+        scraper,
+        min_sources=3,
+        scrape_options=scrape_options,
+        source_registry=source_registry,
+    )
+    return _discovery_result(
+        search_results=all_search_results,
+        target_urls=target_urls,
+        artifacts=artifacts,
+        source_registry=source_registry,
+        reusable_keys=reusable_keys,
+        pass_number=pass_number,
+    )
 
 
 async def _run_research_discover_and_scrape(
@@ -279,6 +414,8 @@ async def _run_research_discover_and_scrape(
     max_searches_per_request: int = 5,
     scrape_options: dict | None = None,
     max_credits: int | None = None,
+    source_registry: SourceRegistry | None = None,
+    pass_number: int | None = None,
 ) -> dict:
     """Search → filter → scrape → context-building phase for research.
 
@@ -290,32 +427,41 @@ async def _run_research_discover_and_scrape(
     the candidate list handed to the scraper is truncated to that budget so
     discovery can never exceed the requested credit allowance.
     """
-    target_urls = list(urls) if urls else []
+    source_registry = source_registry or SourceRegistry()
+    target_urls = _dedupe_urls(list(urls) if urls else [])
     search_results: list[dict] = []
     if not target_urls:
         logger.info("No URLs provided. Searching for: %s", prompt)
         search_results, _health = await searxng.search(
             prompt, limit=10, raise_on_rate_limit=True
         )
-        target_urls = [r["url"] for r in search_results if r.get("url")]
+        target_urls = _dedupe_urls([r["url"] for r in search_results if r.get("url")])
 
     # Score and rank URLs before scraping (F1: source pre-filtering)
-    target_urls = _filter_and_rank_urls(target_urls, max_urls=20)
-    if max_credits is not None and max_credits >= 0:
-        target_urls = target_urls[:max_credits]
-    artifacts = await _scrape_with_fallback(
-        target_urls, scraper, min_sources=3, scrape_options=scrape_options
-    )
-    documents, source_details = artifacts_to_documents_and_details(artifacts)
-    context = "\n\n---\n\n".join(documents) if documents else ""
-
-    return {
-        "search_results": search_results,
-        "target_urls": target_urls,
-        "documents": documents,
-        "source_details": source_details,
-        "context": context,
+    target_urls = _dedupe_urls(_filter_and_rank_urls(target_urls, max_urls=20))
+    reusable_keys = {
+        normalize_source_url(url)
+        for url in target_urls
+        if source_registry.get(url, scrape_options) is not None
     }
+    target_urls = _apply_credit_budget(
+        target_urls, max_credits, source_registry, scrape_options
+    )
+    artifacts = await _scrape_with_fallback(
+        target_urls,
+        scraper,
+        min_sources=3,
+        scrape_options=scrape_options,
+        source_registry=source_registry,
+    )
+    return _discovery_result(
+        search_results=search_results,
+        target_urls=target_urls,
+        artifacts=artifacts,
+        source_registry=source_registry,
+        reusable_keys=reusable_keys,
+        pass_number=pass_number,
+    )
 
 
 async def _scrape_answer_sources(
