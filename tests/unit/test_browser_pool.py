@@ -250,3 +250,137 @@ async def test_fetch_tiers_uses_pool_context_and_releases_it(fake_pool, monkeypa
     assert contexts[0][1].close_calls == 1
     assert pool.process_count == 1
     await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_recycling_counts_slow_process_close_against_capacity(fake_pool):
+    browser_pool, _manager, browsers, _contexts = fake_pool
+    pool = browser_pool.BrowserPool(enabled=True, max_processes=1, max_age=0)
+    first = await pool.acquire("https://one.example/a")
+    await first.release()
+
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def delayed_close():
+        started.set()
+        await finish.wait()
+
+    browsers[0][1].close = delayed_close
+    reaper = asyncio.create_task(pool._reap_expired())
+    await started.wait()
+    assert pool.process_count == 1
+
+    pending = asyncio.create_task(pool.acquire("https://two.example/a"))
+    await asyncio.sleep(0)
+    assert not pending.done()
+    finish.set()
+    await reaper
+    second = await asyncio.wait_for(pending, timeout=1)
+    assert pool.process_count == 1
+    await second.release()
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_unhealthy_lease_retires_process_after_other_lease_finishes(fake_pool):
+    browser_pool, _manager, browsers, contexts = fake_pool
+    pool = browser_pool.BrowserPool(enabled=True, max_processes=1)
+    first = await pool.acquire("https://one.example/a")
+    second = await pool.acquire("https://one.example/b")
+
+    await first.release(healthy=False)
+    assert browsers[0][1].close_calls == 0
+    assert contexts[1][1].close_calls == 0
+    assert pool.process_count == 1
+
+    await second.release()
+    assert browsers[0][1].close_calls == 1
+    assert contexts[1][1].close_calls == 1
+    assert pool.process_count == 0
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_launch_cancellation_closes_native_browser(fake_pool):
+    browser_pool, _manager, browsers, _contexts = fake_pool
+    pool = browser_pool.BrowserPool(enabled=True)
+    context_started = asyncio.Event()
+
+    async def wait_for_context(*_args, **_kwargs):
+        context_started.set()
+        await asyncio.Future()
+
+    browser_pool.create_stealth_context = wait_for_context
+    task = asyncio.create_task(pool.acquire("https://one.example/a"))
+    await context_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert browsers[0][1].close_calls == 1
+    assert pool.process_count == 0
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_native_launch_closes_result(fake_pool):
+    browser_pool, _manager, browsers, _contexts = fake_pool
+    pool = browser_pool.BrowserPool(enabled=True)
+    launch_started = asyncio.Event()
+    release_launch = asyncio.Event()
+
+    async def delayed_launch(_playwright, url):
+        browser = _Browser(url)
+        browsers.append((url, browser))
+        launch_started.set()
+        await release_launch.wait()
+        return browser, True
+
+    browser_pool.create_stealth_browser = delayed_launch
+    task = asyncio.create_task(pool.acquire("https://one.example/a"))
+    await launch_started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release_launch.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert browsers[0][1].close_calls == 1
+    assert pool.process_count == 0
+    await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_close_waits_for_inflight_launch_and_allows_lifecycle_recreation(
+    fake_pool,
+):
+    browser_pool, manager, browsers, _contexts = fake_pool
+    pool = browser_pool.BrowserPool(enabled=True)
+    launch_started = asyncio.Event()
+    release_launch = asyncio.Event()
+
+    async def delayed_launch(_playwright, url):
+        launch_started.set()
+        await release_launch.wait()
+        browser = _Browser(url)
+        browsers.append((url, browser))
+        return browser, True
+
+    browser_pool.create_stealth_browser = delayed_launch
+    acquiring = asyncio.create_task(pool.acquire("https://one.example/a"))
+    await launch_started.wait()
+    closing = asyncio.create_task(pool.close())
+    await asyncio.sleep(0)
+    assert not closing.done()
+    release_launch.set()
+    with pytest.raises(RuntimeError, match="closed"):
+        await acquiring
+    await closing
+    assert browsers[-1][1].close_calls == 1
+    assert manager.exited
+
+    await pool.start()
+    assert pool._started
+    await pool.close()

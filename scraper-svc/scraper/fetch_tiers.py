@@ -472,11 +472,11 @@ async def _playwright_fetch_unbounded(
                         }
             finally:
                 _observe_extraction(extraction_started)
+        except BaseException:
+            # AsyncExitStack performs the resource cleanup; preserve the
+            # original exception for callers and cancellation handling.
+            raise
 
-        finally:
-            # AsyncExitStack owns either the legacy browser close or the pool
-            # lease. Keep this outer finally to preserve lifecycle scoping.
-            pass
     return None
 
 
