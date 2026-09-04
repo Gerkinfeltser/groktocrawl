@@ -5,7 +5,7 @@ and reference content under the ``session:`` key prefix.  Follows the
 same Redis/Valkey patterns as the existing ``JobStore``.
 
 Key schema (HSET for meta and refs, string for steps and artifact):
-  session:{id}:meta     → HSET {id, status, created_at, expires_at, step_count, ttl}
+  session:{id}:meta     → HSET {id, status, created_at, expires_at, step_count, ttl, artifact_chars}
   session:{id}:steps    → JSON array of step objects
   session:{id}:artifact → plain text markdown (accumulated, append-only)
   session:{id}:refs     → HSET of ref_id → JSON {url, title, char_count, markdown}
@@ -19,6 +19,7 @@ Concurrency guarantees:
 Default TTL: 1 hour (3600s).  TTL resets on every write operation.
 """
 
+import asyncio
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -72,7 +73,7 @@ class SessionStore:
     """Valkey-backed session storage with TTL-based expiry.
 
     Key schema:
-      session:{id}:meta     → HSET {id, status, created_at, expires_at, step_count, ttl}
+      session:{id}:meta     → HSET {id, status, created_at, expires_at, step_count, ttl, artifact_chars}
       session:{id}:steps    → JSON [{index, action, params, summary, timestamp, credits_used}]
       session:{id}:artifact → plain text markdown (accumulated, append-only)
       session:{id}:refs     → HSET of ref_id → JSON {url, title, markdown, scraped_at, source, char_count}
@@ -114,6 +115,9 @@ class SessionStore:
             "expires_at": _expires_iso(effective_ttl),
             "step_count": "0",  # string for HINCRBY compatibility
             "ttl": str(effective_ttl),
+            # Redis STRLEN reports bytes.  Keep a separate character count so
+            # the public API retains its existing Unicode semantics.
+            "artifact_chars": "0",
         }
         self.redis.hset(meta_key, mapping=meta_mapping)  # type: ignore[arg-type]
         self.redis.expire(meta_key, effective_ttl)
@@ -160,8 +164,15 @@ class SessionStore:
         meta["steps"] = json.loads(steps_raw) if steps_raw else []
 
         # Include artifact length for progress visibility
-        artifact_raw = self.redis.get(_artifact_key(session_id))
-        meta["artifact_length"] = len(artifact_raw) if artifact_raw else 0
+        artifact_chars = meta.get("artifact_chars")
+        if artifact_chars is not None:
+            meta["artifact_length"] = int(artifact_chars)
+        else:
+            # Existing sessions predate the counter.  This one-time fallback
+            # preserves their character-count behavior without changing the
+            # public response shape.
+            artifact_raw = self.redis.get(_artifact_key(session_id))
+            meta["artifact_length"] = len(artifact_raw) if artifact_raw else 0
 
         return meta
 
@@ -252,12 +263,183 @@ class SessionStore:
             new_artifact,
             ex=ttl,
         )
+        self.redis.hset(meta_key, "artifact_chars", len(new_artifact))
         self._refresh_ttl(session_id, ttl)
         return True
 
     def get_artifact(self, session_id: str) -> str:
         """Get the full accumulated artifact text."""
         return str(self.redis.get(_artifact_key(session_id)) or "")
+
+    # ── Async storage boundary ─────────────────────────────────
+
+    async def acreate(self, ttl: int | None = None) -> str:
+        """Create a session without running blocking Redis I/O on the loop."""
+        return await asyncio.to_thread(self.create, ttl)
+
+    async def aget(self, session_id: str) -> dict | None:
+        """Read session metadata off the event loop."""
+        return await asyncio.to_thread(self.get, session_id)
+
+    async def aupdate_meta(self, session_id: str, updates: dict) -> bool:
+        return await asyncio.to_thread(self.update_meta, session_id, updates)
+
+    async def aappend_step(self, session_id: str, step: dict) -> int | None:
+        return await asyncio.to_thread(self.append_step, session_id, step)
+
+    async def aget_steps(self, session_id: str) -> list[dict]:
+        return await asyncio.to_thread(self.get_steps, session_id)
+
+    async def aappend_artifact(self, session_id: str, content: str) -> bool:
+        """Append a section atomically and maintain a Unicode length counter.
+
+        ``APPEND`` avoids downloading and rewriting the accumulated artifact.
+        The metadata counter uses Python's character length, deliberately
+        avoiding Redis ``STRLEN`` byte semantics.  The existing sync method is
+        retained for callers outside the async session path.
+        """
+        return await asyncio.to_thread(
+            self._append_artifact_atomic, session_id, content
+        )
+
+    def _append_artifact_atomic(self, session_id: str, content: str) -> bool:
+        meta_key = _meta_key(session_id)
+        meta_raw = self.redis.hgetall(meta_key)
+        if not meta_raw:
+            return False
+        ttl = int(meta_raw.get("ttl", self.default_ttl))
+        counter_missing = meta_raw.get("artifact_chars") is None
+        previous_chars = 0
+        if counter_missing:
+            # Read once when migrating a pre-counter session.  APPEND below
+            # remains the only operation used for subsequent commits.
+            previous_chars = len(str(self.redis.get(_artifact_key(session_id)) or ""))
+
+        # A Lua commit closes the delete race between the metadata read and
+        # the append: an expired/deleted session cannot have its meta key
+        # recreated by HINCRBY.  The pipeline below remains a compatibility
+        # fallback for small Redis doubles and older clients.
+        script = """
+        if redis.call('exists', KEYS[1]) == 0 then return 0 end
+        redis.call('append', KEYS[2], ARGV[1])
+        if ARGV[3] == 'set' then
+            redis.call('hset', KEYS[1], 'artifact_chars', ARGV[2])
+        else
+            redis.call('hincrby', KEYS[1], 'artifact_chars', ARGV[2])
+        end
+        redis.call('hset', KEYS[1], 'expires_at', ARGV[4])
+        for i = 1, 4 do redis.call('expire', KEYS[i], ARGV[5]) end
+        return 1
+        """
+        try:
+            result = self.redis.eval(
+                script,
+                4,
+                meta_key,
+                _artifact_key(session_id),
+                _steps_key(session_id),
+                _refs_key(session_id),
+                content,
+                str(previous_chars + len(content) if counter_missing else len(content)),
+                "set" if counter_missing else "increment",
+                _expires_iso(ttl),
+                ttl,
+            )
+            if isinstance(result, int):
+                return bool(result)
+        except (AttributeError, TypeError, NotImplementedError):
+            pass
+
+        # Queue the append, counter, and one TTL refresh per session key in a
+        # single transaction.  The fallback is for lightweight test doubles
+        # and older Redis-compatible clients without pipeline transactions.
+        try:
+            pipe = self.redis.pipeline(transaction=True)
+        except (AttributeError, TypeError):
+            self.redis.append(_artifact_key(session_id), content)
+            if counter_missing:
+                self.redis.hset(
+                    meta_key, "artifact_chars", previous_chars + len(content)
+                )
+            else:
+                self.redis.hincrby(meta_key, "artifact_chars", len(content))
+            self._refresh_ttl(session_id, ttl)
+            return True
+
+        pipe.append(_artifact_key(session_id), content)
+        if counter_missing:
+            pipe.hset(meta_key, "artifact_chars", previous_chars + len(content))
+        else:
+            pipe.hincrby(meta_key, "artifact_chars", len(content))
+        pipe.hset(meta_key, "expires_at", _expires_iso(ttl))
+        for key in _all_keys(session_id):
+            pipe.expire(key, ttl)
+        try:
+            pipe.execute()
+        except (AttributeError, TypeError):
+            # A minimal fake may expose pipeline() but not these commands.
+            # Do not swallow connection errors, which must remain visible to
+            # callers instead of causing a second, duplicate append.
+            self.redis.append(_artifact_key(session_id), content)
+            if counter_missing:
+                self.redis.hset(
+                    meta_key, "artifact_chars", previous_chars + len(content)
+                )
+            else:
+                self.redis.hincrby(meta_key, "artifact_chars", len(content))
+            self._refresh_ttl(session_id, ttl)
+        return True
+
+    async def aget_artifact(self, session_id: str) -> str:
+        return await asyncio.to_thread(self.get_artifact, session_id)
+
+    async def aadd_ref(self, session_id: str, ref_id: str, ref_data: dict) -> bool:
+        return await self.aadd_refs(session_id, {ref_id: ref_data})
+
+    async def aadd_refs(self, session_id: str, refs: dict[str, dict]) -> bool:
+        """Commit all refs for one step in one offloaded, pipelined operation."""
+        return await asyncio.to_thread(self.add_refs, session_id, refs)
+
+    def add_refs(self, session_id: str, refs: dict[str, dict]) -> bool:
+        """Store a step's refs in bulk while refreshing its TTL once."""
+        meta_key = _meta_key(session_id)
+        meta_raw = self.redis.hgetall(meta_key)
+        if not meta_raw:
+            return False
+        if not refs:
+            return True
+        ttl = int(meta_raw.get("ttl", self.default_ttl))
+        encoded = {ref_id: json.dumps(ref_data) for ref_id, ref_data in refs.items()}
+        refs_key = _refs_key(session_id)
+
+        try:
+            pipe = self.redis.pipeline(transaction=True)
+        except (AttributeError, TypeError):
+            self.redis.hset(refs_key, mapping=encoded)
+            self.redis.hset(meta_key, "expires_at", _expires_iso(ttl))
+            self._refresh_ttl(session_id, ttl)
+            return True
+
+        pipe.hset(refs_key, mapping=encoded)
+        pipe.hset(meta_key, "expires_at", _expires_iso(ttl))
+        for key in _all_keys(session_id):
+            pipe.expire(key, ttl)
+        try:
+            pipe.execute()
+        except (AttributeError, TypeError):
+            self.redis.hset(refs_key, mapping=encoded)
+            self.redis.hset(meta_key, "expires_at", _expires_iso(ttl))
+            self._refresh_ttl(session_id, ttl)
+        return True
+
+    async def aget_ref(self, session_id: str, ref_id: str) -> dict | None:
+        return await asyncio.to_thread(self.get_ref, session_id, ref_id)
+
+    async def aget_refs(self, session_id: str) -> dict:
+        return await asyncio.to_thread(self.get_refs, session_id)
+
+    async def adelete(self, session_id: str) -> bool:
+        return await asyncio.to_thread(self.delete, session_id)
 
     # ── Reference Storage (HSET-based) ──────────────────────────
 
@@ -360,7 +542,6 @@ class SessionStore:
             ``None`` if the timeout was exceeded without acquiring
             the lock.
         """
-        import asyncio
         import time as _time
         import uuid as _uuid
 
@@ -370,7 +551,8 @@ class SessionStore:
         max_backoff = 0.05  # cap at 50ms
 
         while _time.monotonic() < deadline:
-            acquired = self.redis.set(
+            acquired = await asyncio.to_thread(
+                self.redis.set,
                 _lock_key(session_id),
                 owner_token,
                 nx=True,
@@ -405,6 +587,10 @@ class SessionStore:
         end
         """
         self.redis.eval(script, 1, lock_key, owner_token)
+
+    async def arelease_lock(self, session_id: str, owner_token: str) -> None:
+        """Release a lock without blocking the event loop."""
+        await asyncio.to_thread(self.release_lock, session_id, owner_token)
 
     def is_locked(self, session_id: str) -> bool:
         """Check whether the session lock is currently held."""

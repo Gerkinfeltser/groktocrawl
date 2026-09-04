@@ -5,6 +5,8 @@ scrape, query), export, and delete.  Each step accumulates results into
 a server-side artifact tree backed by ``SessionStore``.
 """
 
+import asyncio
+import inspect
 import logging
 from typing import Any
 
@@ -47,6 +49,37 @@ class SessionManager:
         self.store = SessionStore(redis_url=redis_url, default_ttl=default_ttl)
         self.default_ttl = default_ttl
 
+    async def _store_call(
+        self, async_name: str, sync_name: str, *args: Any, **kwargs: Any
+    ) -> Any:
+        """Call a store method without allowing sync Redis I/O on the loop.
+
+        ``SessionStore`` exposes explicit async wrappers.  The sync fallback
+        keeps lightweight fakes and older store implementations usable for
+        callers and tests while still moving their blocking work to a worker
+        thread.
+        """
+        async_method = getattr(self.store, async_name, None)
+        if inspect.iscoroutinefunction(async_method):
+            return await async_method(*args, **kwargs)
+        sync_method = getattr(self.store, sync_name)
+        return await asyncio.to_thread(sync_method, *args, **kwargs)
+
+    async def _store_refs(self, session_id: str, refs: dict[str, dict]) -> bool:
+        """Commit refs in one batch, retaining compatibility with test stores."""
+        async_method = getattr(self.store, "aadd_refs", None)
+        if inspect.iscoroutinefunction(async_method):
+            return await async_method(session_id, refs)
+
+        # A real legacy store may have the bulk sync API even if it predates
+        # the async wrappers.  Spec-less MagicMock stores do not, so preserve
+        # their observable per-ref seam for existing tests.
+        if getattr(type(self.store), "add_refs", None) is not None:
+            return await asyncio.to_thread(self.store.add_refs, session_id, refs)
+        for ref_id, ref_data in refs.items():
+            await self._store_call("aadd_ref", "add_ref", session_id, ref_id, ref_data)
+        return True
+
     # ── Lifecycle ───────────────────────────────────────────────
 
     async def create_session(self, ttl: int | None = None) -> str:
@@ -58,15 +91,15 @@ class SessionManager:
         Returns:
             The new session ID.
         """
-        return self.store.create(ttl=ttl)
+        return await self._store_call("acreate", "create", ttl=ttl)
 
     async def get_session(self, session_id: str) -> dict | None:
         """Get session metadata + step summaries (no full refs)."""
-        return self.store.get(session_id)
+        return await self._store_call("aget", "get", session_id)
 
     async def delete_session(self, session_id: str) -> bool:
         """Delete a session and all associated data."""
-        return self.store.delete(session_id)
+        return await self._store_call("adelete", "delete", session_id)
 
     # ── Step Execution ──────────────────────────────────────────
 
@@ -101,7 +134,7 @@ class SessionManager:
             action-specific result fields.  Raises ``ValueError`` for
             unknown actions or missing sessions.
         """
-        session = self.store.get(session_id)
+        session = await self._store_call("aget", "get", session_id)
         if session is None:
             raise ValueError(f"Session not found: {session_id}")
 
@@ -109,8 +142,8 @@ class SessionManager:
         # Uses async backoff so the FastAPI event loop is not blocked
         # while waiting for the lock (ADR-0040).
         # lease_ttl=120 covers long scrape steps (timeout=70s + overhead).
-        owner_token = await self.store.acquire_lock(
-            session_id, timeout=30, lease_ttl=120
+        owner_token = await self._store_call(
+            "acquire_lock", "acquire_lock", session_id, timeout=30, lease_ttl=120
         )
         if owner_token is None:
             raise ValueError(
@@ -133,7 +166,9 @@ class SessionManager:
                 llm_model=llm_model,
             )
         finally:
-            self.store.release_lock(session_id, owner_token)
+            await self._store_call(
+                "arelease_lock", "release_lock", session_id, owner_token
+            )
 
         return result
 
@@ -195,7 +230,7 @@ class SessionManager:
         ``source``, ``char_count``, and ``scraped_at``.  Returns ``None`` if
         the ref or session does not exist.
         """
-        return self.store.get_ref(session_id, ref_id)
+        return await self._store_call("aget_ref", "get_ref", session_id, ref_id)
 
     async def resolve_refs(
         self, session_id: str, ref_ids: list[str]
@@ -208,7 +243,7 @@ class SessionManager:
         """
         result: dict[str, dict] = {}
         for ref_id in ref_ids:
-            ref_data = self.store.get_ref(session_id, ref_id)
+            ref_data = await self._store_call("aget_ref", "get_ref", session_id, ref_id)
             if ref_data is not None:
                 result[ref_id] = ref_data
         return result
@@ -220,13 +255,15 @@ class SessionManager:
         (step history), ``refs`` (all reference metadata), and
         ``session_id``.
         """
-        session = self.store.get(session_id)
+        session = await self._store_call("aget", "get", session_id)
         if session is None:
             raise ValueError(f"Session not found: {session_id}")
 
-        artifact = self.store.get_artifact(session_id)
-        steps = self.store.get_steps(session_id)
-        refs = self.store.get_refs(session_id)
+        artifact, steps, refs = await asyncio.gather(
+            self._store_call("aget_artifact", "get_artifact", session_id),
+            self._store_call("aget_steps", "get_steps", session_id),
+            self._store_call("aget_refs", "get_refs", session_id),
+        )
 
         # Build a compact refs view (URLs + titles only, no full content)
         compact_refs: dict[str, dict[str, str]] = {}
@@ -274,7 +311,9 @@ class SessionManager:
         finally:
             await searxng.close()
 
-        step_index = self.store.append_step(
+        step_index = await self._store_call(
+            "aappend_step",
+            "append_step",
             session_id,
             {
                 "action": "search",
@@ -287,6 +326,7 @@ class SessionManager:
 
         # Store search results as references
         top_urls: list[dict[str, str]] = []
+        refs_to_add: dict[str, dict] = {}
         ref_count = 0
         for i, r in enumerate(results):
             url = r.get("url", "")
@@ -302,16 +342,20 @@ class SessionManager:
                 "relevance": r.get("description", ""),
                 "char_count": len(r.get("description", "")),
             }
-            self.store.add_ref(session_id, ref_id, ref_data)
             top_urls.append({"ref_id": ref_id, "url": url, "title": r.get("title", "")})
+            refs_to_add[ref_id] = ref_data
             ref_count += 1
+
+        await self._store_refs(session_id, refs_to_add)
 
         # Append search results section to artifact
         section = f"\n\n## Step {step_index}: Search — {query}\n\n"
         for r in top_urls[:10]:
             section += f"- [{r['title'] or r['url']}]({r['url']}) `{r['ref_id']}`\n"
         section += f"\n*{ref_count} results stored as references.*\n"
-        self.store.append_artifact(session_id, section)
+        await self._store_call(
+            "aappend_artifact", "append_artifact", session_id, section
+        )
 
         return {
             "step_index": step_index,
@@ -337,8 +381,6 @@ class SessionManager:
 
         scraper = ScraperClient(scraper_url)
         try:
-            import asyncio
-
             semaphore = asyncio.Semaphore(3)
             scraped: list[dict] = []
 
@@ -375,7 +417,9 @@ class SessionManager:
         finally:
             await scraper.close()
 
-        step_index = self.store.append_step(
+        step_index = await self._store_call(
+            "aappend_step",
+            "append_step",
             session_id,
             {
                 "action": "scrape",
@@ -388,6 +432,7 @@ class SessionManager:
 
         # Store scraped content as references
         refs_added: list[dict[str, str | int]] = []
+        refs_to_add: dict[str, dict] = {}
         for i, s in enumerate(scraped):
             ref_id = f"ref_{step_index}_{i + 1}"
             ref_data = {
@@ -398,10 +443,12 @@ class SessionManager:
                 "source": s.get("source", "unknown"),
                 "char_count": s["char_count"],
             }
-            self.store.add_ref(session_id, ref_id, ref_data)
+            refs_to_add[ref_id] = ref_data
             refs_added.append(
                 {"ref_id": ref_id, "url": s["url"], "char_count": s["char_count"]}
             )
+
+        await self._store_refs(session_id, refs_to_add)
 
         # Append scrape results section to artifact
         section = f"\n\n## Step {step_index}: Scrape — {len(scraped)} URLs\n\n"
@@ -416,7 +463,9 @@ class SessionManager:
                 if s["url"] == url:
                     section += s["markdown"][:500] + "...\n\n"
                     break
-        self.store.append_artifact(session_id, section)
+        await self._store_call(
+            "aappend_artifact", "append_artifact", session_id, section
+        )
 
         total_chars = sum(s["char_count"] for s in scraped)
         return {
@@ -446,8 +495,10 @@ class SessionManager:
             raise ValueError("query action requires a 'question' parameter")
 
         # Gather accumulated context
-        artifact = self.store.get_artifact(session_id)
-        refs = self.store.get_refs(session_id)
+        artifact, refs = await asyncio.gather(
+            self._store_call("aget_artifact", "get_artifact", session_id),
+            self._store_call("aget_refs", "get_refs", session_id),
+        )
 
         if not artifact and not refs:
             raise ValueError(
@@ -477,7 +528,9 @@ class SessionManager:
         finally:
             await llm.close()
 
-        step_index = self.store.append_step(
+        step_index = await self._store_call(
+            "aappend_step",
+            "append_step",
             session_id,
             {
                 "action": "query",
@@ -492,7 +545,9 @@ class SessionManager:
         section = (
             f"\n\n## Step {step_index}: Query\n\n**Q:** {question}\n\n**A:** {answer}\n"
         )
-        self.store.append_artifact(session_id, section)
+        await self._store_call(
+            "aappend_artifact", "append_artifact", session_id, section
+        )
 
         return {
             "step_index": step_index,
@@ -551,11 +606,12 @@ class SessionManager:
         max_sources = max(1, min(max_sources, 10))
 
         # 1. Find the cited source in the session's refs
-        ref_data = self.store.get_ref(session_id, ref_id)
+        ref_data = await self._store_call("aget_ref", "get_ref", session_id, ref_id)
         if ref_data is None:
+            available_refs = await self._store_call("aget_refs", "get_refs", session_id)
             raise ValueError(
                 f"Citation reference {ref_id!r} not found in session {session_id}. "
-                f"Available refs: {list(self.store.get_refs(session_id).keys())}"
+                f"Available refs: {list(available_refs.keys())}"
             )
 
         source_url = ref_data.get("url", "")
@@ -588,7 +644,7 @@ class SessionManager:
             )
 
             # Collect existing URLs to skip duplicates
-            existing_refs = self.store.get_refs(session_id)
+            existing_refs = await self._store_call("aget_refs", "get_refs", session_id)
             existing_urls: set[str] = set()
             for _, rd in existing_refs.items():
                 url = rd.get("url", "")
@@ -712,7 +768,9 @@ class SessionManager:
             )
 
         # Store findings
-        step_index = self.store.append_step(
+        step_index = await self._store_call(
+            "aappend_step",
+            "append_step",
             session_id,
             {
                 "action": "deepen",
@@ -729,6 +787,7 @@ class SessionManager:
 
         # Store new sources as refs
         new_refs: list[dict] = []
+        refs_to_add: dict[str, dict] = {}
         for i, s in enumerate(scraped):
             new_ref_id = f"ref_{step_index}_{i + 1}"
             ref_data_entry = {
@@ -739,10 +798,12 @@ class SessionManager:
                 "source": s.get("source", "unknown"),
                 "char_count": s["char_count"],
             }
-            self.store.add_ref(session_id, new_ref_id, ref_data_entry)
+            refs_to_add[new_ref_id] = ref_data_entry
             new_refs.append(
                 {"ref_id": new_ref_id, "url": s["url"], "char_count": s["char_count"]}
             )
+
+        await self._store_refs(session_id, refs_to_add)
 
         # Append deepen findings to artifact
         section = (
@@ -754,7 +815,9 @@ class SessionManager:
         for r in new_refs:
             section += f"- [{r['url']}]({r['url']}) `{r['ref_id']}` ({r['char_count']} chars)\n"
         section += "\n"
-        self.store.append_artifact(session_id, section)
+        await self._store_call(
+            "aappend_artifact", "append_artifact", session_id, section
+        )
 
         inserted_at = ref_id  # Findings are inserted after the cited source
 
