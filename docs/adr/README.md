@@ -82,4 +82,5 @@ An Architecture Decision Record captures an important architectural decision mad
 | 0055 | [Deterministic LLM Contract Fixture](0055-deterministic-llm-contract-fixture.md) | accepted |
 | 0056 | [Twin CI Evidence and Trusted Calibration](0056-twin-ci-evidence-and-calibration.md) | accepted |
 | 0057 | [Defer Recurring Mutation-Testing CI (Pilot Outcome)](0057-defer-recurring-mutation-testing-ci.md) | accepted |
+| 0061 | [Scraper Scale-Out with Bounded Capacity and Atomic Origin Pacing](0061-scraper-scaleout-capacity.md) | accepted |
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full ADR workflow: when to write an ADR, how to number it, and how to get it reviewed in a PR.

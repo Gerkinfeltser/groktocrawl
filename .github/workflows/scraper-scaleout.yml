@@ -1,0 +1,30 @@
+name: Scraper Scale-Out
+on:
+  pull_request:
+    paths:
+      - docker-compose.yml
+      - docker-compose.scaleout.yml
+      - deploy/scraper-gateway.cfg
+      - benchmarks/scraper_scaleout.py
+      - tests/fixtures/scaleout_server.py
+      - tests/fixtures/compose.scaleout.yml
+      - .github/workflows/scraper-scaleout.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  topology:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Prepare fixture-only environment
+        run: cp .env.sample .env
+      - name: Validate gateway configuration and 1/2/4 replicas
+        run: |
+          set -euo pipefail
+          python3 benchmarks/scraper_scaleout.py | tee scaleout-evidence.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: scraper-scaleout-evidence
+          path: scaleout-evidence.json
