@@ -5,7 +5,8 @@ import logging
 import re
 from typing import Any
 
-from fastapi import APIRouter, Request
+import httpx
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from ..models import (
@@ -19,6 +20,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+
+def _raise_semantic_unavailable(exc: Exception) -> None:
+    if isinstance(exc, httpx.HTTPStatusError):
+        detail = f"Semantic service returned HTTP {exc.response.status_code}"
+    elif isinstance(exc, httpx.RequestError):
+        detail = "Semantic service is unavailable"
+    else:
+        raise exc
+    raise HTTPException(status_code=503, detail=detail) from exc
 
 @router.post("/v1/search")
 async def search_v1(request: Request, body: SearchRequest) -> dict[str, Any]:
@@ -176,6 +186,8 @@ async def search(request: Request, body: SearchRequest) -> SearchResponse:
                     SearchResult(url=r["url"], title=r["title"], description="")
                     for r in vector_results
                 ]
+            except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+                _raise_semantic_unavailable(exc)
             finally:
                 await semantic.close()
 
