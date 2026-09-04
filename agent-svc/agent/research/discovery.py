@@ -3,6 +3,8 @@
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
 
 from ..barrier_guard import is_barrier_flagged, log_refusal
 from ..metrics import METRICS
@@ -17,6 +19,16 @@ from .sources import (
 )
 
 logger = logging.getLogger(__name__)
+
+ArtifactCallback = Callable[[SourceArtifact], Awaitable[None] | None]
+
+
+async def _notify_artifact(callback: ArtifactCallback | None, artifact: SourceArtifact):
+    if callback is None:
+        return
+    outcome = callback(artifact)
+    if outcome is not None:
+        await outcome
 
 
 def _rerank_artifact_flagged(artifact: SourceArtifact) -> bool:
@@ -84,6 +96,7 @@ async def _scrape_urls(
     max_concurrent: int = 5,
     scrape_options: dict | None = None,
     source_registry: SourceRegistry | None = None,
+    on_artifact: ArtifactCallback | None = None,
 ) -> list[SourceArtifact]:
     """Scrape URLs with bounded concurrency and return ``SourceArtifact``s.
 
@@ -170,6 +183,7 @@ async def _scrape_urls(
             if artifact is not None:
                 artifacts.append(artifact)
                 fresh_by_key[normalize_source_url(artifact.url)] = artifact
+                await _notify_artifact(on_artifact, artifact)
                 if len(artifacts) >= min_sources:
                     # Cancel remaining speculative tasks and await them so no
                     # pending task is destroyed (or races browser cleanup).
@@ -271,6 +285,7 @@ async def _scrape_with_fallback(
     min_sources: int = 3,
     scrape_options: dict | None = None,
     source_registry: SourceRegistry | None = None,
+    on_artifact: ArtifactCallback | None = None,
 ) -> list[SourceArtifact]:
     """Scrape URLs with video-platform fallback strategy.
 
@@ -290,6 +305,7 @@ async def _scrape_with_fallback(
         max_attempts=len(preferred) or 10,
         scrape_options=scrape_options,
         source_registry=source_registry,
+        on_artifact=on_artifact,
     )
     logger.info(
         "Scrape with fallback: %d docs from %d preferred URLs (min_sources=%d)",
@@ -307,6 +323,7 @@ async def _scrape_with_fallback(
             max_attempts=remaining * 2,
             scrape_options=scrape_options,
             source_registry=source_registry,
+            on_artifact=on_artifact,
         )
         artifacts.extend(extra)
 
@@ -323,6 +340,7 @@ async def _run_multi_query_discover_and_scrape(
     max_credits: int | None = None,
     source_registry: SourceRegistry | None = None,
     pass_number: int | None = None,
+    on_artifact: ArtifactCallback | None = None,
 ) -> dict:
     """Search multiple sub-queries, deduplicate URLs, scrape, and merge context.
 
@@ -343,48 +361,138 @@ async def _run_multi_query_discover_and_scrape(
     target_urls = _dedupe_urls(list(urls) if urls else [])
     all_search_results: list[dict] = []
     seen_urls: set[str] = {normalize_source_url(url) for url in target_urls}
+    scrape_by_key: dict[str, SourceArtifact] = {}
+    streamed_acquisition = False
 
     # Truncate to search budget
     budget = min(len(queries), max_searches_per_request)
     queries_to_run = queries[:budget]
 
     if not target_urls and queries_to_run:
+        streamed_acquisition = True
         logger.info(
             "Multi-query research: running %d search queries (budget=%d)",
             len(queries_to_run),
             max_searches_per_request,
         )
 
-        search_tasks = [
-            searxng.search(q, limit=10, raise_on_rate_limit=True)
-            for q in queries_to_run
-        ]
-        search_results_list = await asyncio.gather(
-            *search_tasks, return_exceptions=True
-        )
-        for i, (query, result_tuple) in enumerate(  # type: ignore[misc]
-            zip(queries_to_run, search_results_list, strict=False), start=1
-        ):
-            logger.info("  [%d/%d] Searching: %s", i, len(queries_to_run), query)
-            if isinstance(result_tuple, Exception):
-                from ..exceptions import RetryableRateLimitError
+        search_tasks = {
+            asyncio.create_task(
+                searxng.search(q, limit=10, raise_on_rate_limit=True)
+            ): i
+            for i, q in enumerate(queries_to_run)
+        }
+        scrape_tasks: set[asyncio.Task[SourceArtifact | None]] = set()
+        candidate_urls: list[str] = []
+        video_urls: list[str] = []
+        attempted_keys: set[str] = set()
+        ordered_results: dict[int, list[dict]] = {}
+        attempts = 0
+        max_attempts = 20 if max_credits is None else max(0, max_credits)
+        scrape_semaphore = asyncio.Semaphore(5)
 
-                if isinstance(result_tuple, RetryableRateLimitError):
-                    # A downstream capacity condition affects the whole job,
-                    # not a single query: propagate so the worker schedules a
-                    # bounded retry (ADR-0053). Other search failures degrade
-                    # gracefully as before.
-                    raise result_tuple
-                logger.warning("Search failed for %s: %s", query, result_tuple)
-                continue
-            results, _health = result_tuple  # type: ignore[misc]
-            for r in results:
-                url = r.get("url", "")
-                normalized = normalize_source_url(url)
-                if url and normalized not in seen_urls:
-                    seen_urls.add(normalized)
-                    all_search_results.append(r)
-                    target_urls.append(url)
+        async def start_candidates() -> None:
+            nonlocal attempts
+            while candidate_urls and len(scrape_tasks) < 5 and attempts < max_attempts:
+                url = candidate_urls.pop(0)
+                key = normalize_source_url(url)
+                if key in attempted_keys:
+                    continue
+                attempted_keys.add(key)
+                reused = source_registry.get(url, scrape_options)
+                if reused is not None:
+                    scrape_by_key[key] = reused
+                    continue
+                attempts += 1
+                scrape_tasks.add(
+                    asyncio.create_task(
+                        _scrape_single(
+                            url,
+                            scraper,
+                            scrape_semaphore,
+                            70,
+                            scrape_options,
+                        )
+                    )
+                )
+
+        try:
+            while search_tasks or scrape_tasks:
+                await start_candidates()
+                if not search_tasks and not scrape_tasks:
+                    break
+                wait_set = set(search_tasks) | scrape_tasks
+                done, _ = await asyncio.wait(
+                    wait_set, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    if task in search_tasks:
+                        search_task = cast(asyncio.Task[Any], task)
+                        index = search_tasks.pop(search_task)
+                        query = queries_to_run[index]
+                        logger.info(
+                            "  [%d/%d] Searching: %s",
+                            index + 1,
+                            len(queries_to_run),
+                            query,
+                        )
+                        try:
+                            results, _health = search_task.result()
+                        except Exception as exc:
+                            from ..exceptions import RetryableRateLimitError
+
+                            if isinstance(exc, RetryableRateLimitError):
+                                raise
+                            logger.warning("Search failed for %s: %s", query, exc)
+                            continue
+                        ordered_results[index] = results
+                        for result in results:
+                            url = result.get("url", "")
+                            key = normalize_source_url(url)
+                            if url and key not in seen_urls:
+                                seen_urls.add(key)
+                                if _is_video_platform_url(url):
+                                    video_urls.append(url)
+                                else:
+                                    candidate_urls.append(url)
+                    else:
+                        scrape_task = cast(asyncio.Task[SourceArtifact | None], task)
+                        scrape_tasks.remove(scrape_task)
+                        artifact = scrape_task.result()
+                        if artifact is not None:
+                            scrape_by_key[normalize_source_url(artifact.url)] = artifact
+                            await _notify_artifact(on_artifact, artifact)
+                if not search_tasks and len(scrape_by_key) < 3:
+                    candidate_urls.extend(video_urls)
+                    video_urls.clear()
+                await start_candidates()
+                # Once discovery is complete, retain only enough successful
+                # acquisitions for the final ranked evidence set.
+                if not search_tasks and len(scrape_by_key) >= 3:
+                    for task in scrape_tasks:
+                        task.cancel()
+                    if scrape_tasks:
+                        await asyncio.gather(*scrape_tasks, return_exceptions=True)
+                    scrape_tasks.clear()
+        finally:
+            remaining_tasks = set(search_tasks) | scrape_tasks
+            for task in remaining_tasks:
+                task.cancel()
+            if remaining_tasks:
+                await asyncio.gather(*remaining_tasks, return_exceptions=True)
+
+        # Reconstruct search ordering separately from completion order for the
+        # final rank and source metadata projection.
+        all_search_results = []
+        result_seen: set[str] = set()
+        for index in range(len(queries_to_run)):
+            for result in ordered_results.get(index, []):
+                url = result.get("url", "")
+                key = normalize_source_url(url)
+                if url and key not in result_seen:
+                    result_seen.add(key)
+                    all_search_results.append(result)
+        target_urls = _dedupe_urls([result["url"] for result in all_search_results])
 
     if not target_urls and not queries_to_run:
         return _discovery_result(
@@ -406,13 +514,24 @@ async def _run_multi_query_discover_and_scrape(
     target_urls = _apply_credit_budget(
         target_urls, max_credits, source_registry, scrape_options
     )
-    artifacts = await _scrape_with_fallback(
-        target_urls,
-        scraper,
-        min_sources=3,
-        scrape_options=scrape_options,
-        source_registry=source_registry,
-    )
+    if streamed_acquisition:
+        artifacts = []
+        for url in target_urls:
+            artifact = scrape_by_key.get(normalize_source_url(url))
+            if artifact is None:
+                continue
+            if source_registry.get(url, scrape_options) is None:
+                source_registry.register(artifact, scrape_options)
+            artifacts.append(artifact)
+    else:
+        artifacts = await _scrape_with_fallback(
+            target_urls,
+            scraper,
+            min_sources=3,
+            scrape_options=scrape_options,
+            source_registry=source_registry,
+            on_artifact=on_artifact,
+        )
     return _discovery_result(
         search_results=all_search_results,
         target_urls=target_urls,
@@ -433,6 +552,7 @@ async def _run_research_discover_and_scrape(
     max_credits: int | None = None,
     source_registry: SourceRegistry | None = None,
     pass_number: int | None = None,
+    on_artifact: ArtifactCallback | None = None,
 ) -> dict:
     """Search → filter → scrape → context-building phase for research.
 
@@ -470,6 +590,7 @@ async def _run_research_discover_and_scrape(
         min_sources=3,
         scrape_options=scrape_options,
         source_registry=source_registry,
+        on_artifact=on_artifact,
     )
     return _discovery_result(
         search_results=search_results,

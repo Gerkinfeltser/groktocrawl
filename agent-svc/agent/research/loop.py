@@ -1,6 +1,7 @@
 """Main research loops: run_research, run_research_stream, run_answer,
 run_answer_stream, run_extract."""
 
+import asyncio
 import logging
 import re
 import time
@@ -39,6 +40,42 @@ from .sources import (
 from .utils import _validate_json_if_schema
 
 logger = logging.getLogger(__name__)
+
+
+async def _discover_with_progress(factory):
+    """Run discovery while forwarding completed acquisitions immediately."""
+    progress: asyncio.Queue[ResearchEvent] = asyncio.Queue()
+
+    async def on_artifact(artifact: SourceArtifact) -> None:
+        await progress.put(
+            {
+                "type": "source_scraped",
+                "url": artifact.url,
+                "source": artifact.source,
+                "chars": artifact.char_count,
+            }
+        )
+
+    task = asyncio.create_task(factory(on_artifact))
+    try:
+        while not task.done():
+            event_task = asyncio.create_task(progress.get())
+            done, _ = await asyncio.wait(
+                {task, event_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if event_task in done:
+                yield event_task.result()
+            else:
+                event_task.cancel()
+                await asyncio.gather(event_task, return_exceptions=True)
+        discovered = await task
+        while not progress.empty():
+            yield progress.get_nowait()
+        yield {"type": "_discovery_complete", "result": discovered}
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 def _research_error_event(event: dict[str, Any]) -> ResearchEvent:
@@ -126,46 +163,95 @@ async def _run_research_events(
             if pass_count == 1:
                 # ── Pass 1: normal discovery ──────────────────────
                 if strategy == "deep" and len(queries) > 1:
-                    discovered = await _run_multi_query_discover_and_scrape(
-                        queries=queries,
-                        urls=urls,
-                        searxng=searxng,
-                        scraper=scraper,
-                        max_searches_per_request=max_searches_per_request,
-                        scrape_options=scrape_opts,
-                        max_credits=max_credits,
-                        source_registry=source_registry,
-                        pass_number=pass_count,
-                    )
+
+                    async def discover_pass_one_multi(
+                        on_artifact,
+                        _queries=queries,
+                        _urls=urls,
+                        _pass_count=pass_count,
+                    ):
+                        return await _run_multi_query_discover_and_scrape(
+                            queries=_queries,
+                            urls=_urls,
+                            searxng=searxng,
+                            scraper=scraper,
+                            max_searches_per_request=max_searches_per_request,
+                            scrape_options=scrape_opts,
+                            max_credits=max_credits,
+                            source_registry=source_registry,
+                            pass_number=_pass_count,
+                            on_artifact=on_artifact,
+                        )
                 else:
                     query = queries[0] if queries else prompt
-                    discovered = await _run_research_discover_and_scrape(
-                        prompt=query,
-                        urls=urls,
-                        searxng=searxng,
-                        scraper=scraper,
-                        scrape_options=scrape_opts,
-                        max_credits=max_credits,
-                        source_registry=source_registry,
-                        pass_number=pass_count,
-                    )
+
+                    async def discover_pass_one_single(
+                        on_artifact,
+                        _query=query,
+                        _urls=urls,
+                        _pass_count=pass_count,
+                    ):
+                        return await _run_research_discover_and_scrape(
+                            prompt=_query,
+                            urls=_urls,
+                            searxng=searxng,
+                            scraper=scraper,
+                            scrape_options=scrape_opts,
+                            max_credits=max_credits,
+                            source_registry=source_registry,
+                            pass_number=_pass_count,
+                            on_artifact=on_artifact,
+                        )
             else:
                 # ── Pass 2: gap-focused discovery ─────────────────
-                discovered = await _run_multi_query_discover_and_scrape(
-                    queries=gap_topics,
-                    urls=None,
-                    searxng=searxng,
-                    scraper=scraper,
-                    max_searches_per_request=min(
-                        len(gap_topics), max_searches_per_request
-                    ),
-                    scrape_options=scrape_opts,
-                    max_credits=(
-                        max_credits - credits_used if max_credits is not None else None
-                    ),
-                    source_registry=source_registry,
-                    pass_number=pass_count,
+                async def discover_pass_two(
+                    on_artifact,
+                    _gap_topics=gap_topics,
+                    _pass_count=pass_count,
+                    _credits_used=credits_used,
+                ):
+                    return await _run_multi_query_discover_and_scrape(
+                        queries=_gap_topics,
+                        urls=None,
+                        searxng=searxng,
+                        scraper=scraper,
+                        max_searches_per_request=min(
+                            len(_gap_topics), max_searches_per_request
+                        ),
+                        scrape_options=scrape_opts,
+                        max_credits=(
+                            max_credits - _credits_used
+                            if max_credits is not None
+                            else None
+                        ),
+                        source_registry=source_registry,
+                        pass_number=_pass_count,
+                        on_artifact=on_artifact,
+                    )
+
+            stream_progress = pass_count > 1 or (
+                strategy == "deep" and len(queries) > 1
+            )
+            discovery_factory = (
+                discover_pass_two
+                if pass_count > 1
+                else (
+                    discover_pass_one_multi
+                    if strategy == "deep" and len(queries) > 1
+                    else discover_pass_one_single
                 )
+            )
+            if stream_progress:
+                discovered = None
+                async for progress_event in _discover_with_progress(discovery_factory):
+                    if progress_event["type"] == "_discovery_complete":
+                        discovered = progress_event["result"]
+                    else:
+                        yield progress_event
+                if discovered is None:
+                    raise RuntimeError("Discovery ended without a result")
+            else:
+                discovered = await discovery_factory(None)
 
             context = discovered["context"]
             source_details = discovered["source_details"]
@@ -186,16 +272,14 @@ async def _run_research_events(
                 else [{"url": url, "title": "", "relevance": ""} for url in urls]
             )
             yield {"type": "sources_pending", "sources": pending_sources}
-            # A registry hit is already known to the client. Emit progress
-            # only for newly acquired artifacts so a duplicate-only pass does
-            # not replay scrape events for the same source.
-            for artifact in novel_artifacts:
-                yield {
-                    "type": "source_scraped",
-                    "url": artifact.url,
-                    "source": artifact.source,
-                    "chars": artifact.char_count,
-                }
+            if not stream_progress:
+                for artifact in novel_artifacts:
+                    yield {
+                        "type": "source_scraped",
+                        "url": artifact.url,
+                        "source": artifact.source,
+                        "chars": artifact.char_count,
+                    }
             if not context and not combined_context:
                 yield {"type": "sources", "sources": []}
                 yield {
