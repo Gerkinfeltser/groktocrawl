@@ -245,3 +245,110 @@ async def test_loop_progress_cancellation_cleans_waiter_and_discovery():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_scrape_urls_keeps_all_successes_from_completed_batch():
+    from agent.research.discovery import _scrape_urls
+
+    scraped: list[str] = []
+    callbacks: list[str] = []
+    scraper = MagicMock()
+
+    async def scrape(url: str, **_kwargs):
+        scraped.append(url)
+        await asyncio.sleep(0)
+        return {
+            "success": True,
+            "data": {"markdown": f"content for {url}", "source": "fixture"},
+        }
+
+    scraper.scrape_with_fallback = AsyncMock(side_effect=scrape)
+
+    async def on_artifact(artifact):
+        callbacks.append(artifact.url)
+
+    urls = [f"https://batch.example/{i}" for i in range(5)]
+    artifacts = await _scrape_urls(
+        urls, scraper, min_sources=3, max_concurrent=5, on_artifact=on_artifact
+    )
+
+    assert scraped == urls
+    assert {artifact.url for artifact in artifacts} == set(urls)
+    assert set(callbacks) == set(urls)
+
+
+@pytest.mark.asyncio
+async def test_scrape_urls_zero_attempt_budget_does_not_fetch():
+    from agent.research.discovery import _scrape_urls
+
+    scraper = MagicMock()
+    scraper.scrape_with_fallback = AsyncMock()
+    artifacts = await _scrape_urls(
+        ["https://zero.example/page"], scraper, min_sources=1, max_attempts=0
+    )
+
+    assert artifacts == []
+    scraper.scrape_with_fallback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_multi_query_keeps_all_successes_from_completed_scrape_batch():
+    from agent.research.discovery import _run_multi_query_discover_and_scrape
+
+    urls = [f"https://multi.example/{i}" for i in range(5)]
+    searxng = MagicMock()
+    searxng.search = AsyncMock(return_value=([_result(url) for url in urls], "healthy"))
+    scraper = MagicMock()
+
+    async def scrape(url: str, **_kwargs):
+        await asyncio.sleep(0)
+        return {
+            "success": True,
+            "data": {"markdown": f"content for {url}", "source": "fixture"},
+        }
+
+    scraper.scrape_with_fallback = AsyncMock(side_effect=scrape)
+    result = await _run_multi_query_discover_and_scrape(
+        queries=["one"], urls=None, searxng=searxng, scraper=scraper
+    )
+
+    assert {artifact.url for artifact in result["artifacts"]} == set(urls)
+
+
+@pytest.mark.asyncio
+async def test_closing_public_stream_drains_discovery_and_clients():
+    from unittest.mock import patch
+
+    from agent.research.loop import run_research_stream
+
+    from tests.service.test_issue624_source_registry import (
+        _patch_research_clients,
+        _research_clients,
+    )
+
+    clients = _research_clients({})
+    cancelled = asyncio.Event()
+
+    async def discovery(**kwargs):
+        await kwargs["on_search_results"]([{"url": "https://example.com/a"}])
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    with (
+        _patch_research_clients(*clients),
+        patch(
+            "agent.research.loop._run_multi_query_discover_and_scrape",
+            side_effect=discovery,
+        ),
+    ):
+        stream = run_research_stream(prompt="q", llm_model="fixture")
+        async for event in stream:
+            if event["type"] == "sources_pending":
+                break
+        await stream.aclose()
+    assert cancelled.is_set()
+    for client in clients:
+        client.close.assert_awaited_once()

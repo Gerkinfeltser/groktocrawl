@@ -2,6 +2,7 @@
 run_answer_stream, run_extract."""
 
 import asyncio
+import contextlib
 import logging
 import re
 import time
@@ -260,7 +261,6 @@ async def _run_research_events(
                         on_search_results=on_search_results,
                     )
 
-            stream_progress = True
             discovery_factory = (
                 discover_pass_two
                 if pass_count > 1
@@ -270,24 +270,22 @@ async def _run_research_events(
                     else discover_pass_one_single
                 )
             )
-            if stream_progress:
-                discovered = None
-                initial_pending = (
-                    [{"url": url, "title": "", "relevance": ""} for url in urls]
-                    if urls
-                    else None
-                )
-                async for progress_event in _discover_with_progress(
-                    discovery_factory, initial_pending
-                ):
+            discovered = None
+            initial_pending = (
+                [{"url": url, "title": "", "relevance": ""} for url in urls]
+                if urls and pass_count == 1
+                else None
+            )
+            async with contextlib.aclosing(
+                _discover_with_progress(discovery_factory, initial_pending)
+            ) as discovery_events:
+                async for progress_event in discovery_events:
                     if progress_event["type"] == "_discovery_complete":
                         discovered = progress_event["result"]
                     else:
                         yield progress_event
-                if discovered is None:
-                    raise RuntimeError("Discovery ended without a result")
-            else:
-                discovered = await discovery_factory(None, None)
+            if discovered is None:
+                raise RuntimeError("Discovery ended without a result")
 
             context = discovered["context"]
             source_details = discovered["source_details"]
@@ -446,36 +444,39 @@ async def run_research(
     search_type: str = "deep",
 ) -> dict:
     """Consume the canonical research event stream and return its terminal result."""
-    async for event in _run_research_events(
-        prompt,
-        urls,
-        schema,
-        searxng_url,
-        scraper_url,
-        llm_base_url,
-        llm_api_key,
-        llm_model,
-        requested_model,
-        max_searches_per_request,
-        max_credits,
-        include_images,
-        citation_style,
-        search_type,
-    ):
-        if event["type"] == "done":
-            result = event["result"]
-            if not event["sources"] and result == (
-                "I was unable to find or scrape any relevant web pages."
-            ):
-                result = (
-                    "I was unable to find or scrape any relevant web pages "
-                    "to answer your question."
-                )
-            return {
-                "result": result,
-                "sources": event["sources"],
-                "source_details": event["source_details"],
-            }
+    async with contextlib.aclosing(
+        _run_research_events(
+            prompt,
+            urls,
+            schema,
+            searxng_url,
+            scraper_url,
+            llm_base_url,
+            llm_api_key,
+            llm_model,
+            requested_model,
+            max_searches_per_request,
+            max_credits,
+            include_images,
+            citation_style,
+            search_type,
+        )
+    ) as research_events:
+        async for event in research_events:
+            if event["type"] == "done":
+                result = event["result"]
+                if not event["sources"] and result == (
+                    "I was unable to find or scrape any relevant web pages."
+                ):
+                    result = (
+                        "I was unable to find or scrape any relevant web pages "
+                        "to answer your question."
+                    )
+                return {
+                    "result": result,
+                    "sources": event["sources"],
+                    "source_details": event["source_details"],
+                }
     raise RuntimeError("Research event engine ended without a terminal done event")
 
 
@@ -496,24 +497,27 @@ async def run_research_stream(
     search_type: str = "deep",
 ) -> AsyncGenerator[ResearchEvent, None]:
     """Expose events from the canonical research engine for SSE adaptation."""
-    async for event in _run_research_events(
-        prompt,
-        urls,
-        schema,
-        searxng_url,
-        scraper_url,
-        llm_base_url,
-        llm_api_key,
-        llm_model,
-        requested_model,
-        max_searches_per_request,
-        max_credits,
-        include_images,
-        citation_style,
-        search_type,
-        stream_tokens=True,
-    ):
-        yield event
+    async with contextlib.aclosing(
+        _run_research_events(
+            prompt,
+            urls,
+            schema,
+            searxng_url,
+            scraper_url,
+            llm_base_url,
+            llm_api_key,
+            llm_model,
+            requested_model,
+            max_searches_per_request,
+            max_credits,
+            include_images,
+            citation_style,
+            search_type,
+            stream_tokens=True,
+        )
+    ) as research_events:
+        async for event in research_events:
+            yield event
 
 
 async def run_extract(

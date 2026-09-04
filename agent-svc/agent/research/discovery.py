@@ -161,7 +161,7 @@ async def _scrape_urls(
         ]
         return artifacts[: len(artifacts) - len(fresh)] + fresh
 
-    max_attempts = max_attempts or len(urls)
+    max_attempts = len(urls) if max_attempts is None else max(0, max_attempts)
     semaphore = asyncio.Semaphore(max_concurrent)
     url_timeout = 70  # Accommodates scrape_with_fallback (20s generic + 45s browser)
 
@@ -171,36 +171,46 @@ async def _scrape_urls(
     tasks: set[asyncio.Task] = set()
     attempts = 0
 
-    while pending or tasks:
-        # Fill slots up to our budget
-        while len(tasks) < max_concurrent and pending and attempts < max_attempts:
-            url = pending.pop(0)
-            attempts += 1
-            task = asyncio.create_task(
-                _scrape_single(url, scraper, semaphore, url_timeout, scrape_options)
-            )
-            tasks.add(task)
+    try:
+        while pending or tasks:
+            # Fill slots up to our budget
+            while len(tasks) < max_concurrent and pending and attempts < max_attempts:
+                url = pending.pop(0)
+                attempts += 1
+                task = asyncio.create_task(
+                    _scrape_single(url, scraper, semaphore, url_timeout, scrape_options)
+                )
+                tasks.add(task)
 
-        if not tasks:
-            break
+            if not tasks:
+                break
 
-        # Wait for at least one task to complete
-        done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            # Wait for at least one task to complete
+            done, tasks = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
-        for task in done:
-            artifact = task.result()
-            if artifact is not None:
-                artifacts.append(artifact)
-                fresh_by_key[normalize_source_url(artifact.url)] = artifact
-                await _notify_artifact(on_artifact, artifact)
-                if len(artifacts) >= min_sources:
-                    # Cancel remaining speculative tasks and await them so no
-                    # pending task is destroyed (or races browser cleanup).
-                    for t in tasks:
-                        t.cancel()
-                    if tasks:
-                        await asyncio.gather(*tasks, return_exceptions=True)
-                    return finalize()
+            for task in done:
+                artifact = task.result()
+                if artifact is not None:
+                    artifacts.append(artifact)
+                    fresh_by_key[normalize_source_url(artifact.url)] = artifact
+                    await _notify_artifact(on_artifact, artifact)
+
+            if len(artifacts) >= min_sources:
+                # Process every task in this completed batch before stopping.
+                # ``asyncio.wait`` may return several successful tasks together;
+                # returning from inside the loop would lose already-fetched
+                # artifacts, callbacks, and their accounting.
+                for t in tasks:
+                    t.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                return finalize()
+
+    finally:
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     return finalize()
 
@@ -399,14 +409,22 @@ async def _run_multi_query_discover_and_scrape(
         attempted_keys: set[str] = set()
         ordered_results: dict[int, list[dict]] = {}
         attempts = 0
-        max_attempts = 20 if max_credits is None else max(0, max_credits)
+        max_attempts = 20 if max_credits is None else min(20, max(0, max_credits))
         scrape_semaphore = asyncio.Semaphore(5)
-        admission_candidates: list[str] = []
         admitted_query = 0
 
         async def start_candidates() -> None:
             nonlocal attempts
-            while candidate_urls and len(scrape_tasks) < 5 and attempts < max_attempts:
+            while (
+                candidate_urls
+                and len(scrape_tasks) < 5
+                and attempts < max_attempts
+                and sum(
+                    source_registry.get(a.url, scrape_options) is None
+                    for a in scrape_by_key.values()
+                )
+                < 3
+            ):
                 url = candidate_urls.pop(0)
                 key = normalize_source_url(url)
                 if key in attempted_keys:
@@ -430,13 +448,6 @@ async def _run_multi_query_discover_and_scrape(
                         )
                     )
                 )
-
-        def refresh_candidates() -> None:
-            """Rank only the resolved query prefix before admitting fetches."""
-            ranked = _filter_and_rank_urls(admission_candidates, max_urls=20)
-            candidate_urls[:] = [
-                url for url in ranked if normalize_source_url(url) not in attempted_keys
-            ]
 
         try:
             while search_tasks or scrape_tasks:
@@ -478,17 +489,26 @@ async def _run_multi_query_discover_and_scrape(
                         # prevents a late high-ranked query from being crowded
                         # out by an earlier completion.
                         while admitted_query in ordered_results:
-                            for result in ordered_results[admitted_query]:
-                                url = result.get("url", "")
+                            # Freeze each query's ranked batch in plan order.
+                            # Re-ranking the whole prefix would make credit
+                            # admission depend on which tasks finish together.
+                            batch = _filter_and_rank_urls(
+                                [
+                                    r.get("url", "")
+                                    for r in ordered_results[admitted_query]
+                                    if r.get("url")
+                                ],
+                                max_urls=20,
+                            )
+                            for url in batch:
                                 key = normalize_source_url(url)
                                 if url and key not in seen_urls:
                                     seen_urls.add(key)
                                     if not _is_video_platform_url(url):
-                                        admission_candidates.append(url)
+                                        candidate_urls.append(url)
                                     else:
                                         video_urls.append(url)
                             admitted_query += 1
-                        refresh_candidates()
                     else:
                         scrape_task = cast(asyncio.Task[SourceArtifact | None], task)
                         scrape_tasks.remove(scrape_task)
@@ -510,7 +530,13 @@ async def _run_multi_query_discover_and_scrape(
                 await start_candidates()
                 # Once discovery is complete, retain only enough successful
                 # acquisitions for the final ranked evidence set.
-                if not search_tasks and len(scrape_by_key) >= 3:
+                if (
+                    sum(
+                        source_registry.get(a.url, scrape_options) is None
+                        for a in scrape_by_key.values()
+                    )
+                    >= 3
+                ):
                     for task in scrape_tasks:
                         task.cancel()
                     if scrape_tasks:

@@ -11,21 +11,33 @@ That barrier delayed the first useful source when one query was slow.
 
 ## Decision
 
-Run a bounded producer/consumer acquisition loop. As each search task completes,
-its unique candidates may enter the bounded scrape set while other searches are
-still running. Search results and final artifacts are reconstructed in query
-order and then passed through the existing deterministic ranking and credit
-budget rules. A source callback forwards successful acquisitions to the
-research event loop immediately. Failures degrade as before, retryable rate
-limits propagate, and cancellation awaits all search and scrape tasks.
+Run a bounded producer/consumer acquisition loop. Searches run concurrently;
+acquisition admits a contiguous resolved prefix of the planned query order.
+Each query's candidates are filtered and ranked before entering the queue, and
+that batch order is frozen. A fast later query cannot consume credits before
+an earlier query resolves. The first resolved query can begin fetching while
+later queries are pending. A slow first query remains a deliberate admission
+barrier for deterministic budget allocation.
+
+At most five scrapes run at once, with at most twenty novel attempts or the
+remaining credit budget, whichever is smaller. Stop speculative acquisition
+when three novel sources succeed; reusable artifacts do not crowd out new gap
+evidence. Keep successful admitted artifacts in final ranked source order.
+This prioritizes planned query batches for admission over a global ranking
+that would require waiting for all searches. Final ordering remains ranked;
+coverage and domain mix require evaluation when changing query plans.
+
+Callbacks publish pending search results before corresponding scrape events.
+All public generator adapters close nested discovery iterators explicitly;
+cancellation drains both searches, scrapes, and queue waiters. Partial search
+failure degrades to healthy results; retryable capacity errors propagate.
 
 ## Consequences
 
-The first source can be acquired before the full discovery fan-out completes,
-reducing time to useful evidence. A small bounded amount of speculative work
-may be discarded when later ranking changes the selected evidence set. Fresh
-contexts and the request-scoped source registry continue to prevent duplicate
-or incompatible reuse.
+The first source can arrive before the full search fan-out finishes, without
+an unbounded prefetch budget or completion-order credit allocation. Final
+synthesis sees stable assembled context; progress reflects actual fetch
+completion. The existing registry preserves artifact compatibility and reuse.
 
 ## Alternatives considered
 

@@ -112,7 +112,7 @@ class TestRunResearchMaxCredits:
         assert result["result"] == "answer [1]"
         # Unchanged default behavior: discovery fills its min_sources quota
         # (plus speculative in-flight scrapes), never fewer.
-        assert len(result["source_details"]) == 3
+        assert len(result["source_details"]) >= 3
         assert len(scraper.scrape_with_fallback.call_args_list) >= 3
 
 
