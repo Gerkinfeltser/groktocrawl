@@ -164,3 +164,33 @@ async def test_concurrent_work_never_exceeds_configured_native_capacity() -> Non
     assert len(results) == 4
     assert max_active == 2
     await _close(manager)
+
+
+@pytest.mark.asyncio
+async def test_worker_cancellation_drains_native_call_before_releasing_capacity() -> (
+    None
+):
+    manager = InferenceManager(max_workers=1, queue_size=0, admission_timeout=0.01)
+    started = threading.Event()
+    release = threading.Event()
+
+    def delayed() -> str:
+        started.set()
+        assert release.wait(1.0)
+        return "drained"
+
+    caller = asyncio.create_task(manager.run("rerank", delayed))
+    await _wait_for_thread_event(started)
+    worker = manager._workers[0]
+    worker.cancel()
+    await asyncio.sleep(0.01)
+    assert manager._in_flight == 1
+    with pytest.raises(InferenceOverloaded):
+        await manager.run("embed", lambda: "blocked")
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await worker
+    assert await caller == "drained"
+    assert manager._in_flight == 0
+    await _close(manager)
