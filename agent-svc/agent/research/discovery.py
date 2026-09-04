@@ -114,11 +114,11 @@ async def _scrape_urls(
                 continue
         urls_to_scrape.append(url)
 
-    # A compatible artifact satisfies the source quota without consuming a
-    # credit or launching speculative work. Failed attempts are intentionally
-    # absent from the registry and remain in this fresh list for retry.
-    if len(artifacts) >= min_sources or not urls_to_scrape:
+    # Reused evidence remains free, but must not crowd novel gap results out
+    # of the fresh acquisition quota. A duplicate-only pass launches no work.
+    if not urls_to_scrape:
         return artifacts
+    min_sources += len(artifacts)
 
     urls = urls_to_scrape
     fresh_by_key: dict[str, SourceArtifact] = {}

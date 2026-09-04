@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlsplit, urlunsplit
 
 from common.url import extract_domain
 
@@ -73,46 +73,20 @@ class SourceArtifact:
 
 
 def normalize_source_url(url: str) -> str:
-    """Return a conservative identity key for a request-scoped source.
-
-    Only URL spelling that cannot identify a different resource is folded:
-    scheme and host case, default ports, fragments, and an empty path. Query
-    strings (including their order and case) and path spelling are retained
-    because either can be significant to a resource. Invalid or relative URLs
-    are returned trimmed rather than guessed at.
-    """
+    """Fold transport-equivalent spelling without changing resource identity."""
     raw = url.strip()
-    if not raw:
-        return raw
     try:
-        parsed = urlparse(raw)
-        host = parsed.hostname
-        if not host or not parsed.scheme:
+        parsed = urlsplit(raw)
+        host, port = parsed.hostname, parsed.port
+        if not host or not parsed.scheme or parsed.username or parsed.password:
             return raw
-        port = parsed.port
+        scheme = parsed.scheme.lower()
+        netloc = f"[{host.lower()}]" if ":" in host else host.lower()
+        if port is not None and (scheme, port) not in {("http", 80), ("https", 443)}:
+            netloc += f":{port}"
+        return urlunsplit((scheme, netloc, parsed.path or "/", parsed.query, ""))
     except ValueError:
         return raw
-
-    scheme = parsed.scheme.lower()
-    host = host.lower()
-    if parsed.username or parsed.password:
-        # Credentials are unusual for search results. Preserve the complete
-        # spelling rather than accidentally treating two authenticated URLs as
-        # the same source.
-        return raw
-    if (
-        port is None
-        or (scheme == "http" and port == 80)
-        or (scheme == "https" and port == 443)
-    ):
-        netloc = f"[{host}]" if ":" in host else host
-    else:
-        netloc = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
-    path = parsed.path or "/"
-    result = f"{scheme}://{netloc}{path}"
-    if parsed.query:
-        result += f"?{parsed.query}"
-    return result
 
 
 def _options_fingerprint(

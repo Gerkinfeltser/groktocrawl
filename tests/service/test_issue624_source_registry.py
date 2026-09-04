@@ -362,3 +362,28 @@ async def test_two_pass_schema_and_streaming_preserve_single_synthesis_on_duplic
     assert len(scraper.calls) == 3
     assert llm.generate.await_count == 1
     assert events[-1]["type"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_reused_evidence_does_not_crowd_out_novel_gap_sources():
+    from agent.research.discovery import _scrape_urls
+    from agent.research.sources import SourceArtifact, SourceRegistry
+
+    registry = SourceRegistry()
+    old = [f"https://example.com/old{i}" for i in range(3)]
+    for url in old:
+        registry.register(SourceArtifact(url=url, markdown="old evidence"))
+    scraper = _scraper_for({})
+    fresh = "https://example.com/gap"
+    artifacts = await _scrape_urls([*old, fresh], scraper, source_registry=registry)
+    assert [url for url, _ in scraper.calls] == [fresh]
+    assert len(artifacts) == 4
+    assert len(registry.artifacts()) == 4
+
+
+def test_source_identity_preserves_path_parameters():
+    from agent.research.sources import normalize_source_url
+
+    assert normalize_source_url("https://example.com/page;a=1") != normalize_source_url(
+        "https://example.com/page;a=2"
+    )
