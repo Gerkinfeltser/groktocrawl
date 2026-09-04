@@ -6,8 +6,13 @@ a server-side artifact tree backed by ``SessionStore``.
 """
 
 import asyncio
+import hashlib
 import inspect
+import json
 import logging
+import uuid
+from contextlib import suppress
+from datetime import UTC, datetime
 from typing import Any
 
 from .barrier_guard import is_barrier_flagged, log_refusal
@@ -40,6 +45,9 @@ class SessionManager:
     accumulation.  Uses the existing search, scrape, and LLM
     pipeline functions.
     """
+
+    _SERIAL_LOCK_LEASE_TTL = 120
+    _SERIAL_LOCK_RENEW_INTERVAL = 30
 
     def __init__(
         self,
@@ -91,6 +99,45 @@ class SessionManager:
             await self._store_call("aadd_ref", "add_ref", session_id, ref_id, ref_data)
         return True
 
+    async def _renew_serial_lock(self, session_id: str, owner_token: str) -> None:
+        """Keep a serialized step's lock live while remote work is pending."""
+        while True:
+            await asyncio.sleep(self._SERIAL_LOCK_RENEW_INTERVAL)
+            renewed = await self._store_call(
+                "arenew_lock",
+                "renew_lock",
+                session_id,
+                owner_token,
+                self._SERIAL_LOCK_LEASE_TTL,
+            )
+            if not renewed:
+                logger.warning(
+                    "lost session lock lease before step completion: %s", session_id
+                )
+                return
+
+    @staticmethod
+    async def _stop_lock_heartbeat(heartbeat: asyncio.Task[None]) -> None:
+        """Cancel and await renewal before releasing the matching lease."""
+        heartbeat.cancel()
+        with suppress(asyncio.CancelledError):
+            await heartbeat
+
+    async def _release_pending_reservation(
+        self, session_id: str, reservation: dict
+    ) -> None:
+        """Drain an ownership-checked release despite repeated cancellation."""
+        release = asyncio.create_task(
+            self._store_call("arelease_step", "release_step", session_id, reservation)
+        )
+        while not release.done():
+            try:
+                await asyncio.shield(release)
+            except asyncio.CancelledError:
+                continue
+        if not release.cancelled():
+            release.result()
+
     # ── Lifecycle ───────────────────────────────────────────────
 
     async def create_session(self, ttl: int | None = None) -> str:
@@ -124,6 +171,8 @@ class SessionManager:
         llm_base_url: str = "https://api.openai.com/v1",
         llm_api_key: str = "",
         llm_model: str | None = None,
+        parallel: bool = False,
+        idempotency_key: str | None = None,
     ) -> dict:
         """Execute a step action and accumulate results into the session.
 
@@ -149,23 +198,123 @@ class SessionManager:
         if session is None:
             raise ValueError(f"Session not found: {session_id}")
 
+        if "parallel" in params or "idempotency_key" in params:
+            raise ValueError(
+                "parallel and idempotency_key must be provided as top-level fields"
+            )
+        if parallel and action not in {"search", "scrape"}:
+            raise ValueError("parallel is only supported for search and scrape actions")
+
+        if parallel and action in {"search", "scrape"}:
+            if llm_model is None:
+                raise ValueError("llm_model is required — set via LLM_MODEL env var")
+            request_key = idempotency_key or str(uuid.uuid4())
+            request_fingerprint = hashlib.sha256(
+                json.dumps(
+                    {"action": action, "params": params},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode()
+            ).hexdigest()
+            reserve_args = (session_id, request_key, 120)
+            reservation_task = asyncio.create_task(
+                self._store_call(
+                    "areserve_step",
+                    "reserve_step",
+                    *reserve_args,
+                    request_fingerprint=request_fingerprint,
+                )
+            )
+            try:
+                reservation = await asyncio.shield(reservation_task)
+            except asyncio.CancelledError:
+                while not reservation_task.done():
+                    try:
+                        await asyncio.shield(reservation_task)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if reservation_task.done() and not reservation_task.cancelled():
+                    reservation = (
+                        None
+                        if reservation_task.exception()
+                        else reservation_task.result()
+                    )
+                else:
+                    reservation = None
+                if reservation and reservation.get("acquired", False):
+                    reservation["idempotency_key"] = request_key
+                    await self._release_pending_reservation(session_id, reservation)
+                raise
+            if reservation is None:
+                raise ValueError(f"Session not found: {session_id}")
+            reservation["idempotency_key"] = request_key
+            if reservation.get("status") == "conflict":
+                raise ValueError(
+                    "Idempotency key conflicts with a different session step"
+                )
+            if reservation.get("status") == "committed":
+                return reservation["result"]
+            if not reservation.get("acquired", False):
+                raise ValueError(
+                    f"Session {session_id} is currently executing another step. "
+                    "Retry in a moment."
+                )
+            try:
+                return await self._execute_step(
+                    session_id=session_id,
+                    action=action,
+                    params=params,
+                    searxng_url=searxng_url,
+                    scraper_url=scraper_url,
+                    llm_base_url=llm_base_url,
+                    llm_api_key=llm_api_key,
+                    llm_model=llm_model,
+                    parallel_context=reservation,
+                )
+            except BaseException:
+                await self._release_pending_reservation(session_id, reservation)
+                raise
+
         # Acquire per-session lock for concurrent step serialisation.
         # Uses async backoff so the FastAPI event loop is not blocked
         # while waiting for the lock (ADR-0040).
         # lease_ttl=120 covers long scrape steps (timeout=70s + overhead).
         owner_token = await self._store_call(
-            "acquire_lock", "acquire_lock", session_id, timeout=30, lease_ttl=120
+            "acquire_lock",
+            "acquire_lock",
+            session_id,
+            timeout=30,
+            lease_ttl=self._SERIAL_LOCK_LEASE_TTL,
         )
         if owner_token is None:
             raise ValueError(
                 f"Session {session_id} is currently executing another step. "
                 "Retry in a moment."
             )
-
-        if llm_model is None:
-            raise ValueError("llm_model is required — set via LLM_MODEL env var")
-
+        owner_context = self.store.set_lock_owner(owner_token)
+        heartbeat = asyncio.create_task(
+            self._renew_serial_lock(session_id, owner_token)
+        )
         try:
+            pending_method = getattr(self.store, "ahas_pending_steps", None)
+            if pending_method is not None and action in {
+                "search",
+                "scrape",
+                "query",
+                "deepen",
+            }:
+                if await self._store_call(
+                    "ahas_pending_steps", "has_pending_steps", session_id
+                ):
+                    raise ValueError(
+                        f"Session {session_id} has pending independent steps. "
+                        "Retry in a moment."
+                    )
+            if llm_model is None:
+                raise ValueError("llm_model is required — set via LLM_MODEL env var")
             result = await self._execute_step(
                 session_id=session_id,
                 action=action,
@@ -177,6 +326,8 @@ class SessionManager:
                 llm_model=llm_model,
             )
         finally:
+            await self._stop_lock_heartbeat(heartbeat)
+            self.store.reset_lock_owner(owner_context)
             await self._store_call(
                 "arelease_lock", "release_lock", session_id, owner_token
             )
@@ -193,6 +344,7 @@ class SessionManager:
         llm_base_url: str = "https://api.openai.com/v1",
         llm_api_key: str = "",
         llm_model: str | None = None,
+        parallel_context: dict | None = None,
     ) -> dict:
         """Internal dispatch for step actions (called under lock)."""
         if llm_model is None:
@@ -202,12 +354,14 @@ class SessionManager:
                 session_id=session_id,
                 params=params,
                 searxng_url=searxng_url,
+                parallel_context=parallel_context,
             )
         elif action == "scrape":
             result = await self._step_scrape(
                 session_id=session_id,
                 params=params,
                 scraper_url=scraper_url,
+                parallel_context=parallel_context,
             )
         elif action == "query":
             result = await self._step_query(
@@ -266,15 +420,26 @@ class SessionManager:
         (step history), ``refs`` (all reference metadata), and
         ``session_id``.
         """
-        session = await self._store_call("aget", "get", session_id)
-        if session is None:
-            raise ValueError(f"Session not found: {session_id}")
-
-        artifact, steps, refs = await asyncio.gather(
-            self._store_call("aget_artifact", "get_artifact", session_id),
-            self._store_call("aget_steps", "get_steps", session_id),
-            self._store_call("aget_refs", "get_refs", session_id),
-        )
+        snapshot_method = getattr(self.store, "aexport_snapshot", None)
+        if snapshot_method is not None:
+            snapshot = await self._store_call(
+                "aexport_snapshot", "export_snapshot", session_id
+            )
+            if snapshot is None:
+                raise ValueError(f"Session not found: {session_id}")
+            session = snapshot["session"]
+            artifact = snapshot["artifact"]
+            steps = snapshot["steps"]
+            refs = snapshot["refs"]
+        else:
+            session = await self._store_call("aget", "get", session_id)
+            if session is None:
+                raise ValueError(f"Session not found: {session_id}")
+            artifact, steps, refs = await asyncio.gather(
+                self._store_call("aget_artifact", "get_artifact", session_id),
+                self._store_call("aget_steps", "get_steps", session_id),
+                self._store_call("aget_refs", "get_refs", session_id),
+            )
 
         # Build a compact refs view (URLs + titles only, no full content)
         compact_refs: dict[str, dict[str, str]] = {}
@@ -301,6 +466,7 @@ class SessionManager:
         session_id: str,
         params: dict[str, Any],
         searxng_url: str,
+        parallel_context: dict | None = None,
     ) -> dict:
         """Execute a search step: SearXNG → store results as refs."""
         query = params.get("query", "")
@@ -322,18 +488,21 @@ class SessionManager:
         finally:
             await searxng.close()
 
-        step_index = await self._store_call(
-            "aappend_step",
-            "append_step",
-            session_id,
-            {
-                "action": "search",
-                "params": {"query": query, "limit": limit},
-                "summary": f"Search: {query} ({len(results)} results)",
-            },
-        )
-        if step_index is None:
-            raise ValueError(f"Session not found: {session_id}")
+        step_data = {
+            "action": "search",
+            "params": {"query": query, "limit": limit},
+            "summary": f"Search: {query} ({len(results)} results)",
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+        if parallel_context is None:
+            step_index = await self._store_call(
+                "aappend_step", "append_step", session_id, step_data
+            )
+            if step_index is None:
+                raise ValueError(f"Session not found: {session_id}")
+        else:
+            step_index = parallel_context["index"]
+            step_data["index"] = step_index
 
         # Store search results as references
         top_urls: list[dict[str, str]] = []
@@ -357,18 +526,12 @@ class SessionManager:
             refs_to_add[ref_id] = ref_data
             ref_count += 1
 
-        await self._store_refs(session_id, refs_to_add)
-
         # Append search results section to artifact
         section = f"\n\n## Step {step_index}: Search — {query}\n\n"
         for r in top_urls[:10]:
             section += f"- [{r['title'] or r['url']}]({r['url']}) `{r['ref_id']}`\n"
         section += f"\n*{ref_count} results stored as references.*\n"
-        await self._store_call(
-            "aappend_artifact", "append_artifact", session_id, section
-        )
-
-        return {
+        result = {
             "step_index": step_index,
             "action": "search",
             "query": query,
@@ -376,12 +539,32 @@ class SessionManager:
             "top_refs": top_urls[:10],
             "summary": f"Search '{query}' returned {ref_count} results, stored as refs {step_index}_1 through {step_index}_{ref_count}",
         }
+        if parallel_context is not None:
+            committed = await self._store_call(
+                "acommit_step",
+                "commit_step",
+                session_id,
+                parallel_context,
+                step_data,
+                refs_to_add,
+                section,
+                result,
+            )
+            if committed is None:
+                raise ValueError(f"Session {session_id} changed or was deleted")
+            return committed
+        await self._store_refs(session_id, refs_to_add)
+        await self._store_call(
+            "aappend_artifact", "append_artifact", session_id, section
+        )
+        return result
 
     async def _step_scrape(
         self,
         session_id: str,
         params: dict[str, Any],
         scraper_url: str,
+        parallel_context: dict | None = None,
     ) -> dict:
         """Execute a scrape step: fetch URLs → store content as refs."""
         urls = params.get("urls", [])
@@ -428,18 +611,21 @@ class SessionManager:
         finally:
             await scraper.close()
 
-        step_index = await self._store_call(
-            "aappend_step",
-            "append_step",
-            session_id,
-            {
-                "action": "scrape",
-                "params": {"urls": urls},
-                "summary": f"Scrape: {len(scraped)}/{len(urls)} URLs succeeded",
-            },
-        )
-        if step_index is None:
-            raise ValueError(f"Session not found: {session_id}")
+        step_data = {
+            "action": "scrape",
+            "params": {"urls": urls},
+            "summary": f"Scrape: {len(scraped)}/{len(urls)} URLs succeeded",
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+        if parallel_context is None:
+            step_index = await self._store_call(
+                "aappend_step", "append_step", session_id, step_data
+            )
+            if step_index is None:
+                raise ValueError(f"Session not found: {session_id}")
+        else:
+            step_index = parallel_context["index"]
+            step_data["index"] = step_index
 
         # Store scraped content as references
         refs_added: list[dict[str, str | int]] = []
@@ -459,8 +645,6 @@ class SessionManager:
                 {"ref_id": ref_id, "url": s["url"], "char_count": s["char_count"]}
             )
 
-        await self._store_refs(session_id, refs_to_add)
-
         # Append scrape results section to artifact
         section = f"\n\n## Step {step_index}: Scrape — {len(scraped)} URLs\n\n"
         for r in refs_added:
@@ -474,12 +658,8 @@ class SessionManager:
                 if s["url"] == url:
                     section += s["markdown"][:500] + "...\n\n"
                     break
-        await self._store_call(
-            "aappend_artifact", "append_artifact", session_id, section
-        )
-
         total_chars = sum(s["char_count"] for s in scraped)
-        return {
+        result = {
             "step_index": step_index,
             "action": "scrape",
             "ref_count": len(scraped),
@@ -489,6 +669,25 @@ class SessionManager:
             "failed": len(urls) - len(scraped),
             "summary": f"Scraped {len(scraped)}/{len(urls)} URLs, stored as refs {step_index}_1 through {step_index}_{len(scraped)}",
         }
+        if parallel_context is not None:
+            committed = await self._store_call(
+                "acommit_step",
+                "commit_step",
+                session_id,
+                parallel_context,
+                step_data,
+                refs_to_add,
+                section,
+                result,
+            )
+            if committed is None:
+                raise ValueError(f"Session {session_id} changed or was deleted")
+            return committed
+        await self._store_refs(session_id, refs_to_add)
+        await self._store_call(
+            "aappend_artifact", "append_artifact", session_id, section
+        )
+        return result
 
     async def _step_query(
         self,
