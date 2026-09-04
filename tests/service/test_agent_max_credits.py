@@ -328,18 +328,6 @@ class TestMaxCreditsGuardRemoval:
             "guard — the API model enforces ge=1, so drop the dead branch"
         )
 
-    @pytest.mark.asyncio
-    async def test_budget_spent_check_uses_counted_sources_only(self):
-        """budget_spent compares consumed sources to the budget directly."""
-        import inspect
-
-        from agent.research import loop
-
-        source = inspect.getsource(loop._run_research_events)
-        assert "len(all_source_details) >= max_credits" in source, (
-            f"budget_spent must keep the sources-consumed comparison:\n{source}"
-        )
-
 
 class TestRunResearchBudgetExhaustion:
     """An exhausted credit budget skips pass-2 discovery and re-synthesis."""

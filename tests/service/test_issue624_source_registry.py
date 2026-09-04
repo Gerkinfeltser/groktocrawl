@@ -275,7 +275,7 @@ async def test_two_pass_partial_overlap_fetches_only_novel_source():
         )
 
     assert len(scraper.calls) == 4
-    assert llm.generate.await_count == 2
+    assert llm.generate.await_count == 1
     assert len(result["sources"]) == 4
     assert result["sources"].count("https://new.example/page") == 1
 
@@ -313,7 +313,7 @@ async def test_two_pass_failed_first_acquisition_retries_without_duplicate_sourc
 
     assert attempts["source0"] == 2
     assert len(scraper.calls) == 4
-    assert llm.generate.await_count == 2
+    assert llm.generate.await_count == 1
     assert len(result["sources"]) == 3
 
 

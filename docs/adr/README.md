@@ -83,4 +83,6 @@ An Architecture Decision Record captures an important architectural decision mad
 | 0056 | [Twin CI Evidence and Trusted Calibration](0056-twin-ci-evidence-and-calibration.md) | accepted |
 | 0057 | [Defer Recurring Mutation-Testing CI (Pilot Outcome)](0057-defer-recurring-mutation-testing-ci.md) | accepted |
 | 0059 | [Extend Source Artifact Reuse Across Research Passes](0059-extend-source-artifact-reuse-across-research-passes.md) | accepted |
+| 0064 | [One Final Research Synthesis](0064-one-final-research-synthesis.md) | accepted |
+
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full ADR workflow: when to write an ADR, how to number it, and how to get it reviewed in a PR.

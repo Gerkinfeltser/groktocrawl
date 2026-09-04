@@ -211,10 +211,7 @@ async def _run_research_events(
             credits_used += discovered.get("credits_used", len(novel_artifacts))
             combined_context = context
 
-            # Gap search can rediscover every source from pass one. The
-            # request-scoped registry makes that a no-op: preserve the first
-            # synthesis and its stream/schema semantics when evidence and
-            # context are unchanged.
+            # A duplicate-only gap pass leaves the final evidence unchanged.
             if pass_count > 1 and context == previous_context:
                 break
 
@@ -229,77 +226,10 @@ async def _run_research_events(
                 }
                 return
 
-            yield {"type": "status", "state": "synthesizing"}
-            if schema or not stream_tokens:
-                try:
-                    answer = await llm.generate(
-                        system_prompt=SYSTEM_PROMPT,
-                        user_prompt=prompt,
-                        context=combined_context,
-                        schema=schema,
-                        stage="synthesis",
-                    )
-                except RetryableRateLimitError as exc:
-                    if stream_tokens:
-                        yield {
-                            "type": "error",
-                            "classification": "retryable",
-                            "retry_after_seconds": exc.retry_after_seconds,
-                            "content": exc.detail,
-                        }
-                        return
-                    raise
-                except ProviderOutputError as exc:
-                    if stream_tokens:
-                        yield {
-                            "type": "error",
-                            "classification": "non_retryable",
-                            "content": exc.detail,
-                        }
-                        return
-                    raise
-                try:
-                    _validate_json_if_schema(answer, schema)
-                except StructuredOutputError as exc:
-                    if stream_tokens:
-                        yield {
-                            "type": "error",
-                            "classification": "non_retryable",
-                            "content": exc.detail,
-                        }
-                        return
-                    raise
-                if not schema and not stream_tokens:
-                    yield {
-                        "type": "sources",
-                        "sources": [s["url"] for s in all_source_details],
-                    }
-            else:
-                yield {
-                    "type": "sources",
-                    "sources": [s["url"] for s in all_source_details],
-                }
-                answer = ""
-                async for event in llm.generate_stream(
-                    system_prompt=SYSTEM_PROMPT,
-                    user_prompt=prompt,
-                    context=combined_context,
-                    stage="synthesis",
-                ):
-                    if event["type"] == "token":
-                        answer += event["content"]
-                        yield {"type": "token", "content": event["content"]}
-                    elif event["type"] == "error":
-                        yield _research_error_event(event)
-                        return
-                    elif event["type"] == "done":
-                        answer = event["full_content"]
-
-            # ── Gap detection after pass 1 ─────────────────────────
+            # Coverage depends only on evidence, so decide follow-up work
+            # before the one final synthesis in every response mode.
             if pass_count == 1:
-                # ``len(all_source_details) >= max_credits`` was the
-                # pre-registry approximation. Count only novel successful
-                # acquisitions so reuse remains free.
+                # Count novel successful acquisitions; reuse remains free.
                 budget_spent = max_credits is not None and credits_used >= max_credits
                 gap_topics = (
                     []
@@ -311,6 +241,72 @@ async def _run_research_events(
                 if not gap_topics:
                     break  # Coverage is adequate, done
                 max_passes = 2  # Enable second pass
+
+        yield {"type": "status", "state": "synthesizing"}
+        if schema or not stream_tokens:
+            try:
+                answer = await llm.generate(
+                    system_prompt=SYSTEM_PROMPT,
+                    user_prompt=prompt,
+                    context=combined_context,
+                    schema=schema,
+                    stage="synthesis",
+                )
+            except RetryableRateLimitError as exc:
+                if stream_tokens:
+                    yield {
+                        "type": "error",
+                        "classification": "retryable",
+                        "retry_after_seconds": exc.retry_after_seconds,
+                        "content": exc.detail,
+                    }
+                    return
+                raise
+            except ProviderOutputError as exc:
+                if stream_tokens:
+                    yield {
+                        "type": "error",
+                        "classification": "non_retryable",
+                        "content": exc.detail,
+                    }
+                    return
+                raise
+            try:
+                _validate_json_if_schema(answer, schema)
+            except StructuredOutputError as exc:
+                if stream_tokens:
+                    yield {
+                        "type": "error",
+                        "classification": "non_retryable",
+                        "content": exc.detail,
+                    }
+                    return
+                raise
+            if not schema and not stream_tokens:
+                yield {
+                    "type": "sources",
+                    "sources": [s["url"] for s in all_source_details],
+                }
+        else:
+            yield {
+                "type": "sources",
+                "sources": [s["url"] for s in all_source_details],
+            }
+            answer = ""
+            async for event in llm.generate_stream(
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=prompt,
+                context=combined_context,
+                stage="synthesis",
+            ):
+                if event["type"] == "token":
+                    answer += event["content"]
+                    yield {"type": "token", "content": event["content"]}
+                elif event["type"] == "error":
+                    yield _research_error_event(event)
+                    return
+                elif event["type"] == "done":
+                    answer = event["full_content"]
 
         source_list = [source["url"] for source in all_source_details]
         if schema:
