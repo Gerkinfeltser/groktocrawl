@@ -1,0 +1,342 @@
+{
+  "fixture": "real Playwright BrowserPool with intercepted deterministic page",
+  "url": "https://browser-pool-concurrency-fixture.example/article",
+  "pool_counts": [
+    1,
+    2,
+    4
+  ],
+  "session_counts": [
+    1,
+    8
+  ],
+  "results": [
+    {
+      "pool_count": 1,
+      "session_count": 1,
+      "pages_per_session": 3,
+      "max_contexts_per_session": 3,
+      "total_pages": 3,
+      "elapsed_seconds": 2.885808,
+      "throughput_pages_per_second": 1.03957,
+      "session_latency": {
+        "p50_seconds": 2.447902,
+        "p95_seconds": 2.447902,
+        "samples": [
+          2.447902
+        ]
+      },
+      "context_acquire_wait": {
+        "p50_seconds": 0.855396,
+        "p95_seconds": 0.875361,
+        "samples": [
+          0.87758,
+          0.855052,
+          0.855396
+        ]
+      },
+      "identical_content": true,
+      "per_pool_distribution": {
+        "0": 1
+      },
+      "pool_process_counts_after_cleanup": [
+        0
+      ],
+      "resources": {
+        "peak_descendant_pids": 11,
+        "peak_descendant_rss_mb": 941.34,
+        "peak_descendant_cpu_percent": 163.6
+      }
+    },
+    {
+      "pool_count": 1,
+      "session_count": 8,
+      "pages_per_session": 3,
+      "max_contexts_per_session": 3,
+      "total_pages": 24,
+      "elapsed_seconds": 4.839487,
+      "throughput_pages_per_second": 4.959204,
+      "session_latency": {
+        "p50_seconds": 4.32932,
+        "p95_seconds": 4.385564,
+        "samples": [
+          4.194275,
+          4.207785,
+          4.277107,
+          4.327496,
+          4.331143,
+          4.335898,
+          4.344065,
+          4.407909
+        ]
+      },
+      "context_acquire_wait": {
+        "p50_seconds": 0.416862,
+        "p95_seconds": 0.421256,
+        "samples": [
+          0.411401,
+          0.412453,
+          0.413335,
+          0.414019,
+          0.414527,
+          0.414915,
+          0.415209,
+          0.415486,
+          0.415793,
+          0.416112,
+          0.416469,
+          0.416737,
+          0.416987,
+          0.417242,
+          0.41839,
+          0.418661,
+          0.418916,
+          0.419211,
+          0.419875,
+          0.420269,
+          0.420635,
+          0.420913,
+          0.421317,
+          0.421781
+        ]
+      },
+      "identical_content": true,
+      "per_pool_distribution": {
+        "0": 8
+      },
+      "pool_process_counts_after_cleanup": [
+        0
+      ],
+      "resources": {
+        "peak_descendant_pids": 52,
+        "peak_descendant_rss_mb": 3879.83,
+        "peak_descendant_cpu_percent": 753.6
+      }
+    },
+    {
+      "pool_count": 2,
+      "session_count": 1,
+      "pages_per_session": 3,
+      "max_contexts_per_session": 3,
+      "total_pages": 3,
+      "elapsed_seconds": 2.212179,
+      "throughput_pages_per_second": 1.356129,
+      "session_latency": {
+        "p50_seconds": 1.732763,
+        "p95_seconds": 1.732763,
+        "samples": [
+          1.732763
+        ]
+      },
+      "context_acquire_wait": {
+        "p50_seconds": 0.337067,
+        "p95_seconds": 0.337335,
+        "samples": [
+          0.336728,
+          0.337067,
+          0.337365
+        ]
+      },
+      "identical_content": true,
+      "per_pool_distribution": {
+        "0": 1,
+        "1": 0
+      },
+      "pool_process_counts_after_cleanup": [
+        0,
+        0
+      ],
+      "resources": {
+        "peak_descendant_pids": 11,
+        "peak_descendant_rss_mb": 1002.06,
+        "peak_descendant_cpu_percent": 144.5
+      }
+    },
+    {
+      "pool_count": 2,
+      "session_count": 8,
+      "pages_per_session": 3,
+      "max_contexts_per_session": 3,
+      "total_pages": 24,
+      "elapsed_seconds": 4.211145,
+      "throughput_pages_per_second": 5.699163,
+      "session_latency": {
+        "p50_seconds": 4.031922,
+        "p95_seconds": 4.092893,
+        "samples": [
+          4.021073,
+          3.949951,
+          3.985825,
+          4.0831,
+          3.988522,
+          4.093047,
+          4.042771,
+          4.092606
+        ]
+      },
+      "context_acquire_wait": {
+        "p50_seconds": 0.448055,
+        "p95_seconds": 0.463778,
+        "samples": [
+          0.455918,
+          0.457242,
+          0.457855,
+          0.426548,
+          0.428002,
+          0.431344,
+          0.458376,
+          0.458816,
+          0.459379,
+          0.432155,
+          0.43299,
+          0.433898,
+          0.462286,
+          0.462764,
+          0.463124,
+          0.43579,
+          0.43662,
+          0.437639,
+          0.463442,
+          0.463838,
+          0.464405,
+          0.438573,
+          0.439298,
+          0.440191
+        ]
+      },
+      "identical_content": true,
+      "per_pool_distribution": {
+        "0": 4,
+        "1": 4
+      },
+      "pool_process_counts_after_cleanup": [
+        0,
+        0
+      ],
+      "resources": {
+        "peak_descendant_pids": 56,
+        "peak_descendant_rss_mb": 4105.22,
+        "peak_descendant_cpu_percent": 569.8
+      }
+    },
+    {
+      "pool_count": 4,
+      "session_count": 1,
+      "pages_per_session": 3,
+      "max_contexts_per_session": 3,
+      "total_pages": 3,
+      "elapsed_seconds": 2.097838,
+      "throughput_pages_per_second": 1.430044,
+      "session_latency": {
+        "p50_seconds": 2.019329,
+        "p95_seconds": 2.019329,
+        "samples": [
+          2.019329
+        ]
+      },
+      "context_acquire_wait": {
+        "p50_seconds": 0.370351,
+        "p95_seconds": 0.371214,
+        "samples": [
+          0.369555,
+          0.370351,
+          0.37131
+        ]
+      },
+      "identical_content": true,
+      "per_pool_distribution": {
+        "0": 1,
+        "1": 0,
+        "2": 0,
+        "3": 0
+      },
+      "pool_process_counts_after_cleanup": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "resources": {
+        "peak_descendant_pids": 11,
+        "peak_descendant_rss_mb": 1036.98,
+        "peak_descendant_cpu_percent": 183.6
+      }
+    },
+    {
+      "pool_count": 4,
+      "session_count": 8,
+      "pages_per_session": 3,
+      "max_contexts_per_session": 3,
+      "total_pages": 24,
+      "elapsed_seconds": 4.15184,
+      "throughput_pages_per_second": 5.780569,
+      "session_latency": {
+        "p50_seconds": 3.91037,
+        "p95_seconds": 3.950592,
+        "samples": [
+          3.937114,
+          3.953772,
+          3.883626,
+          3.571194,
+          3.939571,
+          3.944686,
+          3.806204,
+          3.86592
+        ]
+      },
+      "context_acquire_wait": {
+        "p50_seconds": 0.652257,
+        "p95_seconds": 0.660479,
+        "samples": [
+          0.646316,
+          0.648131,
+          0.649799,
+          0.645763,
+          0.647993,
+          0.649678,
+          0.653891,
+          0.6571,
+          0.659223,
+          0.642253,
+          0.64715,
+          0.648361,
+          0.652054,
+          0.653176,
+          0.655757,
+          0.651735,
+          0.653062,
+          0.655594,
+          0.659837,
+          0.660592,
+          0.661074,
+          0.649941,
+          0.652461,
+          0.653387
+        ]
+      },
+      "identical_content": true,
+      "per_pool_distribution": {
+        "0": 2,
+        "1": 2,
+        "2": 2,
+        "3": 2
+      },
+      "pool_process_counts_after_cleanup": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "resources": {
+        "peak_descendant_pids": 61,
+        "peak_descendant_rss_mb": 4707.2,
+        "peak_descendant_cpu_percent": 662.1
+      }
+    }
+  ],
+  "limitations": [
+    "No origin network requests, Docker replicas, scraper HTTP server, research loop, or LLM models are involved.",
+    "Process RSS/PID/CPU values are best-effort descendant snapshots from ps and include the benchmark process tree.",
+    "The cases demonstrate bounded local pool behavior and are not an additive production capacity claim."
+  ]
+}
