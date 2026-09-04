@@ -1,6 +1,8 @@
 """Main research loops: run_research, run_research_stream, run_answer,
 run_answer_stream, run_extract."""
 
+import asyncio
+import contextlib
 import logging
 import re
 import time
@@ -39,6 +41,67 @@ from .sources import (
 from .utils import _validate_json_if_schema
 
 logger = logging.getLogger(__name__)
+
+
+async def _discover_with_progress(factory, initial_pending=None):
+    """Run discovery while forwarding search and acquisition events immediately."""
+    progress: asyncio.Queue[ResearchEvent] = asyncio.Queue()
+
+    async def on_artifact(artifact: SourceArtifact) -> None:
+        await progress.put(
+            {
+                "type": "source_scraped",
+                "url": artifact.url,
+                "source": artifact.source,
+                "chars": artifact.char_count,
+            }
+        )
+
+    async def on_search_results(results) -> None:
+        await progress.put(
+            {
+                "type": "sources_pending",
+                "sources": [
+                    {
+                        "url": result["url"],
+                        "title": result.get("title", ""),
+                        "relevance": result.get("description", ""),
+                    }
+                    for result in results
+                    if result.get("url")
+                ],
+            }
+        )
+
+    if initial_pending:
+        await progress.put({"type": "sources_pending", "sources": initial_pending})
+
+    task = asyncio.create_task(factory(on_artifact, on_search_results))
+    event_task: asyncio.Task | None = None
+    try:
+        while not task.done():
+            event_task = asyncio.create_task(progress.get())
+            done, _ = await asyncio.wait(
+                {task, event_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if event_task in done:
+                yield event_task.result()
+                event_task = None
+            else:
+                event_task.cancel()
+                await asyncio.gather(event_task, return_exceptions=True)
+                event_task = None
+        discovered = await task
+        while not progress.empty():
+            yield progress.get_nowait()
+        yield {"type": "_discovery_complete", "result": discovered}
+    finally:
+        if event_task is not None and not event_task.done():
+            event_task.cancel()
+            await asyncio.gather(event_task, return_exceptions=True)
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 def _research_error_event(event: dict[str, Any]) -> ResearchEvent:
@@ -126,76 +189,108 @@ async def _run_research_events(
             if pass_count == 1:
                 # ── Pass 1: normal discovery ──────────────────────
                 if strategy == "deep" and len(queries) > 1:
-                    discovered = await _run_multi_query_discover_and_scrape(
-                        queries=queries,
-                        urls=urls,
-                        searxng=searxng,
-                        scraper=scraper,
-                        max_searches_per_request=max_searches_per_request,
-                        scrape_options=scrape_opts,
-                        max_credits=max_credits,
-                        source_registry=source_registry,
-                        pass_number=pass_count,
-                    )
+
+                    async def discover_pass_one_multi(
+                        on_artifact,
+                        on_search_results,
+                        _queries=queries,
+                        _urls=urls,
+                        _pass_count=pass_count,
+                    ):
+                        return await _run_multi_query_discover_and_scrape(
+                            queries=_queries,
+                            urls=_urls,
+                            searxng=searxng,
+                            scraper=scraper,
+                            max_searches_per_request=max_searches_per_request,
+                            scrape_options=scrape_opts,
+                            max_credits=max_credits,
+                            source_registry=source_registry,
+                            pass_number=_pass_count,
+                            on_artifact=on_artifact,
+                            on_search_results=on_search_results,
+                        )
                 else:
                     query = queries[0] if queries else prompt
-                    discovered = await _run_research_discover_and_scrape(
-                        prompt=query,
-                        urls=urls,
-                        searxng=searxng,
-                        scraper=scraper,
-                        scrape_options=scrape_opts,
-                        max_credits=max_credits,
-                        source_registry=source_registry,
-                        pass_number=pass_count,
-                    )
+
+                    async def discover_pass_one_single(
+                        on_artifact,
+                        on_search_results,
+                        _query=query,
+                        _urls=urls,
+                        _pass_count=pass_count,
+                    ):
+                        return await _run_research_discover_and_scrape(
+                            prompt=_query,
+                            urls=_urls,
+                            searxng=searxng,
+                            scraper=scraper,
+                            scrape_options=scrape_opts,
+                            max_credits=max_credits,
+                            source_registry=source_registry,
+                            pass_number=_pass_count,
+                            on_artifact=on_artifact,
+                            on_search_results=on_search_results,
+                        )
             else:
                 # ── Pass 2: gap-focused discovery ─────────────────
-                discovered = await _run_multi_query_discover_and_scrape(
-                    queries=gap_topics,
-                    urls=None,
-                    searxng=searxng,
-                    scraper=scraper,
-                    max_searches_per_request=min(
-                        len(gap_topics), max_searches_per_request
-                    ),
-                    scrape_options=scrape_opts,
-                    max_credits=(
-                        max_credits - credits_used if max_credits is not None else None
-                    ),
-                    source_registry=source_registry,
-                    pass_number=pass_count,
+                async def discover_pass_two(
+                    on_artifact,
+                    on_search_results,
+                    _gap_topics=gap_topics,
+                    _pass_count=pass_count,
+                    _credits_used=credits_used,
+                ):
+                    return await _run_multi_query_discover_and_scrape(
+                        queries=_gap_topics,
+                        urls=None,
+                        searxng=searxng,
+                        scraper=scraper,
+                        max_searches_per_request=min(
+                            len(_gap_topics), max_searches_per_request
+                        ),
+                        scrape_options=scrape_opts,
+                        max_credits=(
+                            max_credits - _credits_used
+                            if max_credits is not None
+                            else None
+                        ),
+                        source_registry=source_registry,
+                        pass_number=_pass_count,
+                        on_artifact=on_artifact,
+                        on_search_results=on_search_results,
+                    )
+
+            discovery_factory = (
+                discover_pass_two
+                if pass_count > 1
+                else (
+                    discover_pass_one_multi
+                    if strategy == "deep" and len(queries) > 1
+                    else discover_pass_one_single
                 )
+            )
+            discovered = None
+            initial_pending = (
+                [{"url": url, "title": "", "relevance": ""} for url in urls]
+                if urls and pass_count == 1
+                else None
+            )
+            async with contextlib.aclosing(
+                _discover_with_progress(discovery_factory, initial_pending)
+            ) as discovery_events:
+                async for progress_event in discovery_events:
+                    if progress_event["type"] == "_discovery_complete":
+                        discovered = progress_event["result"]
+                    else:
+                        yield progress_event
+            if discovered is None:
+                raise RuntimeError("Discovery ended without a result")
 
             context = discovered["context"]
             source_details = discovered["source_details"]
             novel_artifacts = discovered.get("new_artifacts", [])
             previous_context = combined_context
-            search_results = discovered["search_results"]
-            pending_sources = (
-                [
-                    {
-                        "url": result["url"],
-                        "title": result.get("title", ""),
-                        "relevance": result.get("description", ""),
-                    }
-                    for result in search_results
-                    if result.get("url")
-                ]
-                if not urls
-                else [{"url": url, "title": "", "relevance": ""} for url in urls]
-            )
-            yield {"type": "sources_pending", "sources": pending_sources}
-            # A registry hit is already known to the client. Emit progress
-            # only for newly acquired artifacts so a duplicate-only pass does
-            # not replay scrape events for the same source.
-            for artifact in novel_artifacts:
-                yield {
-                    "type": "source_scraped",
-                    "url": artifact.url,
-                    "source": artifact.source,
-                    "chars": artifact.char_count,
-                }
             if not context and not combined_context:
                 yield {"type": "sources", "sources": []}
                 yield {
@@ -347,36 +442,39 @@ async def run_research(
     search_type: str = "deep",
 ) -> dict:
     """Consume the canonical research event stream and return its terminal result."""
-    async for event in _run_research_events(
-        prompt,
-        urls,
-        schema,
-        searxng_url,
-        scraper_url,
-        llm_base_url,
-        llm_api_key,
-        llm_model,
-        requested_model,
-        max_searches_per_request,
-        max_credits,
-        include_images,
-        citation_style,
-        search_type,
-    ):
-        if event["type"] == "done":
-            result = event["result"]
-            if not event["sources"] and result == (
-                "I was unable to find or scrape any relevant web pages."
-            ):
-                result = (
-                    "I was unable to find or scrape any relevant web pages "
-                    "to answer your question."
-                )
-            return {
-                "result": result,
-                "sources": event["sources"],
-                "source_details": event["source_details"],
-            }
+    async with contextlib.aclosing(
+        _run_research_events(
+            prompt,
+            urls,
+            schema,
+            searxng_url,
+            scraper_url,
+            llm_base_url,
+            llm_api_key,
+            llm_model,
+            requested_model,
+            max_searches_per_request,
+            max_credits,
+            include_images,
+            citation_style,
+            search_type,
+        )
+    ) as research_events:
+        async for event in research_events:
+            if event["type"] == "done":
+                result = event["result"]
+                if not event["sources"] and result == (
+                    "I was unable to find or scrape any relevant web pages."
+                ):
+                    result = (
+                        "I was unable to find or scrape any relevant web pages "
+                        "to answer your question."
+                    )
+                return {
+                    "result": result,
+                    "sources": event["sources"],
+                    "source_details": event["source_details"],
+                }
     raise RuntimeError("Research event engine ended without a terminal done event")
 
 
@@ -397,24 +495,27 @@ async def run_research_stream(
     search_type: str = "deep",
 ) -> AsyncGenerator[ResearchEvent, None]:
     """Expose events from the canonical research engine for SSE adaptation."""
-    async for event in _run_research_events(
-        prompt,
-        urls,
-        schema,
-        searxng_url,
-        scraper_url,
-        llm_base_url,
-        llm_api_key,
-        llm_model,
-        requested_model,
-        max_searches_per_request,
-        max_credits,
-        include_images,
-        citation_style,
-        search_type,
-        stream_tokens=True,
-    ):
-        yield event
+    async with contextlib.aclosing(
+        _run_research_events(
+            prompt,
+            urls,
+            schema,
+            searxng_url,
+            scraper_url,
+            llm_base_url,
+            llm_api_key,
+            llm_model,
+            requested_model,
+            max_searches_per_request,
+            max_credits,
+            include_images,
+            citation_style,
+            search_type,
+            stream_tokens=True,
+        )
+    ) as research_events:
+        async for event in research_events:
+            yield event
 
 
 async def run_extract(
