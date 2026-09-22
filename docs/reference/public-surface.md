@@ -145,6 +145,7 @@ The configuration inventory follows `.env.sample`; unlisted implementation-only 
 - CRAWL_MAX_DURATION_SECONDS
 - EMBED_DIM
 - EMBED_MODEL_NAME
+- ENGINE_SEMANTICSCHOLAR_API_KEY
 - FLARE_SOLVERR_URL
 - GITHUB_TOKEN
 - GROKTOCRAWL_API_KEY
